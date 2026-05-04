@@ -1,0 +1,113 @@
+version: HydroDA-OOD 区域划分 V1.0
+main_regions_per_country: 6
+
+regime_slots:
+  R1: dryland_sparse_vegetation
+  R2: semi_arid_transition
+  R3: irrigated_managed_agriculture
+  R4: rainfed_agriculture
+  R5: humid_high_vegetation
+  R6: mountain_cold_terrain_stress
+
+countries:
+  US:
+    data_status_cn: 已有数据
+    regions:
+      - id: US-R1
+        slot: R1
+        regime: dryland_sparse_vegetation
+        name_cn: 美国西南干旱区 / Four Corners
+        bbox_latlon: [32.0, 37.0, -116.0, -109.0]
+      - id: US-R2
+        slot: R2
+        regime: semi_arid_transition
+        name_cn: 美国南部大平原半干旱草地/农牧过渡区
+        bbox_latlon: [33.0, 38.0, -103.0, -96.0]
+      - id: US-R3
+        slot: R3
+        regime: irrigated_managed_agriculture
+        name_cn: 加州中央谷地灌溉农业区
+        bbox_latlon: [35.0, 39.0, -122.0, -119.0]
+      - id: US-R4
+        slot: R4
+        regime: rainfed_agriculture
+        name_cn: 美国玉米带雨养农业区
+        bbox_latlon: [39.0, 43.5, -94.0, -86.0]
+      - id: US-R5
+        slot: R5
+        regime: humid_high_vegetation
+        name_cn: 美国东南部湿润高植被区
+        bbox_latlon: [31.0, 36.0, -90.0, -82.0]
+      - id: US-R6
+        slot: R6
+        regime: mountain_cold_terrain_stress
+        name_cn: 美国中部落基山地形/冷区 stress 区
+        bbox_latlon: [38.0, 44.0, -111.0, -104.0]
+
+  CN:
+    data_status_cn: 等待数据
+    regions:
+      - id: CN-R1
+        slot: R1
+        regime: dryland_sparse_vegetation
+        name_cn: 新疆盆地 / 戈壁边缘干旱区
+        bbox_latlon: [40.0, 45.0, 82.0, 94.0]
+      - id: CN-R2
+        slot: R2
+        regime: semi_arid_transition
+        name_cn: 内蒙古农牧过渡带
+        bbox_latlon: [40.0, 46.0, 108.0, 119.0]
+      - id: CN-R3
+        slot: R3
+        regime: irrigated_managed_agriculture
+        name_cn: 华北平原强管理农业区
+        bbox_latlon: [34.0, 40.0, 114.0, 120.0]
+      - id: CN-R4
+        slot: R4
+        regime: rainfed_agriculture
+        name_cn: 东北平原雨养农业区
+        bbox_latlon: [43.0, 48.0, 123.0, 130.0]
+      - id: CN-R5
+        slot: R5
+        regime: humid_high_vegetation
+        name_cn: 中国南方季风湿润高植被区
+        bbox_latlon: [22.0, 27.0, 106.0, 118.0]
+      - id: CN-R6
+        slot: R6
+        regime: mountain_cold_terrain_stress
+        name_cn: 青藏高原东缘 / 上游长江冷区地形 stress 区
+        bbox_latlon: [29.0, 35.0, 94.0, 104.0]
+
+  AU:
+    data_status_cn: 等待数据
+    regions:
+      - id: AU-R1
+        slot: R1
+        regime: dryland_sparse_vegetation
+        name_cn: 澳大利亚中部沙漠干旱区
+        bbox_latlon: [-27.0, -21.0, 129.0, 137.0]
+      - id: AU-R2
+        slot: R2
+        regime: semi_arid_transition
+        name_cn: 澳大利亚内陆半干旱牧场/过渡区
+        bbox_latlon: [-33.0, -27.0, 138.0, 147.0]
+      - id: AU-R3
+        slot: R3
+        regime: irrigated_managed_agriculture
+        name_cn: Murray-Darling Basin 灌溉农业区
+        bbox_latlon: [-36.0, -32.0, 143.0, 149.0]
+      - id: AU-R4
+        slot: R4
+        regime: rainfed_agriculture
+        name_cn: 西南澳 Wheatbelt 雨养农业区
+        bbox_latlon: [-34.0, -29.0, 116.0, 121.0]
+      - id: AU-R5
+        slot: R5
+        regime: humid_high_vegetation
+        name_cn: 昆士兰湿热高植被区 / Wet Tropics
+        bbox_latlon: [-19.0, -15.0, 144.0, 147.0]
+      - id: AU-R6
+        slot: R6
+        regime: mountain_cold_terrain_stress
+        name_cn: Australian Alps / SE Highlands 冷区地形 stress 区
+        bbox_latlon: [-38.0, -35.0, 145.0, 149.0]

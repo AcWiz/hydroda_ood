@@ -1,0 +1,44 @@
+version: K-date Few-Cycle Calibration V1.0
+
+K_values: [0, 4, 12, 24]
+support_year: 2021
+query_years: [2022, 2023, 2024, 2025]
+source_train_years: [2015, 2016, 2017, 2018, 2019, 2020]
+
+definitions_cn:
+  K: 目标区域可用的 DA analysis dates/cycles 数量
+  not_K: 不是 patch 数，也不是 pixel 数
+
+selection:
+  K0:
+    target_analysis_labels_allowed: false
+    target_input_only_allowed: true
+  K4:
+    northern_hemisphere_bins:
+      - [1, 2, 3]
+      - [4, 5, 6]
+      - [7, 8, 9]
+      - [10, 11, 12]
+    southern_hemisphere_bins:
+      - [7, 8, 9]
+      - [10, 11, 12]
+      - [1, 2, 3]
+      - [4, 5, 6]
+    dates_per_bin: 1
+  K12:
+    dates_per_month: 1
+  K24:
+    dates_per_month_half:
+      first_half_days: [1, 15]
+      second_half_days: [16, 31]
+    dates_per_half_month: 1
+
+seeds:
+  minimum: 5
+  preferred: 10
+
+rules_cn:
+  same_support_dates_across_methods: 同一 region/K/seed 下所有方法必须使用相同 support dates
+  no_query_labels_for_support_selection: 不允许用 query labels 选择 support
+  fail_if_not_enough_valid_dates: support dates 不足时必须报错
+  log_effective_support_budget: 必须记录 K dates × patches/date × valid pixels

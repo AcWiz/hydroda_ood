@@ -1,0 +1,65 @@
+project:
+  name: HydroDA-OOD
+  task_cn: DA analysis-increment emulation，即 DA 分析增量仿真
+  current_data:
+    US: /fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc
+  future_data:
+    CN: 待提供
+    AU: 待提供
+
+variables:
+  inputs:
+    - name: sm_surface_forecast
+      role_cn: 表层土壤湿度 forecast
+      required: true
+    - name: sm_rootzone_forecast
+      role_cn: 根区土壤湿度 forecast
+      required: true
+    - name: mwrtm_vegopacity
+      role_cn: 微波植被光学厚度 / 植被 opacity
+      required: true
+    - name: tb_h_obs
+      role_cn: H 极化亮温观测
+      required: true
+    - name: tb_v_obs
+      role_cn: V 极化亮温观测
+      required: true
+    - name: mask
+      role_cn: 观测或有效性 mask
+      required: true
+  targets:
+    - name: sm_surface_analysis
+      role_cn: 表层土壤湿度 DA analysis
+      required: true
+    - name: sm_rootzone_analysis
+      role_cn: 根区土壤湿度 DA analysis
+      required: true
+
+derived_targets:
+  - name: increment_surface
+    formula: sm_surface_analysis - sm_surface_forecast
+  - name: increment_rootzone
+    formula: sm_rootzone_analysis - sm_rootzone_forecast
+
+time_protocol:
+  source_train:
+    start: "2015-01-01"
+    end: "2020-12-31"
+  target_support:
+    start: "2021-01-01"
+    end: "2021-12-31"
+  target_query:
+    start: "2022-01-01"
+    end: "2025-12-31"
+
+normalization:
+  forbidden_sources:
+    - target_query_labels
+    - target_query_distribution
+  preferred_source_cn: 只使用 source_train 统计量
+  allow_target_input_only_for_k0_descriptors: true
+
+padding:
+  multiple_of: 32
+  padded_input_value_after_norm: 0.0
+  padded_loss_mask: 0

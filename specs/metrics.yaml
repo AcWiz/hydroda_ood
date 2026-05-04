@@ -1,0 +1,41 @@
+primary:
+  - skill_vs_forecast_surface
+  - skill_vs_forecast_rootzone
+
+increment_metrics:
+  - increment_rmse_surface
+  - increment_rmse_rootzone
+  - increment_mae_surface
+  - increment_mae_rootzone
+  - increment_correlation_surface
+  - increment_correlation_rootzone
+  - sign_accuracy_deadzone_surface
+  - sign_accuracy_deadzone_rootzone
+  - top20_increment_skill_surface
+  - top20_increment_skill_rootzone
+
+few_cycle_metrics:
+  - adaptation_gain
+  - auc_k
+  - ce12
+
+aggregation:
+  primary_cn: region-balanced
+  secondary_cn: pixel-balanced
+  confidence_interval: 95
+  ci_axes:
+    - region
+    - support_seed
+
+deadzone:
+  epsilon_strategy_cn: query nonzero |true_increment| 的 percentile
+  percentile: 20
+
+top20:
+  mask_source_cn: query true increment
+  evaluation_only: true
+  percentile: 80
+
+sanity_checks:
+  forecast_skill_must_equal_zero: true
+  no_query_label_usage: true

@@ -1,0 +1,44 @@
+required_baselines:
+  - id: forecast
+    name_cn: Forecast-only
+    uses_target_support_labels: false
+    description_cn: 零增量 baseline
+  - id: source_mean_increment
+    name_cn: Global source mean increment
+    uses_target_support_labels: false
+    description_cn: 使用 source train regions 的平均 increment
+  - id: target_support_mean_increment
+    name_cn: Target support mean increment
+    uses_target_support_labels: true
+    allowed_K: [4, 12, 24]
+  - id: target_monthly_increment
+    name_cn: Target monthly support mean increment
+    uses_target_support_labels: true
+    allowed_K: [12, 24]
+  - id: ridge
+    name_cn: Ridge calibration
+    uses_target_support_labels: true
+    allowed_K: [4, 12, 24]
+  - id: small_unet
+    name_cn: Small CNN/UNet DA operator
+    uses_target_support_labels: optional
+  - id: pooled_sformer
+    name_cn: 合作方 Sformer pooled baseline
+    uses_target_support_labels: optional
+
+adaptation_baselines:
+  - full_finetune
+  - head_tuning
+  - bias_only
+  - adabn
+  - adapter
+  - lora
+  - region_latent
+  - gradient_topk_block
+  - fisa
+  - hisa_optional
+
+proposed_methods:
+  - hyrao_meta
+  - hyrao_meta_fisa
+  - hyrao_meta_hisa_optional

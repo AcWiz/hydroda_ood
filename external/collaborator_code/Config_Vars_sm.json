@@ -1,0 +1,24 @@
+{
+  "input_variables": [
+    {"name": "windspeed_lowatmmodlay", "mean": 5.512597, "std": 2.9025302, "include": true},
+    {"name": "precipitation_total_surface_flux", "mean": 1.256179e-05, "std": 0.00017290862, "include": true},
+    {"name": "temp_lowatmmodlay", "mean": 285, "std": 10, "include": true},
+    {"name": "specific_humidity_lowatmmodlay", "mean": 0.004552208, "std": 0.0028845386, "include": true},
+    {"name": "surface_pressure", "mean": 79716.62, "std": 4729.2383, "include": true},
+    {"name": "radiation_shortwave_downward_flux", "mean": 235.67114, "std": 303.05682, "include": true},
+    {"name": "radiation_longwave_absorbed_flux", "mean": 264.5978, "std": 51.637115, "include": true},
+    {"name": "sm_surface_forecast", "mean": 0.13334474, "std": 0.06109628, "include": true},
+    {"name": "sm_rootzone_forecast", "mean": 0.18498646, "std": 0.056409765, "include": true},
+    {"name": "soil_temp_layer1_forecast", "mean": 284.4739, "std": 9.821837, "include": false},
+    {"name": "surface_temp_forecast", "mean": 284.2508, "std": 12.2772665, "include": false},
+    {"name": "mask", "mean": 0, "std": 1, "include": true}
+  ],
+  "target_variables": [
+    {"name": "sm_surface_forecast", "mean": 0.13334474, "std": 0.06109628, "include": true},
+    {"name": "sm_rootzone_forecast", "mean": 0.18498646, "std": 0.056409765, "include": true},
+    {"name": "soil_temp_layer1_forecast", "mean": 285, "std": 10, "include": false},
+    {"name": "surface_temp_forecast", "mean": 285, "std": 10, "include": false},
+    {"name": "heat_flux_latent", "mean": 31.187826, "std": 41.93185, "include": false},
+    {"name": "heat_flux_sensible", "mean": 66.21313, "std": 132.90985, "include": false}
+  ]
+}

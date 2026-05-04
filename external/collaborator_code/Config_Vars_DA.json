@@ -1,0 +1,22 @@
+{
+  "input_variables": [
+    {"name": "sm_surface_forecast", "mean": 0.13334474, "std": 0.06109628, "include": true},
+    {"name": "sm_rootzone_forecast", "mean": 0.18498646, "std": 0.056409765, "include": true},
+    {"name": "soil_temp_layer1_forecast", "mean": 285, "std": 10, "include": false},
+    {"name": "surface_temp_forecast", "mean": 284.2508, "std": 12.2772665, "include": false},
+    {"name": "mwrtm_vegopacity", "mean": 0.1, "std": 0.1, "include": true},
+    {"name": "tb_h_obs", "mean": 253.6875, "std": 15.8172, "include": true},
+    {"name": "tb_v_obs", "mean": 276.8860, "std": 11.6384, "include": true},
+    {"name": "tb_h_obs_errstd", "mean": 0.0, "std": 0.0, "include": false},
+    {"name": "tb_v_obs_errstd", "mean": 0.0, "std": 0.0, "include": false},
+    {"name": "tb_h_obs_assim", "mean": 0.0, "std": 0.0, "include": false},
+    {"name": "tb_v_obs_assim", "mean": 0.0, "std": 0.0, "include": false},
+    {"name": "mask", "mean": 0, "std": 1, "include": true}
+  ],
+  "target_variables": [
+    {"name": "sm_surface_analysis", "mean": 0.13334474, "std": 0.06109628, "include": true},
+    {"name": "sm_rootzone_analysis", "mean": 0.18498646, "std": 0.056409765, "include": true},
+    {"name": "soil_temp_layer1_analysis", "mean": 285, "std": 10, "include": false},
+    {"name": "surface_temp_analysis", "mean": 285, "std": 10, "include": false}
+  ]
+}

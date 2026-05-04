@@ -1,0 +1,30 @@
+{
+    "model": {
+        "img_size": [256, 640],
+        "window_size": 8,
+        "patch_size": 4,
+        "num_vars": 6,
+        "embed_dim": 128,
+        "num_heads": 6,
+        "depths": [2, 2],
+        "mlp_ratio": 4,
+        "drop_path": 0.2,
+        "drop_rate": 0.2,
+        "attn_drop": 0.0,
+        "const_dir": "none"
+    },
+    "training": {
+        "train_data_path": "",
+        "val_data_path": "",
+        "batch_size": 10,
+        "num_epochs": 200,
+        "learning_rate": 5e-4,
+        "warmup_epochs": 15,
+        "min_lr": 5e-5,
+        "noise":[2,0.5],
+        "checkpoint_dir": "Checkpoints/Mix_precision",
+        "figure_dir": "Figure/Mix_Precision",
+        "cache_dir": "/root/autodl-tmp/Output/cache"
+
+    }
+}
