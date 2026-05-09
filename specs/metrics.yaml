@@ -1,41 +1,63 @@
-primary:
-  - skill_vs_forecast_surface
-  - skill_vs_forecast_rootzone
+schema_version: v2
+name: metrics
 
-increment_metrics:
-  - increment_rmse_surface
-  - increment_rmse_rootzone
-  - increment_mae_surface
-  - increment_mae_rootzone
-  - increment_correlation_surface
-  - increment_correlation_rootzone
-  - sign_accuracy_deadzone_surface
-  - sign_accuracy_deadzone_rootzone
-  - top20_increment_skill_surface
-  - top20_increment_skill_rootzone
+primary_metrics:
+  - id: analysis_skill
+    higher_is_better: true
+    formula: 1 - rmse(pred_analysis, analysis) / rmse(forecast, analysis)
+    report_for: [surface, rootzone]
+  - id: analysis_rmse
+    higher_is_better: false
+    report_for: [surface, rootzone]
+  - id: increment_rmse
+    higher_is_better: false
+    report_for: [surface, rootzone]
+  - id: increment_corr
+    higher_is_better: true
+    report_for: [surface, rootzone]
 
-few_cycle_metrics:
-  - adaptation_gain
-  - auc_k
-  - ce12
+secondary_metrics:
+  - id: increment_mae
+    higher_is_better: false
+  - id: increment_bias
+    higher_is_better: null
+  - id: sign_accuracy_deadzone
+    higher_is_better: true
+    params: {epsilon: 0.005}
+  - id: top20_increment_skill
+    higher_is_better: true
+    selection: top_20_percent_by_abs_true_increment_after_prediction
+  - id: adaptation_gain
+    higher_is_better: true
+    reference: source_only_K0
+  - id: CE12
+    higher_is_better: true
+    description: calibration efficiency from K=0 to K=12
+  - id: AUC_K
+    higher_is_better: true
+    K_values: [0, 4, 12, 24]
 
 aggregation:
-  primary_cn: region-balanced
-  secondary_cn: pixel-balanced
-  confidence_interval: 95
-  ci_axes:
+  main: region_balanced
+  appendix: pixel_weighted
+  dimensions_required:
+    - method
+    - country
     - region
-    - support_seed
+    - regime
+    - K
+    - seed
+    - variable
+    - metric
+    - value
 
-deadzone:
-  epsilon_strategy_cn: query nonzero |true_increment| 的 percentile
-  percentile: 20
+masking:
+  default_metric_mask: loss_mask
+  high_update_mask_allowed_only_for_evaluation: true
 
-top20:
-  mask_source_cn: query true increment
-  evaluation_only: true
-  percentile: 80
-
-sanity_checks:
-  forecast_skill_must_equal_zero: true
-  no_query_label_usage: true
+sanity_tests:
+  - forecast_baseline_pred_increment_zero
+  - pred_analysis_equals_forecast_plus_pred_increment
+  - perfect_prediction_has_skill_one
+  - forecast_prediction_has_skill_zero
+  - metric_ignores_loss_mask_false_pixels

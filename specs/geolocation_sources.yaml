@@ -1,0 +1,88 @@
+version: 0.1
+dataset: SMAP_US_DA
+primary_da_file: /fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc
+search_root: /fastersharefiles2/fenglonghan/dataset/SMAP
+expected_shape:
+  height: 256
+  width: 640
+priority_keywords:
+  - lat
+  - latitude
+  - lon
+  - longitude
+  - coord
+  - coords
+  - grid
+  - geolocation
+  - geo
+  - projection
+  - proj
+  - crs
+  - transform
+  - affine
+  - EASE
+  - SMAP
+  - domain
+  - mask
+  - land
+  - CONUS
+  - US
+  - usa
+  - north_america
+  - crop
+  - resample
+  - row
+  - col
+  - ij
+  - xy
+candidate_extensions:
+  - .nc
+  - .nc4
+  - .h5
+  - .hdf5
+  - .zarr
+  - .npy
+  - .npz
+  - .pkl
+  - .pickle
+  - .csv
+  - .txt
+  - .json
+  - .yaml
+  - .yml
+  - .mat
+  - .tif
+  - .tiff
+  - .vrt
+  - .shp
+  - .gpkg
+  - .parquet
+  - .feather
+  - .png
+  - .jpg
+  - .pdf
+  - .md
+  - .py
+  - .ipynb
+always_generate:
+  - artifacts/audits/smap_directory_manifest.json
+  - reports/audits/smap_directory_manifest.md
+  - artifacts/geolocation/geolocation_candidates_US.json
+  - reports/audits/geolocation_lookup_US.md
+success_artifacts:
+  latlon: artifacts/geolocation/US_latlon.nc
+  grid_mapping: artifacts/geolocation/US_grid_mapping.json
+mask_semantics:
+  input_channel_11: base_valid_mask
+  do_not_alias_as:
+    - obs_mask
+    - region_mask
+    - static_land_mask
+  phase1_usage:
+    - loss_mask
+    - metric_mask
+phase_gate:
+  scientific_regions_require:
+    - artifacts/geolocation/US_latlon.nc
+  development_grid_split_allowed_without_latlon: true
+  development_grid_split_label: development-only grid OOD split; not final hydroclimatic region split

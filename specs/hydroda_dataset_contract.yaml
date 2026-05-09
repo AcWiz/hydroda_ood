@@ -1,0 +1,186 @@
+schema_version: v2
+name: hydroda_dataset_contract
+purpose: Machine-readable contract reflecting actual DA.nc multi-channel array structure.
+
+known_data:
+  current_us_da_nc: /fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc
+  current_country: US
+  future_countries: [CN, AU]
+
+# =============================================================================
+# DATA STRUCTURE — actual multi-channel array (not independent named variables)
+# =============================================================================
+data_structure:
+  type: multi_channel_array  # NOT independent named variables; bundled channels
+  input_array: input
+  target_array: target
+  input_coords: variable_input  # 12 channel names as coord dimension
+  target_coords: variable_target  # 4 channel names as coord dimension
+  note: "DA.nc uses multi-channel arrays with channel index as coord; not CF conventions"
+
+input_channel_order:
+  0: sm_surface_forecast
+  1: sm_rootzone_forecast
+  2: soil_temp_layer1_forecast
+  3: surface_temp_forecast
+  4: mwrtm_vegopacity
+  5: tb_h_obs
+  6: tb_v_obs
+  7: tb_h_obs_errstd
+  8: tb_v_obs_errstd
+  9: tb_h_obs_assim
+  10: tb_v_obs_assim
+  11: base_valid_mask  # provisional name; dynamic binary mask per DA cycle
+
+target_channel_order:
+  0: sm_surface_analysis
+  1: sm_rootzone_analysis
+  2: soil_temp_layer1_analysis
+  3: surface_temp_analysis
+
+# =============================================================================
+# INCREMENT DEFINITION — analysis - forecast
+# =============================================================================
+increment_definition:
+  surface: sm_surface_analysis - sm_surface_forecast
+  rootzone: sm_rootzone_analysis - sm_rootzone_forecast
+
+# =============================================================================
+# SAMPLE CONTRACT — per-sample output structure
+# =============================================================================
+sample_contract:
+  x:
+    dtype: float32
+    shape: [12, H, W]  # 12 input channels
+  forecast:
+    dtype: float32
+    shape: [2, H, W]
+    order: [surface, rootzone]
+    units: raw
+  analysis:
+    dtype: float32
+    shape: [2, H, W]
+    order: [surface, rootzone]
+    units: raw
+  increment:
+    dtype: float32
+    shape: [2, H, W]
+    order: [surface, rootzone]
+    units: raw_or_normalized_with_metadata
+  base_valid_mask:
+    dtype: float32
+    shape: [1, H, W]
+    source: input_channel_11
+  loss_mask:
+    dtype: float32
+    shape: [1, H, W]
+    note: derived from base_valid_mask in Phase 1
+  region_mask:
+    dtype: float32
+    shape: [1, H, W]
+    note: external artifact from Phase 2 geolocation; NOT from input channel 11
+  obs_mask:
+    dtype: float32
+    shape: [1, H, W]
+    note: None unless independently recovered; NOT input channel 11
+  time_code:
+    dtype: float32
+    shape: [T]
+  date: str
+  year: int
+  month: int
+  day: int
+  country_id: str
+  region_id: str
+  regime_id: str
+  split_id: str
+  patch_id: str
+
+# =============================================================================
+# MASK SEMANTICS — channel 11 is base_valid_mask (PROVISIONAL)
+# =============================================================================
+mask_semantics:
+  base_valid_mask:
+    channel_index: 11
+    values: [0.0, 1.0]
+    is_dynamic: true  # ratio of 1s varies 0.6%-29.8% across time steps
+    provisional_semantic: "per-cycle assimilation activity / update coverage mask"
+    not_obs_mask_reason: "obs_mask would be static for same obs network; this varies per cycle"
+    not_region_mask_reason: "region_mask should be static per region definition; this varies per cycle"
+    not_loss_mask_reason: "loss_mask should combine finite+region+land_valid; this is just activity flag"
+    do_not_alias_as:
+      - obs_mask
+      - region_mask
+      - static_land_mask
+      - loss_mask
+    phase1_usage:
+      - loss_mask (initial, via base_valid_mask)
+      - metric_mask (initial, via base_valid_mask)
+    blocking_for_phase1: "Cannot definitively assign obs/region/loss semantics; base_valid_mask is interim name"
+
+# =============================================================================
+# SPATIAL COORDINATES — UNBLOCKED via Phase 0.6 directory-level lookup
+# =============================================================================
+spatial_coordinates:
+  status: recovered
+  lat_lon_available: true
+  grid_only: false
+  grid_height: 256
+  grid_width: 640
+  projection: equirectangular  # implicit via broadcasting; no map projection
+  blocking_issue: null  # resolved: america_lat.npy + america_lon.npy broadcasting
+  region_mask_blocked: false
+  resolution_note: "Unknown resolution; 256x640 does not match standard SMAP EASE-Grid sizes"
+  resolution_inference:
+    us_lat_range_deg: 26
+    us_lon_range_deg: 59
+    inferred_lat_resolution_km: 11.3  # approximate
+    inferred_lon_resolution_km: 11.3  # approximate
+    note: "Inconsistent with 9km or 25km EASE-Grid; unique resolution"
+  recovered_by: "Phase 0.6: directory-level lookup (Method 8) via america_lat.npy + america_lon.npy"
+  recovery_source: "/fastersharefiles2/fenglonghan/dataset/SMAP/america_lat.npy + america_lon.npy"
+  artifacts:
+    latlon_nc: artifacts/geolocation/US_latlon.nc
+    grid_mapping_json: artifacts/geolocation/US_grid_mapping.json
+  phase2_status: UNBLOCKED
+  development_split_allowed: true
+  development_split_label: "development-only grid OOD split; not final hydroclimatic region split"
+
+# =============================================================================
+# NORMALIZATION — zero leakage
+# =============================================================================
+normalization:
+  default_input_stats_source: source_train_only
+  default_increment_stats_source: source_train_only
+  forbidden_stats_sources:
+    - target_query_labels
+    - target_query_analysis
+    - target_query_increment
+    - analysis_increments
+    - model_errors
+
+audit_required_fields:
+  - dims
+  - coords
+  - data_vars
+  - time_range
+  - time_frequency
+  - missing_dates
+  - variable_shapes
+  - variable_dtypes
+  - channel_names_or_order
+  - nan_inf_counts
+  - mask_unique_values
+  - finite_overlap_forecast_analysis
+  - coordinate_availability
+  - estimated_memory_gb
+
+tests_required:
+  - test_sample_has_required_keys
+  - test_increment_reconstruction
+  - test_masks_are_distinct_keys
+  - test_loss_mask_subset_region_mask
+  - test_no_query_stats_in_normalization
+  - test_increment_definition_correct
+  - test_mask_semantics_are_provisional
+  - test_data_structure_is_multi_channel_array

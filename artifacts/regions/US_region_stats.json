@@ -1,0 +1,104 @@
+{
+  "US-R1": {
+    "region_name": "Southwest Desert / Four Corners",
+    "regime": "dryland_sparse_vegetation",
+    "pixel_count": 4292,
+    "fraction_of_grid": 0.026196,
+    "lat_min": 32.080291748046875,
+    "lat_max": 36.945281982421875,
+    "lon_min": -115.90767669677734,
+    "lon_max": -109.09232330322266,
+    "bbox_spec": {
+      "lat_min": 32,
+      "lat_max": 37,
+      "lon_min": -116,
+      "lon_max": -109
+    },
+    "quality_flag": "ok"
+  },
+  "US-R2": {
+    "region_name": "Southern Great Plains",
+    "regime": "semi_arid_transition",
+    "pixel_count": 4275,
+    "fraction_of_grid": 0.026093,
+    "lat_min": 33.08198165893555,
+    "lat_max": 37.918601989746094,
+    "lon_min": -102.93050384521484,
+    "lon_max": -96.02178955078125,
+    "bbox_spec": {
+      "lat_min": 33,
+      "lat_max": 38,
+      "lon_min": -103,
+      "lon_max": -96
+    },
+    "quality_flag": "ok"
+  },
+  "US-R3": {
+    "region_name": "California Central Valley",
+    "regime": "irrigated_managed_agriculture",
+    "pixel_count": 1472,
+    "fraction_of_grid": 0.008984,
+    "lat_min": 35.03415298461914,
+    "lat_max": 38.99507522583008,
+    "lon_min": -121.97614288330078,
+    "lon_max": -119.08195495605469,
+    "bbox_spec": {
+      "lat_min": 35,
+      "lat_max": 39,
+      "lon_min": -122,
+      "lon_max": -119
+    },
+    "quality_flag": "ok"
+  },
+  "US-R4": {
+    "region_name": "Corn Belt",
+    "regime": "rainfed_agriculture",
+    "pixel_count": 4128,
+    "fraction_of_grid": 0.025195,
+    "lat_min": 39.08550262451172,
+    "lat_max": 43.477134704589844,
+    "lon_min": -93.96784210205078,
+    "lon_max": -86.03215789794922,
+    "bbox_spec": {
+      "lat_min": 39,
+      "lat_max": 43.5,
+      "lon_min": -94,
+      "lon_max": -86
+    },
+    "quality_flag": "ok"
+  },
+  "US-R5": {
+    "region_name": "Southeast US",
+    "regime": "humid_high_vegetation",
+    "pixel_count": 5160,
+    "fraction_of_grid": 0.031494,
+    "lat_min": 31.007129669189453,
+    "lat_max": 35.984031677246094,
+    "lon_min": -89.95332336425781,
+    "lon_max": -82.01763916015625,
+    "bbox_spec": {
+      "lat_min": 31,
+      "lat_max": 36,
+      "lon_min": -90,
+      "lon_max": -82
+    },
+    "quality_flag": "ok"
+  },
+  "US-R6": {
+    "region_name": "Central Rockies",
+    "regime": "mountain_cold_terrain_stress",
+    "pixel_count": 4875,
+    "fraction_of_grid": 0.029755,
+    "lat_min": 38.00770950317383,
+    "lat_max": 43.96251678466797,
+    "lon_min": -110.95954895019531,
+    "lon_max": -104.05083465576172,
+    "bbox_spec": {
+      "lat_min": 38,
+      "lat_max": 44,
+      "lon_min": -111,
+      "lon_max": -104
+    },
+    "quality_flag": "ok"
+  }
+}

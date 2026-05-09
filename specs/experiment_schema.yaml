@@ -1,0 +1,54 @@
+schema_version: v2
+name: experiment_schema
+
+required_fields:
+  experiment_id: str
+  benchmark_id: str
+  phase: int
+  method_id: str
+  country_id: str
+  target_region_id: str
+  source_region_ids: list
+  K: int
+  seed: int
+  split_manifest_path: str
+  data_config_path: str
+  region_config_path: str
+  metric_config_path: str
+  output_dir: str
+  created_utc: str
+
+allowed_benchmark_ids:
+  - hydroda_ood_us_v1
+  - hydroda_ood_full_v1
+  - same_regime_transfer_v1
+
+status_values:
+  - planned
+  - implemented
+  - smoke_tested
+  - full_run
+  - validated
+  - paper_ready
+  - blocked
+
+required_outputs_by_phase:
+  phase0:
+    - reports/audits/netcdf_audit_{country}.md
+    - artifacts/audits/netcdf_audit_{country}.json
+  phase1:
+    - tests/test_dataset_contract.py
+  phase2:
+    - artifacts/regions/{country}/region_quality.csv
+    - artifacts/splits/**/K{K}_seed{seed}.json
+  phase3:
+    - artifacts/metrics/{experiment_id}/metrics_long.csv
+    - reports/experiments/{experiment_id}.md
+  phase4:
+    - checkpoints/{experiment_id}/
+    - artifacts/metrics/{experiment_id}/metrics_long.csv
+  phase5:
+    - artifacts/adaptation/{experiment_id}/adaptation_log.json
+  phase6:
+    - reports/tables/
+    - reports/figures/

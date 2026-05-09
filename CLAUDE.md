@@ -1,280 +1,180 @@
-# CLAUDE.md — HydroDA-OOD 中文可执行上下文
+# CLAUDE.md — HydroDA-OOD Executable Context System v2.2
 
-你正在参与 HydroDA-OOD 项目。这是一个面向 ICLR / NeurIPS / ICML / AISTATS / JMLR / Scientific ML 顶级会议的研究代码库。请把这个仓库当作论文级实验系统，而不是普通脚本项目。
+你正在参与 `hydroda_ood`。请把本仓库当成**论文级 Scientific ML 实验系统**，而不是一次性脚本项目。
 
-## 一、项目使命
+本项目目标：构建并验证 `HydroDA-OOD`，用于研究 **cross-region / cross-continent neural land data assimilation analysis-increment emulation under few-cycle target calibration**。
 
-构建一个可复现的 benchmark 和实验管线，用于研究：
+---
 
-> 跨大陆 neural land data assimilation analysis-increment emulation under few-cycle target calibration。
+## 0. 启动规则
 
-当前只有美国 `DA.nc` 可用。中国和澳大利亚的 `DA.nc` 之后会加入。因此所有代码必须做到：
+写任何代码前必须读取：
 
 ```text
-当前可运行：US-only within-country hydroclimatic OOD
-未来可扩展：US / China / Australia cross-continental OOD
+context/00_EXECUTABLE_CONTEXT_MAP.md
+context/01_RESEARCH_CONTRACT.md
+当前 phase 对应的 tasks/*.md
+相关 specs/*.yaml
+如果涉及数据、region、split、metric，读取 checklists/no_leakage_checklist.md
 ```
 
-添加中国和澳大利亚时，应该主要是新增配置、区域 mask 和数据路径，而不是重写代码。
-
-## 二、不可改变的科学表述
-
-不要把任务说成“预测真实土壤湿度”。
-
-正确任务是：
+如果上下文冲突，优先级为：
 
 ```text
-输入：
-  forecast soil moisture
-  microwave brightness temperature observations
-  vegetation opacity
-  observation / validity masks
-  time encoding
-  optional input-only region descriptors
-
-预测：
-  DA analysis increment
-
-其中：
-  ΔSM_surface  = SM_surface_analysis  - SM_surface_forecast
-  ΔSM_rootzone = SM_rootzone_analysis - SM_rootzone_forecast
-
-输出：
-  SM_hat = SM_forecast + ΔSM_hat
+CLAUDE.md
+> tasks/phase*_*.md
+> specs/*.yaml
+> context/*.md
+> checklists/*.md
+> prompts/*.md
+> notes/*.md
 ```
 
-请使用：
+不要把临时规则粗暴追加到本文件末尾。新增协议必须进入对应 context/spec/task，并在 `context/00_EXECUTABLE_CONTEXT_MAP.md` 中注册。
+
+---
+
+## 1. 科学任务定义
+
+本项目不是 ordinary soil moisture prediction。
+
+正确任务：
 
 ```text
-DA analysis-increment emulation
-reference DA analysis
-neural DA operator
-few-cycle calibration
+reference DA analysis-increment emulation
 ```
 
-避免使用：
+目标变量：
 
 ```text
-true soil moisture prediction
+ΔSM_surface  = sm_surface_analysis  - sm_surface_forecast
+ΔSM_rootzone = sm_rootzone_analysis - sm_rootzone_forecast
+```
+
+模型输出 increment，再加回 forecast 得到 estimated analysis。
+
+禁止写成：
+
+```text
+predict true soil moisture
 ground-truth soil moisture estimation
 ```
 
-## 三、已知合作方代码事实
+---
 
-合作方代码显示，DA 任务的 active input variables 是：
+## 2. 当前数据现实
 
-```text
-sm_surface_forecast
-sm_rootzone_forecast
-mwrtm_vegopacity
-tb_h_obs
-tb_v_obs
-mask
-```
-
-DA target variables 是：
+当前 US 数据：
 
 ```text
-sm_surface_analysis
-sm_rootzone_analysis
+/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc
 ```
 
-合作方 dataloader 使用 `xarray.open_dataset()` lazy-load NetCDF，根据 JSON 中的 `include=true` 选择 input/target 通道，做 mean/std 归一化，并返回 input、target、time_code、year、month、day、time。
-
-合作方 DA 模型是 Sformer / Swin-like backbone。当前 DA config 关键参数包括：
+已知结构：
 
 ```text
-img_size = [256, 640]
-patch_size = 4
-window_size = 8
-num_vars = 6
-embed_dim = 128
-depths = [2, 2]
+input[T, 12, H, W]
+target[T, 4, H, W]
+H=256, W=640
 ```
 
-合作方模型风格本质上是学习 masked update，然后加回 forecast 得到 analysis。这与我们自己的 increment-emulation 任务完全兼容。
-
-合作方 Sformer 可以作为强 neural baseline，但不要让它决定我们的 benchmark、split、metric 或区域协议。
-
-### 合作方代码使用规则
-
-合作方代码放在 external/collaborator_code/ 下，只读参考。
-
-允许 Claude Code：
-1. 阅读合作方 dataloader，理解 DA.nc 的 input/target 结构；
-2. 阅读 Config_Vars_DA.json，确认变量名、mean/std、include 字段；
-3. 阅读 Config_Train_DA.json，确认 Sformer baseline 的模型参数；
-4. 在后续阶段通过 wrapper 接入合作方 Sformer 作为 pooled neural baseline。
-
-禁止 Claude Code：
-1. 直接把 external/collaborator_code/ 复制进 hydroda/ 主代码；
-2. 直接修改合作方原始文件；
-3. 用合作方 dataloader 替代 HydroDADataset；
-4. 用合作方训练逻辑绕过我们的 region split、K-date split 和 no-leakage protocol；
-5. 在 Phase 0–3 阶段实现或调试 Sformer，必须先完成 NetCDF audit、dataset contract、region mask、K-date split 和 simple baselines。
-
-
-## 四、每次写代码前必须阅读的文件
-
-请优先读取：
+US geolocation 已恢复：
 
 ```text
-context/00_项目总览.md
-context/01_研究协议.md
-context/02_数据契约.md
-context/03_区域划分_v1.md
-context/04_实验矩阵.md
-context/05_模型与基线.md
-context/06_指标与验证.md
-context/07_工程架构.md
-context/08_代码规范.md
-context/09_迭代工作流.md
-context/10_风险登记.md
-specs/hydroda_schema.yaml
-specs/regions_v1.yaml
-specs/kdate_protocol.yaml
-specs/baselines.yaml
-specs/metrics.yaml
-checklists/可复现性检查清单.md
+artifacts/geolocation/US_latlon.nc
+recovery_method = directory_latlon_vector_lookup
 ```
 
-## 五、推荐代码结构
-
-请把项目实现为配置驱动的模块化系统：
+`input` channel 11 暂定为：
 
 ```text
-hydroda/
-  data/
-    netcdf_audit.py
-    dataset.py
-    normalization.py
-    patch_sampler.py
-    region_masks.py
-    split_builder.py
-  regions/
-    descriptors.py
-    predefined_regions.py
-    quality_report.py
-  metrics/
-    increment_metrics.py
-    skill.py
-    aggregation.py
-  models/
-    baseline_linear.py
-    resunet.py
-    sformer_wrapper.py
-    adapters.py
-    hyrao_meta.py
-    sparse_tuning.py
-  experiments/
-    run_baseline.py
-    run_adaptation.py
-    evaluate.py
-  utils/
-    config.py
-    io.py
-    seed.py
-    logging.py
-configs/
-  data/us_da.yaml
-  regions/regions_v1.yaml
-  experiments/*.yaml
-scripts/
-  audit_netcdf.py
-  build_region_masks.py
-  build_splits.py
-  train_baseline.py
-  evaluate_checkpoint.py
-tests/
-  test_dataset_contract.py
-  test_split_no_leakage.py
-  test_metrics.py
+base_valid_mask
 ```
 
-## 六、实现优先级
-
-严格按下面顺序推进：
+不得把它冒充：
 
 ```text
-1. 审计 DA.nc。
-2. 建立数据契约和 HydroDADataset。
-3. 构建美国 6 个科学区域 mask 和质量报告。
-4. 构建 K-date support/query split。
-5. 实现 Forecast、mean increment、monthly increment、ridge 等简单 baseline。
-6. 实现 patch-based neural baseline。
-7. 在数据、split、metric 全部稳定后，再包装合作方 Sformer。
-8. 最后实现 HyRAO-Meta / adapter / sparse tuning。
+obs_mask
+region_mask
+static_land_mask
 ```
 
-不要在 NetCDF audit、dataset contract、region split、metric sanity check 完成前实现复杂模型。
+---
 
-## 七、设计规则
+## 3. 固定三国区域协议
 
-- 不要把 US-only 逻辑硬编码到 dataset 或 metric 中。
-- country、region、regime、split、K-date 必须配置驱动。
-- source train 固定为 2015–2020。
-- target support 固定为 2021。
-- target query 固定为 2022–2025。
-- K 固定为 `0, 4, 12, 24`。
-- K 表示 historical DA analysis dates/cycles，不是 patch 或 pixel 数。
-- 必须记录 effective support budget：`K dates × patches/date × valid pixels`。
-- 主表默认 region-balanced aggregation。
-- surface 和 rootzone 必须分开报告。
+三国 18 个区域已预注册在：
 
-## 八、信息泄漏禁止规则
+```text
+specs/regions_v2.yaml
+region_protocol_version = fixed_bbox_v1
+```
+
+每个国家固定 6 个 regime slots：
+
+```text
+R1 dryland_sparse_vegetation
+R2 semi_arid_transition
+R3 irrigated_managed_agriculture
+R4 rainfed_agriculture
+R5 humid_high_vegetation
+R6 mountain_cold_terrain_stress
+```
+
+区域边界必须来自 `specs/regions_v2.yaml`。禁止根据 analysis increments、target query labels、model errors 或实验结果修改区域。
+
+US 已可生成正式 scientific masks。CN/AU 区域范围已固定，但必须等待各自 geolocation artifact 后才能生成正式 masks。
+
+---
+
+## 4. 阶段顺序
+
+```text
+Phase 0    NetCDF audit
+Phase 0.5  Geolocation and dataset-contract resolution
+Phase 1    HydroDADataset and sample contract
+Phase 2A   Fixed region masks
+Phase 2B   K-date support/query splits
+Phase 3    Simple baselines
+Phase 4    Neural baselines
+Phase 5    HyRAO + sparse adaptation
+Phase 6    Tables, figures, paper artifacts
+```
+
+在 Phase 0–3 完成前，禁止投入复杂 Transformer、Sformer wrapper、LoRA、Hessian/Fisher 稀疏适配。
+
+---
+
+## 5. 零泄漏规则
 
 禁止：
 
 ```text
-使用 target query labels 选择 support dates
-使用 target query labels 做 early stopping
-使用 target query distribution 做 normalization
-K=0 使用任何 target analysis statistics
-根据模型性能重新定义 region
-使用 analysis increments 选择区域
+target query labels 用于 support selection
+target query labels 用于 normalization
+target query labels 用于 early stopping
+target query labels 用于 model selection
+analysis increments 用于定义 region
+model errors 用于重新定义 region
+high-update masks 用于训练或 support selection
 ```
 
-K=0 允许使用：
+K 表示 target DA dates/cycles 数，不是 patches、pixels 或 mini-batches 数。
+
+---
+
+## 6. 完成汇报格式
+
+每次任务完成后用中文输出：
 
 ```text
-target 2021 input-only stream
-forecast statistics
-TB statistics
-vegopacity statistics
-mask / missingness statistics
-static descriptors
+完成内容：
+- 新增文件：
+- 修改文件：
+- 运行命令：
+- 生成 artifacts：
+- 测试 / smoke check：
+- 关键发现：
+- 泄漏风险：
+- 下一步：
 ```
-
-## 九、新功能完成标准
-
-任何新功能必须满足：
-
-```text
-1. 有 config entry 或明确默认值；
-2. 有 unit test 或 smoke test；
-3. 有最小 CLI / script 路径；
-4. 记录关键假设；
-5. 没有 temporal leakage；
-6. 没有 target query leakage；
-7. 没有不必要的 hard-coded region；
-8. 如果改变协议语义，必须更新文档。
-```
-
-
-## 十、每次任务完成后的汇报格式
-
-每次完成任务后，必须用中文汇报：
-
-```text
-1. 新增文件；
-2. 修改文件；
-3. 运行命令；
-4. 生成文件；
-5. 测试或 smoke check 结果；
-6. 主要发现；
-7. 数据风险；
-8. 是否存在信息泄漏风险；
-9. 下一步建议。
-```
-
-不要只输出代码 diff。不要只说“已完成”。

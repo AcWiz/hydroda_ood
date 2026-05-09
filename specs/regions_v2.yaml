@@ -1,0 +1,227 @@
+schema_version: v2.2
+name: regions_v2
+region_protocol_version: fixed_bbox_v1
+purpose: Pre-registered hydroclimatic region definitions for HydroDA-OOD.
+
+principles:
+  - Regions are fixed before model training.
+  - Regions are defined from geography/hydroclimate priors, not model results.
+  - Do not use analysis increments, target query labels, or model errors to define or revise regions.
+  - Bounding boxes are v1 executable definitions; polygon refinements require a new protocol version before experiments.
+  - Region masks must be generated from recovered lat/lon artifacts or equivalent projection mapping.
+
+mask_convention:
+  interval_rule: half_open
+  include_condition: lat_min <= lat < lat_max and lon_min <= lon < lon_max
+  longitude_convention: degrees_east_negative_west
+  overlap_policy: error_by_default
+  allow_priority_override: false
+  background_id: 0
+  onehot_order: [R1, R2, R3, R4, R5, R6]
+
+geolocation_requirements:
+  US:
+    status: recovered
+    artifact: artifacts/geolocation/US_latlon.nc
+    recovery_method: directory_latlon_vector_lookup
+    expected_shape: [256, 640]
+  CN:
+    status: pending
+    artifact: null
+  AU:
+    status: pending
+    artifact: null
+
+regime_slots:
+  R1:
+    name: dryland_sparse_vegetation
+    short_description: Dryland or sparse vegetation regime with rainfall-pulse and drydown behavior.
+  R2:
+    name: semi_arid_transition
+    short_description: Semi-arid grassland or agro-pastoral transition regime.
+  R3:
+    name: irrigated_managed_agriculture
+    short_description: Irrigated or intensively managed agriculture regime.
+  R4:
+    name: rainfed_agriculture
+    short_description: Rainfed agricultural regime with seasonal crop dynamics.
+  R5:
+    name: humid_high_vegetation
+    short_description: Humid and high-vegetation regime with microwave observation attenuation.
+  R6:
+    name: mountain_cold_terrain_stress
+    short_description: Mountain, snow, freeze-thaw, or cold-terrain stress regime.
+
+countries:
+  US:
+    country_name: United States
+    region_set_name: HydroDA-OOD-US fixed_bbox_v1
+    notes: Coordinates fall within recovered america_lat.npy / america_lon.npy domain.
+    regions:
+      - id: US-R1
+        numeric_id: 1
+        regime_slot: R1
+        regime: dryland_sparse_vegetation
+        name: Southwest Desert / Four Corners
+        bbox: {lat_min: 31.5, lat_max: 37.0, lon_min: -115.5, lon_max: -109.0}
+        rationale: Dryland and sparse-vegetation Southwest/Four Corners region for rainfall-pulse and drydown stress.
+      - id: US-R2
+        numeric_id: 2
+        regime_slot: R2
+        regime: semi_arid_transition
+        name: Southern Great Plains
+        bbox: {lat_min: 32.0, lat_max: 38.5, lon_min: -103.5, lon_max: -96.0}
+        rationale: Semi-arid grassland and agro-pastoral transition regime.
+      - id: US-R3
+        numeric_id: 3
+        regime_slot: R3
+        regime: irrigated_managed_agriculture
+        name: California Central Valley
+        bbox: {lat_min: 35.0, lat_max: 40.5, lon_min: -122.5, lon_max: -118.5}
+        rationale: Intensively managed and irrigated agricultural corridor.
+      - id: US-R4
+        numeric_id: 4
+        regime_slot: R4
+        regime: rainfed_agriculture
+        name: Corn Belt
+        bbox: {lat_min: 39.0, lat_max: 45.0, lon_min: -96.0, lon_max: -84.0}
+        rationale: Rainfed agriculture with strong crop phenology and seasonal soil-moisture dynamics.
+      - id: US-R5
+        numeric_id: 5
+        regime_slot: R5
+        regime: humid_high_vegetation
+        name: Southeast US
+        bbox: {lat_min: 29.5, lat_max: 36.5, lon_min: -91.0, lon_max: -78.0}
+        rationale: Humid, high-vegetation region where microwave observations are affected by vegetation opacity.
+      - id: US-R6
+        numeric_id: 6
+        regime_slot: R6
+        regime: mountain_cold_terrain_stress
+        name: Central Rockies
+        bbox: {lat_min: 38.0, lat_max: 45.0, lon_min: -112.5, lon_max: -105.0}
+        rationale: Mountain/cold-terrain stress region with terrain, snow, freeze-thaw, and mask complexity.
+
+  CN:
+    country_name: China
+    region_set_name: HydroDA-OOD-CN fixed_bbox_v1
+    notes: Pending CN data and CN geolocation artifact. Bboxes are pre-registered before model results.
+    regions:
+      - id: CN-R1
+        numeric_id: 1
+        regime_slot: R1
+        regime: dryland_sparse_vegetation
+        name: Xinjiang / Gobi-margin dryland
+        bbox: {lat_min: 39.0, lat_max: 45.0, lon_min: 82.0, lon_max: 94.0}
+        rationale: Northwestern dryland and oasis-margin regime.
+      - id: CN-R2
+        numeric_id: 2
+        regime_slot: R2
+        regime: semi_arid_transition
+        name: Inner Mongolia transition belt
+        bbox: {lat_min: 40.0, lat_max: 46.5, lon_min: 106.0, lon_max: 119.0}
+        rationale: Semi-arid grassland and agro-pastoral transition belt.
+      - id: CN-R3
+        numeric_id: 3
+        regime_slot: R3
+        regime: irrigated_managed_agriculture
+        name: North China Plain
+        bbox: {lat_min: 34.0, lat_max: 40.0, lon_min: 113.0, lon_max: 119.5}
+        rationale: Intensively managed agricultural region with irrigation and groundwater stress relevance.
+      - id: CN-R4
+        numeric_id: 4
+        regime_slot: R4
+        regime: rainfed_agriculture
+        name: Northeast China Plain
+        bbox: {lat_min: 42.0, lat_max: 48.5, lon_min: 122.0, lon_max: 130.0}
+        rationale: Major rainfed agricultural plain with strong seasonal crop dynamics.
+      - id: CN-R5
+        numeric_id: 5
+        regime_slot: R5
+        regime: humid_high_vegetation
+        name: South China monsoon region
+        bbox: {lat_min: 22.0, lat_max: 28.0, lon_min: 106.0, lon_max: 118.0}
+        rationale: Humid monsoon and high-vegetation region with microwave attenuation risk.
+      - id: CN-R6
+        numeric_id: 6
+        regime_slot: R6
+        regime: mountain_cold_terrain_stress
+        name: Eastern Tibetan Plateau
+        bbox: {lat_min: 29.0, lat_max: 35.5, lon_min: 94.0, lon_max: 104.0}
+        rationale: High-elevation cold-terrain and freeze-thaw stress regime.
+
+  AU:
+    country_name: Australia
+    region_set_name: HydroDA-OOD-AU fixed_bbox_v1
+    notes: Pending AU data and AU geolocation artifact. Bboxes are pre-registered before model results.
+    regions:
+      - id: AU-R1
+        numeric_id: 1
+        regime_slot: R1
+        regime: dryland_sparse_vegetation
+        name: Central Australia Desert
+        bbox: {lat_min: -27.5, lat_max: -21.0, lon_min: 128.0, lon_max: 137.5}
+        rationale: Extreme dryland and sparse-vegetation regime.
+      - id: AU-R2
+        numeric_id: 2
+        regime_slot: R2
+        regime: semi_arid_transition
+        name: Inland rangeland transition
+        bbox: {lat_min: -30.5, lat_max: -24.5, lon_min: 137.5, lon_max: 146.0}
+        rationale: Semi-arid inland rangeland transition regime.
+      - id: AU-R3
+        numeric_id: 3
+        regime_slot: R3
+        regime: irrigated_managed_agriculture
+        name: Murray-Darling Basin
+        bbox: {lat_min: -35.7, lat_max: -31.0, lon_min: 142.0, lon_max: 149.5}
+        rationale: Irrigated and managed agricultural basin.
+      - id: AU-R4
+        numeric_id: 4
+        regime_slot: R4
+        regime: rainfed_agriculture
+        name: Southwest Australia Wheatbelt
+        bbox: {lat_min: -35.0, lat_max: -29.0, lon_min: 115.5, lon_max: 121.5}
+        rationale: Rainfed agriculture under Mediterranean-climate seasonality.
+      - id: AU-R5
+        numeric_id: 5
+        regime_slot: R5
+        regime: humid_high_vegetation
+        name: Wet Tropics / Queensland coast
+        bbox: {lat_min: -19.5, lat_max: -14.5, lon_min: 144.0, lon_max: 147.0}
+        rationale: Humid tropical, high-vegetation microwave attenuation regime.
+      - id: AU-R6
+        numeric_id: 6
+        regime_slot: R6
+        regime: mountain_cold_terrain_stress
+        name: Australian Alps / SE Highlands
+        bbox: {lat_min: -37.5, lat_max: -35.8, lon_min: 146.0, lon_max: 150.0}
+        rationale: Highland/cold-terrain stress regime.
+
+quality_report_required_fields:
+  - country_id
+  - region_id
+  - numeric_id
+  - regime_slot
+  - regime
+  - bbox
+  - num_grid_cells
+  - valid_base_mask_cells_mean
+  - valid_base_mask_ratio_mean
+  - lat_min_actual
+  - lat_max_actual
+  - lon_min_actual
+  - lon_max_actual
+  - fraction_of_country_grid
+  - overlap_pixels
+  - quality_flag
+
+tests_required:
+  - test_region_spec_has_three_countries
+  - test_each_country_has_six_regions
+  - test_region_ids_unique
+  - test_bboxes_have_valid_latlon_ranges
+  - test_no_bbox_overlap_within_country_under_half_open_rule
+  - test_us_bboxes_within_recovered_latlon_domain
+  - test_region_masks_nonempty_after_generation
+  - test_region_masks_no_overlap
+  - test_region_construction_does_not_read_analysis_or_target

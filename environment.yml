@@ -1,0 +1,33 @@
+name: hydroda-ood
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  # Core scientific computing
+  - numpy>=1.24
+  - pandas>=2.0
+  - scipy>=1.10
+  - xarray>=2023.1
+  - netcdf4>=1.6
+  - h5netcdf>=0.15
+  - dask>=2023.1
+  # PyTorch CPU-safe default (GPU users replace with pytorch-cuda env)
+  - pytorch::pytorch>=2.0
+  - cpuonly  # only install if no GPU
+  # ML / stats
+  - scikit-learn>=1.3
+  # Visualization
+  - matplotlib>=3.7
+  - cartopy>=0.21
+  # Config & utilities
+  - pyyaml>=6.0
+  - tqdm>=4.65
+  # Testing
+  - pytest>=7.3
+  - pytest-cov>=4.1
+  # pip-only section (packages not available via conda-forge)
+  - pip:
+    - einops>=0.7   # used in external collaborator code / future Phase 4
+    - timm>=0.9    # used in external collaborator code / future Phase 4

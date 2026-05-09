@@ -1,0 +1,40 @@
+# Output directories
+figures/
+artifacts/metrics/
+artifacts/experiments/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+
+# Large data files
+*.nc
+*.npy
+*.npz
+*.parquet
+*.pt
+
+# External data (managed via external storage, not in GitHub)
+artifacts/
+reports/audits/
+reports/dataset/
+reports/experiments/
+reports/splits/
+
+# Large JSON splits file
+artifacts/splits/US_loro_kdate_splits.json
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+*.swp
+
+# Temporary scripts (audit/summarize/plot/visualize - local only)
+scripts/audit_*.py
+scripts/summarize_*.py
+scripts/plot_*.py
+scripts/visualize_*.py
