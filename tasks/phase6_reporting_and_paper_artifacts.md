@@ -26,11 +26,11 @@ scripts/make_paper_figures.py
 
 ```text
 HyperDA-Zero:
-  prompt = target 2021 input-side prompt
+  prompt = target 2022 input-side prompt
   labels = none
 
 HyperDA-Calib:
-  prompt = target 2021 input-side prompt + K labeled calibration summaries
+  prompt = target 2022 input-side prompt + K labeled calibration summaries
   K ∈ {4, 12}
 
 HyperDA-Refine:
@@ -80,7 +80,7 @@ support seed mean ± std / CI
 
 ```text
 1. HyperDA-Zero 不使用 target labels。
-2. HyperDA-Calib 只使用 2021 K-cycle support summaries。
+2. HyperDA-Calib 只使用 2022 K-cycle support summaries。
 3. HyperDA-Refine 只更新 ζ_R，不更新 θ0 或 Hψ。
 4. adapter / LoRA 使用相同 support dates、steps、seed、normalization。
 5. 所有表格能从 metrics_long.csv 自动生成。

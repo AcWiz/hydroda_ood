@@ -196,26 +196,26 @@ def plot_temporal_timeline(ax, splits_json):
     ax.text(2017.5, 0.55, "2015–2020", ha="center", va="center", fontsize=7,
             color=NATURE_COLORS["deep_blue"])
 
-    # Target support period (2021)
-    ax.axvspan(2021, 2021.5, ymin=0.35, ymax=0.65, color=NATURE_COLORS["orange"], alpha=0.8)
-    ax.text(2021.25, 0.7, "Target Support", ha="center", va="center", fontsize=8,
+    # Target context period (2022)
+    ax.axvspan(2022, 2022.5, ymin=0.35, ymax=0.65, color=NATURE_COLORS["orange"], alpha=0.8)
+    ax.text(2022.25, 0.7, "Target Context", ha="center", va="center", fontsize=8,
             color=NATURE_COLORS["orange"], fontweight="bold")
-    ax.text(2021.25, 0.55, "2021", ha="center", va="center", fontsize=7,
+    ax.text(2022.25, 0.55, "2022", ha="center", va="center", fontsize=7,
             color=NATURE_COLORS["orange"])
 
-    # Target query period (2022-2025)
-    ax.axvspan(2022, 2025.5, ymin=0.35, ymax=0.65, color=NATURE_COLORS["red"], alpha=0.6)
-    ax.text(2023.5, 0.7, "Target Query", ha="center", va="center", fontsize=8,
+    # Target query period (2023-2025)
+    ax.axvspan(2023, 2025.5, ymin=0.35, ymax=0.65, color=NATURE_COLORS["red"], alpha=0.6)
+    ax.text(2024.0, 0.7, "Target Query", ha="center", va="center", fontsize=8,
             color=NATURE_COLORS["red"], fontweight="bold")
-    ax.text(2023.5, 0.55, "2022–2025", ha="center", va="center", fontsize=7,
+    ax.text(2024.0, 0.55, "2023–2025", ha="center", va="center", fontsize=7,
             color=NATURE_COLORS["red"])
 
     # K values annotation
-    ax.text(2021.25, 0.2, "K ∈ {0, 4, 12, 24}", ha="center", va="center", fontsize=8,
+    ax.text(2022.25, 0.2, "K ∈ {0, 4, 12}", ha="center", va="center", fontsize=8,
             color=NATURE_COLORS["gray_dark"], style="italic")
 
     # Year boundary lines
-    for y in [2021, 2022]:
+    for y in [2022, 2023]:
         ax.axvline(x=y, color=NATURE_COLORS["gray_light"], linestyle="--", alpha=0.7, linewidth=0.8)
 
     # Clean up axes

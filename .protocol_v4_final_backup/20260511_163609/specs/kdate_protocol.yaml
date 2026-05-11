@@ -1,0 +1,77 @@
+schema_version: v2
+name: kdate_protocol
+
+protocol:
+  source_train:
+    start: '2015-01-01'
+    end: '2020-12-31'
+  target_support:
+    start: '2021-01-01'
+    end: '2021-12-31'
+  target_query:
+    start: '2022-01-01'
+    end: '2025-12-31'
+
+K_values: [0, 4, 12, 24]
+seeds:
+  development: [0, 1, 2, 3, 4]
+  final: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+selection_rules:
+  K0:
+    support_dates: []
+    uses_target_support_labels: false
+    allowed_descriptor_sources:
+      - target_support_year_inputs_only
+      - static_covariates
+      - forecast_statistics
+      - tb_statistics
+      - vegopacity_statistics
+      - mask_missingness_statistics
+  K4:
+    dates_per_year: 4
+    rule: one_valid_date_per_quarter
+    uses_target_support_labels_for_adaptation: true
+  K12:
+    dates_per_year: 12
+    rule: one_valid_date_per_month
+    uses_target_support_labels_for_adaptation: true
+  K24:
+    dates_per_year: 24
+    rule: one_valid_date_per_half_month
+    uses_target_support_labels_for_adaptation: true
+
+valid_date_criteria_allowed:
+  - calendar_constraints
+  - finite_input_ratio
+  - obs_mask_coverage
+  - region_mask_coverage
+
+valid_date_criteria_forbidden:
+  - analysis_increment_magnitude
+  - model_error
+  - target_query_label_statistics
+  - posthoc_performance
+
+manifest_required_fields:
+  - benchmark_id
+  - country_id
+  - target_region_id
+  - source_region_ids
+  - K
+  - seed
+  - source_train_dates
+  - target_support_dates
+  - target_query_dates
+  - selection_uses_analysis
+  - selection_uses_query_labels
+  - created_by
+  - created_utc
+
+tests_required:
+  - test_support_dates_in_support_year
+  - test_query_dates_in_query_years
+  - test_no_support_query_overlap
+  - test_k_matches_number_of_support_dates
+  - test_k0_has_no_support_dates
+  - test_selection_flags_false_for_query_labels

@@ -37,8 +37,8 @@ with open(FREEZE_MANIFEST) as f:
     FREEZE_ID = json.load(f)["freeze_id"]
 
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
-K_VALUES = [0, 4, 12, 24]
-SEEDS = list(range(10))
+K_VALUES = [0, 4, 12]
+SEEDS = [0, 1, 2]
 _ALL_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 CHUNK = 100
 

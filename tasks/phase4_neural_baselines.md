@@ -64,7 +64,7 @@ source_only_backbone:
 prompt_conditioned_shared:
   train: source regions / continents, 2015-2020
   input: x + region prompt token/feature map
-  target K=0: target 2021 input-side prompt only
+  target K=0: target 2022 input-side prompt only
   target K>0: input-side prompt + calibration summary prompt
 ```
 

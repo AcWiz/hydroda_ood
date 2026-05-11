@@ -58,7 +58,7 @@ class TestNoQueryStatsInNormalization:
         # date_str should be in source_train period
         year = int(sample["date_str"].split("-")[0])
         assert 2015 <= year <= 2020, (
-            f"source_train sample has date_str {sample['date_str']} outside 2015-2020"
+            f"source_fit sample has date_str {sample['date_str']} outside 2015-2020"
         )
         ds.close()
 

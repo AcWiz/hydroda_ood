@@ -98,18 +98,17 @@ class HydroDADataset(Dataset):
         date_key = _SPLIT_TYPE_TO_DATES_KEY[split_type]
         all_date_records = list(self._split_entry[date_key])
 
-        # Year filtering for source_fit (2015-2019) and source_val (2020)
-        # ProtocolConfig is the canonical date source; these filters mirror
-        # protocol.source_fit (2015-01-01 to 2019-12-31) and source_val boundaries.
+        # Year filtering for source_fit (2015-2020) and source_val (2021)
+        # Protocol V4-final: source_fit: 2015-2020, source_val: 2021
         if split_type == "source_fit":
             all_date_records = [
                 d for d in all_date_records
-                if len(d.get("date_str", "")) >= 4 and 2015 <= int(d["date_str"][:4]) <= 2019
+                if len(d.get("date_str", "")) >= 4 and 2015 <= int(d["date_str"][:4]) <= 2020
             ]
         elif split_type == "source_val":
             all_date_records = [
                 d for d in all_date_records
-                if d.get("date_str", "").startswith("2020")
+                if d.get("date_str", "").startswith("2021")
             ]
 
         self._date_records = all_date_records

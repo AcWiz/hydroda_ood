@@ -36,9 +36,10 @@ checklists/no_leakage_checklist.md
 可以在 Phase 1 dataset contract 完成后实现：
 
 ```text
-target_support: 2021
-target_query: 2022–2025
-K: 0, 4, 12, 24
+source_val: 2021
+target_context: 2022
+target_query: 2023–2025
+K: 0, 4, 12
 ```
 
 但 split manifest 中的 region_id 可以先处于 pending 状态，或使用 development-only grid region id。
@@ -123,7 +124,7 @@ artifacts/splits/hydroda_ood_us_grid_dev/US/{region}/K{K}_seed{seed}.json
 ```text
 target_region: US-R1..US-R6 if scientific geolocation is available
 fallback_target_region: US-GRID-R1..US-GRID-R6 if only grid split is available
-K: 0,4,12,24
+K: 0, 4, 12
 seed: 0..4 initially
 ```
 
@@ -135,8 +136,9 @@ seed: 0..4 initially
 1. 每个 region 有 mask 和 quality stats。
 2. 每个 target_region/K/seed 有 split manifest。
 3. K=0 没有 support labels。
-4. target_support dates 全部在 2021。
-5. target_query dates 全部在 2022–2025。
+4. source_val dates 全部在 2021。
+5. target_context dates 全部在 2022。
+6. target_query dates 全部在 2023–2025。
 6. support 和 query 无重叠。
 7. split selection flags 显示没有使用 query labels。
 8. scientific region masks 只有在 geolocation gate 通过后才生成。

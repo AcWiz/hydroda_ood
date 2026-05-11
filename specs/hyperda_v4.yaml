@@ -34,9 +34,9 @@ prompt:
 variants:
   HyperDA_Zero:
     labels: none
-    prompt: target_2021_input_side_spatial_temporal_prompt
+    prompt: target_2022_input_side_spatial_temporal_prompt
   HyperDA_Calib:
-    labels: K_labeled_2021_calibration_cycles
+    labels: K_labeled_2022_calibration_cycles
     K: [4, 12]
     prompt: input_side_prompt_plus_calibration_summary_tokens
   HyperDA_Refine:

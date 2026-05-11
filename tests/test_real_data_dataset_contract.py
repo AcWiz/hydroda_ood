@@ -108,7 +108,7 @@ class TestRealDataContract:
         assert sample["increment_rootzone"].shape == sample["forecast_rootzone"].shape
 
     def test_time_split_adherence(self, ds_query, ds_source):
-        """All query dates must be >= 2022-01-01; all source dates <= 2020-12-31."""
+        """All query dates must be >= 2023-01-01; all source dates <= 2020-12-31."""
         for ds, split_name in [(ds_query, "target_query"), (ds_source, "source_train")]:
             for i in range(min(len(ds), 20)):
                 sample = ds[i]
@@ -117,8 +117,8 @@ class TestRealDataContract:
                     continue
                 year = int(date_str[:4])
                 if split_name == "target_query":
-                    assert year >= 2022, \
-                        f"target_query date {date_str} is before 2022"
+                    assert year >= 2023, \
+                        f"target_query date {date_str} is before 2023"
                 elif split_name == "source_train":
                     assert year <= 2020, \
                         f"source_train date {date_str} is after 2020"

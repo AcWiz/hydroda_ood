@@ -43,31 +43,31 @@ def splits_by_K(splits_data):
 
 
 class TestSupportDatesInSupportYear:
-    """Test that all target_support_dates fall within 2021."""
+    """Test that all target_support_dates fall within 2022."""
 
-    def test_all_support_dates_in_2021(self, splits_data):
+    def test_all_support_dates_in_2022(self, splits_data):
         for split in splits_data:
             support_dates = split["target_support_dates"]
             for d in support_dates:
                 year = int(d["date_str"].split("-")[0])
-                assert year == 2021, (
+                assert year == 2022, (
                     f"Split {split['target_region_id']} K={split['K']} seed={split['seed']}: "
-                    f"support date {d['date_str']} not in 2021"
+                    f"support date {d['date_str']} not in 2022"
                 )
 
 
 class TestQueryDatesInQueryYears:
-    """Test that all target_query_dates fall within 2022-2025."""
+    """Test that all target_query_dates fall within 2023-2025."""
 
-    def test_all_query_dates_in_2022_to_2025(self, splits_data):
-        valid_years = {2022, 2023, 2024, 2025}
+    def test_all_query_dates_in_2023_to_2025(self, splits_data):
+        valid_years = {2023, 2024, 2025}
         for split in splits_data:
             query_dates = split["target_query_dates"]
             for d in query_dates:
                 year = int(d["date_str"].split("-")[0])
                 assert year in valid_years, (
                     f"Split {split['target_region_id']} K={split['K']} seed={split['seed']}: "
-                    f"query date {d['date_str']} not in 2022-2025"
+                    f"query date {d['date_str']} not in 2023-2025"
                 )
 
 
@@ -133,8 +133,8 @@ class TestSelectionFlagsFalseForQueryLabels:
             )
 
 
-class TestSourceTrainIn2015To2020:
-    """Test that source_train dates fall within 2015-04 to 2020-12."""
+class TestSourceFitIn2015To2020:
+    """Test that source_fit dates fall within 2015-04 to 2020-12."""
 
     def test_source_train_dates_in_range(self, splits_data):
         for split in splits_data:

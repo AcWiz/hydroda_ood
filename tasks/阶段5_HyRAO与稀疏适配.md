@@ -17,7 +17,7 @@ HISA optional
 
 ## 任务
 
-1. 从 target 2021 input-only stream 构建 descriptors。
+1. 从 target 2022 input-only stream 构建 descriptors。
 2. 实现 region latent initialization。
 3. 实现 support adaptation loop。
 4. 实现 adapter tuning。
@@ -28,7 +28,7 @@ HISA optional
 ## 验收标准
 
 - K=0 不使用 target analysis labels。
-- K>0 只使用 2021 support labels。
+- K>0 只使用 2022 support labels。
 - 所有方法使用相同 support dates。
 - Adaptation logs 同时记录 support loss 和 query metrics。
 - 报告 support seeds 方差。

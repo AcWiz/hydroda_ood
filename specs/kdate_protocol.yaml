@@ -1,77 +1,53 @@
-schema_version: v2
-name: kdate_protocol
+version: K-date Few-Cycle Calibration V4-final
+protocol_freeze_id: hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12
 
-protocol:
-  source_train:
-    start: '2015-01-01'
-    end: '2020-12-31'
-  target_support:
-    start: '2021-01-01'
-    end: '2021-12-31'
-  target_query:
-    start: '2022-01-01'
-    end: '2025-12-31'
+K_values_main: [0, 4, 12]
+K_values_supported_internal: [0, 4, 12, 24]
+K24_status: optional_internal_ablation_not_main_table
 
-K_values: [0, 4, 12, 24]
-seeds:
-  development: [0, 1, 2, 3, 4]
-  final: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+source_fit_years: [2015, 2016, 2017, 2018, 2019, 2020]
+source_val_year: 2021
+support_year: 2022
+query_years: [2023, 2024, 2025]
 
-selection_rules:
+definitions_cn:
+  K: 目标区域 target context year 2022 可用的 labeled DA analysis dates/cycles 数量
+  not_K: 不是 patch 数，也不是 pixel 数，也不是 mini-batch 数
+  source_val: 只能来自 source continents，用于 checkpoint / hyperparameter / architecture selection
+  target_context: 只能来自 held-out target continent 的 2022 年，用于 K-cycle calibration / adaptation
+  target_query: 只能来自 held-out target continent 的 2023-2025 年，用于最终评估
+
+selection:
   K0:
-    support_dates: []
-    uses_target_support_labels: false
-    allowed_descriptor_sources:
-      - target_support_year_inputs_only
-      - static_covariates
-      - forecast_statistics
-      - tb_statistics
-      - vegopacity_statistics
-      - mask_missingness_statistics
+    target_analysis_labels_allowed: false
+    target_input_only_allowed: true
   K4:
-    dates_per_year: 4
-    rule: one_valid_date_per_quarter
-    uses_target_support_labels_for_adaptation: true
+    northern_hemisphere_bins:
+      - [1, 2, 3]
+      - [4, 5, 6]
+      - [7, 8, 9]
+      - [10, 11, 12]
+    southern_hemisphere_bins:
+      - [7, 8, 9]
+      - [10, 11, 12]
+      - [1, 2, 3]
+      - [4, 5, 6]
+    dates_per_bin: 1
   K12:
-    dates_per_year: 12
-    rule: one_valid_date_per_month
-    uses_target_support_labels_for_adaptation: true
-  K24:
-    dates_per_year: 24
-    rule: one_valid_date_per_half_month
-    uses_target_support_labels_for_adaptation: true
+    dates_per_month: 1
+  K24_optional_internal:
+    dates_per_month_half:
+      first_half_days: [1, 15]
+      second_half_days: [16, 31]
+    dates_per_half_month: 1
 
-valid_date_criteria_allowed:
-  - calendar_constraints
-  - finite_input_ratio
-  - obs_mask_coverage
-  - region_mask_coverage
+seeds:
+  minimum: 5
+  preferred: 10
 
-valid_date_criteria_forbidden:
-  - analysis_increment_magnitude
-  - model_error
-  - target_query_label_statistics
-  - posthoc_performance
-
-manifest_required_fields:
-  - benchmark_id
-  - country_id
-  - target_region_id
-  - source_region_ids
-  - K
-  - seed
-  - source_train_dates
-  - target_support_dates
-  - target_query_dates
-  - selection_uses_analysis
-  - selection_uses_query_labels
-  - created_by
-  - created_utc
-
-tests_required:
-  - test_support_dates_in_support_year
-  - test_query_dates_in_query_years
-  - test_no_support_query_overlap
-  - test_k_matches_number_of_support_dates
-  - test_k0_has_no_support_dates
-  - test_selection_flags_false_for_query_labels
+rules_cn:
+  same_support_dates_across_methods: 同一 continent/region/K/seed 下所有方法必须使用相同 support dates
+  no_query_labels_for_support_selection: 不允许用 target query labels 选择 support
+  no_target_context_for_model_selection: target context labels 不能用于 checkpoint、超参数或模型选择
+  fail_if_not_enough_valid_dates: support dates 不足时必须报错或显式记录 degraded split
+  log_effective_support_budget: 必须记录 K dates × patches/date × valid pixels

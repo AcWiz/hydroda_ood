@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Phase 3A — Forecast-only baseline evaluation harness.
 
-Evaluates target_query for all 240 splits (6 regions × 4 K × 10 seeds).
-target_query is the most important split for evaluation as it covers 2022-2025.
+Evaluates target_query for all 54 splits (6 regions × 3 K × 3 seeds).
+target_query is the most important split for evaluation as it covers 2023-2025.
 
 Output: artifacts/metrics/phase3A_forecast_only_US/metrics_long.csv
 """
@@ -33,9 +33,9 @@ with open(FREEZE_MANIFEST) as f:
 
 EXPERIMENT_ID = "phase3A_forecast_only_US"
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
-K_VALUES = [0, 4, 12, 24]
-SEEDS = list(range(10))
-SPLIT_ROLES = ["source_train", "target_support", "target_query"]
+K_VALUES = [0, 4, 12]
+SEEDS = [0, 1, 2]
+SPLIT_ROLES = ["source_fit", "source_val", "target_support", "target_query"]
 
 _ALL_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 NC_CHUNK = 200

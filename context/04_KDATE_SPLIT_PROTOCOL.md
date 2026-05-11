@@ -2,12 +2,13 @@
 
 ## 1. 时间协议
 
-默认：
+V4-final 冻结版：
 
 ```text
-source_train:   2015-01-01 到 2020-12-31
-target_support: 2021-01-01 到 2021-12-31
-target_query:   2022-01-01 到 2025-12-31
+source_fit:     2015-01-01 到 2020-12-31
+source_val:     2021-01-01 到 2021-12-31
+target_support: 2022-01-01 到 2022-12-31
+target_query:   2023-01-01 到 2025-12-31
 ```
 
 如果实际 DA.nc 不覆盖这些年份，split builder 不能静默替换时间协议；必须报告冲突并进入 degraded protocol。
@@ -36,7 +37,9 @@ sample count after augmentation
 ```text
 K=0:
   不使用 target support analysis labels。
-  可使用 target 2021 input-only stream 构建 region descriptor。
+  可使用 target 2022 input-only stream 构建 region descriptor。
+
+注：K=0 时 target_context year (2022) 只作为 input-only，无 labels。
 
 K=4:
   每个季节/水文季度选 1 个 valid support date。
@@ -114,10 +117,15 @@ artifacts/splits/{benchmark_id}/{country}/{region}/K{K}_seed{seed}.json
 Phase 2 必须实现：
 
 ```text
-test_support_dates_in_2021_only
-test_query_dates_after_2022_only
+test_support_dates_in_2022_only
+test_query_dates_after_2023_only
 test_no_overlap_between_support_and_query
 test_same_support_dates_across_methods
 test_k0_has_no_support_labels
 test_manifest_flags_no_query_label_usage
 ```
+
+V4-final 关键约束：
+- target 2022 只能用于 K-shot calibration (target_support)
+- target 2023–2025 只能用于最终 evaluation (target_query)
+- target 2022 不能用于 early stopping / hyperparameter selection

@@ -11,12 +11,12 @@ SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
 MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
-K_VALUES = [0, 4, 12, 24]
-SEEDS = list(range(10))
+K_VALUES = [0, 4, 12]
+SEEDS = [0, 1, 2]
 
 
 class TestDatasetSplitLoading:
-    """Load all 240 splits and verify structural properties."""
+    """Load all 54 splits and verify structural properties."""
 
     @pytest.fixture
     def splits_data(self):
@@ -24,7 +24,7 @@ class TestDatasetSplitLoading:
             return json.load(f)
 
     def test_total_split_count(self, splits_data):
-        assert len(splits_data["splits"]) == 240
+        assert len(splits_data["splits"]) == 54
 
     def test_all_splits_have_exact_time_indices(self, splits_data):
         """time_indices are exact integers; source_train may have duplicates (multiple obs/day)."""
@@ -68,7 +68,7 @@ class TestDatasetSplitLoading:
     @pytest.mark.parametrize("K", K_VALUES)
     @pytest.mark.parametrize("seed", SEEDS)
     def test_smoke_load_all_combinations(self, K, seed, splits_data):
-        """Smoke test: iterate all 240 combinations of region x K x seed."""
+        """Smoke test: iterate all 54 combinations of region x K x seed."""
         for target_region in REGIONS:
             ds = HydroDADataset(
                 da_nc_path=f"{DATA_DIR}/DA.nc",

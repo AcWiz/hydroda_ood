@@ -42,14 +42,17 @@ derived_targets:
     formula: sm_rootzone_analysis - sm_rootzone_forecast
 
 time_protocol:
-  source_train:
+  source_fit:
     start: "2015-01-01"
     end: "2020-12-31"
-  target_support:
+  source_val:
     start: "2021-01-01"
     end: "2021-12-31"
-  target_query:
+  target_context:
     start: "2022-01-01"
+    end: "2022-12-31"
+  target_query:
+    start: "2023-01-01"
     end: "2025-12-31"
 
 normalization:

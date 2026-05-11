@@ -39,7 +39,7 @@ REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 CHECKPOINT_DIR = "artifacts/checkpoints/phase4_source_only"
-PROTOCOL_FREEZE_ID = "hyperda_v4_2015_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
 PHASE = "phase4_source_only"
 
 
@@ -322,7 +322,7 @@ def main():
 
     start_time = time.time()
 
-    # Create source_fit dataset (2015-2019, excluding target region)
+    # Create source_fit dataset (2015-2020, excluding target region)
     print(f"\nLoading source_fit dataset...")
     train_dataset = HydroDADataset(
         da_nc_path=DA_NC,
@@ -336,7 +336,7 @@ def main():
     )
     print(f"  source_fit samples: {len(train_dataset)}")
 
-    # Create source_val dataset (2020, excluding target region)
+    # Create source_val dataset (2021, excluding target region)
     print(f"\nLoading source_val dataset...")
     source_val_dataset = HydroDADataset(
         da_nc_path=DA_NC,

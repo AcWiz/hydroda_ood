@@ -203,7 +203,7 @@ def test_query_dates_all_labeled(full_audit_stats, frozen_splits):
     query_not_all_labeled = sum(1 for r in split_results if not r.query_all_labeled)
     print(f"\nQuery not all labeled: {query_not_all_labeled}/240")
 
-    # Query period is 2022-2025, some timestamps might be forecast-only
+    # Query period is 2023-2025, some timestamps might be forecast-only
     # This test just verifies the computation works
     assert query_not_all_labeled <= 240
 

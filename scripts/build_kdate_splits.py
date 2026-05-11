@@ -11,7 +11,7 @@ Usage:
 No-leakage declaration:
     Support dates are selected ONLY via:
     - Calendar constraints (quarter/month/half-month rules)
-    - Time availability in 2021
+    - Time availability in 2022
     - base_valid_mask coverage threshold (via input channel 11)
 
     NOT via:
@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument("--region-masks", required=True, help="Path to US_region_masks.nc")
     parser.add_argument("--out-json", required=True, help="Output JSON path")
     parser.add_argument("--out-md", required=True, help="Output markdown path")
-    parser.add_argument("--k-values", nargs="+", default=[0, 4, 12, 24], type=int)
+    parser.add_argument("--k-values", nargs="+", default=[0, 4, 12], type=int)
     parser.add_argument("--seeds", nargs="+", default=[0, 1, 2], type=int)
     parser.add_argument("--min-coverage", default=0.5, type=float)
     return parser.parse_args()
@@ -75,12 +75,12 @@ def main():
     # Pre-index by year range to avoid scanning all cycles
     years = np.array([datetime.fromtimestamp(t).year for t in time_vals])
     source_mask = (years >= 2015) & (years <= 2020)
-    support_mask = years == 2021
-    query_mask = (years >= 2022) & (years <= 2025)
+    support_mask = years == 2022
+    query_mask = (years >= 2023) & (years <= 2025)
 
     print(f"  Source train (2015-2020): {source_mask.sum()} cycles")
-    print(f"  Support (2021): {support_mask.sum()} cycles")
-    print(f"  Query (2022-2025): {query_mask.sum()} cycles")
+    print(f"  Target context/support (2022): {support_mask.sum()} cycles")
+    print(f"  Target query (2023-2025): {query_mask.sum()} cycles")
 
     # Load region masks
     print(f"Loading region masks: {args.region_masks}")
@@ -170,9 +170,9 @@ def main():
                     source_dates.append((idx, dt))
         print(f"  Source train cycles: {len(source_dates)}")
 
-        # Get available support dates in 2021
+        # Get available support dates in 2022
         support_available = get_target_dates(target_idx, support_mask, require_valid=False)
-        print(f"  Available support dates in 2021: {len(support_available)}")
+        print(f"  Available support dates in 2022: {len(support_available)}")
 
         # Compute validity mask
         valid_mask = compute_valid_support_mask(target_idx, support_available)

@@ -37,9 +37,10 @@ CN + AU -> US
 时间协议：
 
 ```text
-source_train:    2015-2020
-target_context:  2021
-target_query:    2022-2025
+source_fit:      2015-2020
+source_val:      2021
+target_context:  2022
+target_query:    2023-2025
 ```
 
 K-cycle calibration：

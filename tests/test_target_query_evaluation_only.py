@@ -37,7 +37,7 @@ class TestTargetQueryEvaluationOnly:
         assert "increment_rootzone" in sample
         ds.close()
 
-    def test_target_query_period_is_2022_onwards(self):
+    def test_target_query_period_is_2023_onwards(self):
         ds = HydroDADataset(
             da_nc_path=f"{DATA_DIR}/DA.nc",
             region_masks_nc=REGION_MASKS,
@@ -49,8 +49,8 @@ class TestTargetQueryEvaluationOnly:
         )
         sample = ds[0]
         year = int(sample["date_str"].split("-")[0])
-        assert year >= 2022, (
-            f"target_query sample has year {year} < 2022"
+        assert year >= 2023, (
+            f"target_query sample has year {year} < 2023"
         )
         ds.close()
 

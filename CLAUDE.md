@@ -213,15 +213,16 @@ Source: CN + AU -> Target: US
 冻结时间协议：
 
 ```text
-Source train:               2015-01-01 to 2020-12-31
-Target context/calibration:  2021-01-01 to 2021-12-31
-Target query/evaluation:     2022-01-01 to 2025-12-31
+Source fit/train:           2015-01-01 to 2020-12-31
+Source validation:          2021-01-01 to 2021-12-31
+Target context/calibration: 2022-01-01 to 2022-12-31
+Target query/evaluation:    2023-01-01 to 2025-12-31
 ```
 
 K 正式定义为：
 
 ```text
-K = number of labeled target DA analysis cycles from 2021
+K = number of labeled target DA analysis cycles from target context year 2022
 ```
 
 主实验 K 取值：
@@ -234,8 +235,8 @@ K ∈ {0, 4, 12}
 
 ```text
 K=0:  no target analysis labels; input-side prompt only
-K=4:  one labeled DA cycle sampled from each season in 2021
-K=12: one labeled DA cycle sampled from each month in 2021
+K=4:  one labeled DA cycle sampled from each season in 2022
+K=12: one labeled DA cycle sampled from each month in 2022
 ```
 
 K 不是 patches、pixels 或 mini-batches 数。同一天切出多少 spatial patches，都只算一个 DA calibration cycle。

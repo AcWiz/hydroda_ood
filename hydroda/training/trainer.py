@@ -1,8 +1,8 @@
 """Trainer for source-only backbone in HydroDA-OOD / HyperDA V4.
 
 No-leakage declaration:
-    - Training uses source_train split only (2015-2020, US-R1..R6 excluding target)
-    - Normalization stats computed from source_train only (LeakageGuard check)
+    - Training uses source_fit split only (2015-2020, US-R1..R6 excluding target)
+    - Normalization stats computed from source_fit only (LeakageGuard check)
     - No target_query labels used in training / normalization / early_stopping
     - No target prompt used
 """

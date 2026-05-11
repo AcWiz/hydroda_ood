@@ -3,7 +3,7 @@
 No-leakage declaration:
     Support dates are selected ONLY via:
     - Calendar constraints (quarter/month/half-month rules)
-    - Time availability in 2021
+    - Time availability in 2022
     - base_valid_mask coverage threshold
 
     NOT via:
@@ -155,7 +155,7 @@ def get_support_dates_for_K(
     Args:
         available_dates: List of (time_index, datetime) in support year
         valid_mask: Boolean array of which dates are valid
-        K: Number of support dates (0, 4, 12, or 24)
+        K: Number of support dates for main experiments (0, 4, or 12)
         seed: Random seed
 
     Returns:

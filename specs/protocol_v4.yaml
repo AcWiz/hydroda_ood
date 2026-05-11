@@ -1,30 +1,82 @@
 protocol_name: HydroDA-OOD-HyperDA-V4
-protocol_version: v4.0
-
+protocol_version: v4.1-final
+protocol_freeze_id: hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12
 objective: neural_land_DA_increment_emulation
 not_objective:
   - generic_soil_moisture_prediction
   - true_soil_moisture_estimation
 
 periods:
+  # Backward-compatible alias used by some existing scripts.
+  # Paper-facing text should call this source_fit/train.
   source_train:
     start: '2015-01-01'
     end: '2020-12-31'
-  target_context:
+    alias_of: source_fit
+    allowed_usage:
+      - training_shared_backbone
+      - training_source_only_backbone
+      - training_source_operator_episode_bank
+  source_fit:
+    start: '2015-01-01'
+    end: '2020-12-31'
+    allowed_usage:
+      - training_shared_backbone
+      - training_source_only_backbone
+      - training_source_operator_episode_bank
+  source_val:
     start: '2021-01-01'
     end: '2021-12-31'
-  target_query:
+    domain_constraint: source_continents_only
+    allowed_usage:
+      - checkpoint_selection
+      - early_stopping
+      - hyperparameter_selection
+      - architecture_selection
+    forbidden_usage:
+      - target_calibration
+      - final_evaluation
+  target_context:
     start: '2022-01-01'
+    end: '2022-12-31'
+    domain_constraint: held_out_target_continent_only
+    allowed_usage:
+      - K_cycle_calibration
+      - target_adaptation
+      - calibration_prompt_summary
+    forbidden_usage:
+      - checkpoint_selection
+      - early_stopping
+      - hyperparameter_selection
+      - architecture_selection
+      - model_selection
+  target_query:
+    start: '2023-01-01'
     end: '2025-12-31'
+    domain_constraint: held_out_target_continent_only
+    allowed_usage:
+      - final_offline_evaluation_only
+    forbidden_usage:
+      - training
+      - target_calibration
+      - prompt_construction
+      - normalization
+      - support_selection
+      - early_stopping
+      - model_selection
+      - threshold_calibration
+      - prompt_feature_tuning
+      - region_definition
 
 K_values_main: [0, 4, 12]
-K_definition: number_of_labeled_target_DA_analysis_cycles
-
+K_definition: number_of_labeled_target_DA_analysis_cycles_from_target_context_2022
 support_sampling:
-  K0: no_target_analysis_labels
-  K4: one_valid_cycle_per_season_in_2021
-  K12: one_valid_cycle_per_month_in_2021
+  support_year: 2022
+  K0: no_target_analysis_labels_input_side_prompt_only
+  K4: one_valid_cycle_per_season_in_2022
+  K12: one_valid_cycle_per_month_in_2022
   seeds_main: 5
+  seeds_preferred_final: 10
 
 leave_one_continent_out:
   - source: [US, CN]
@@ -42,5 +94,12 @@ leakage_forbidden:
   - target_query_labels_for_model_selection
   - target_query_labels_for_threshold_calibration
   - target_query_labels_for_prompt_feature_tuning
+  - target_context_labels_for_checkpoint_or_hyperparameter_selection
   - analysis_increments_for_region_definition
   - model_errors_for_region_definition
+
+paper_protocol_note: >-
+  For each held-out target continent, train on source-domain years 2015-2020,
+  select checkpoints and hyperparameters only on source-domain year 2021,
+  optionally calibrate using K labeled target DA cycles from target year 2022,
+  and report final metrics exclusively on target years 2023-2025.

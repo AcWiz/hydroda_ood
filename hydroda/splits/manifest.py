@@ -17,10 +17,16 @@ import numpy as np
 
 
 # Period strings derived from kdate_protocol.yaml
+# Protocol V4-final:
+#   source_fit:    2015-01-01 to 2020-12-31
+#   source_val:    2021-01-01 to 2021-12-31
+#   target_support: 2022-01-01 to 2022-12-31
+#   target_query:   2023-01-01 to 2025-12-31
 PERIODS = {
-    "source_train": "2015-04-01 to 2020-12-31",
-    "target_support": "2021-01-01 to 2021-12-31",
-    "target_query": "2022-01-01 to 2025-05-09",
+    "source_fit": "2015-01-01 to 2020-12-31",
+    "source_val": "2021-01-01 to 2021-12-31",
+    "target_support": "2022-01-01 to 2022-12-31",
+    "target_query": "2023-01-01 to 2025-12-31",
 }
 
 
@@ -57,7 +63,8 @@ def create_split_manifest(
         "benchmark_id": benchmark_id,
         "protocol_version": protocol_version,
         "country_id": country_id,
-        "source_train_period": PERIODS["source_train"],
+        "source_fit_period": PERIODS["source_fit"],
+        "source_val_period": PERIODS["source_val"],
         "target_support_period": PERIODS["target_support"],
         "target_query_period": PERIODS["target_query"],
         "target_region_id": target_region,
@@ -87,8 +94,8 @@ def validate_no_leakage(manifest: Dict) -> Dict[str, bool]:
 
     Returns:
         Dict of validation results with keys:
-        - 'support_in_support_year': target_support_dates are in 2021
-        - 'query_in_query_years': target_query_dates are in 2022-2025
+        - 'support_in_support_year': target_support_dates are in 2022
+        - 'query_in_query_years': target_query_dates are in 2023-2025
         - 'no_support_query_overlap': no date appears in both support and query
         - 'k_matches_or_less_support_count': K >= len(target_support_dates)
         - 'k0_has_empty_support': K=0 implies empty support_dates
@@ -115,8 +122,8 @@ def validate_no_leakage(manifest: Dict) -> Dict[str, bool]:
     query_date_strs = set(d["date_str"] for d in query_dates)
 
     return {
-        "support_in_support_year": support_years <= {2021},
-        "query_in_query_years": query_years <= {2022, 2023, 2024, 2025},
+        "support_in_support_year": support_years <= {2022},
+        "query_in_query_years": query_years <= {2023, 2024, 2025},
         "no_support_query_overlap": len(support_date_strs & query_date_strs) == 0,
         "k_matches_or_less_support_count": len(support_dates) <= K,
         "k0_has_empty_support": K == 0 if len(support_dates) == 0 else True,
@@ -166,7 +173,8 @@ def generate_split_summary_markdown(splits: List[Dict], output_path: str) -> Non
         f"**Total splits**: {len(splits)}",
         "",
         "## Period Definitions",
-        f"- source_train: {splits[0]['source_train_period']}",
+        f"- source_fit: {splits[0]['source_fit_period']}",
+        f"- source_val: {splits[0]['source_val_period']}",
         f"- target_support: {splits[0]['target_support_period']}",
         f"- target_query: {splits[0]['target_query_period']}",
         "",
@@ -197,7 +205,7 @@ def generate_split_summary_markdown(splits: List[Dict], output_path: str) -> Non
     lines.append("")
     lines.append("Support dates are selected ONLY via:")
     lines.append("- Calendar constraints (quarter/month/half-month rules)")
-    lines.append("- Time availability in 2021")
+    lines.append("- Time availability in 2022")
     lines.append("- base_valid_mask coverage threshold")
     lines.append("")
     lines.append("**NOT** via:")

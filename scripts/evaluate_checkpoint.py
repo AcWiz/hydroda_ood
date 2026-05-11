@@ -34,7 +34,7 @@ REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 OUTPUT_DIR = Path("artifacts/results/phase4_source_only")
-PROTOCOL_FREEZE_ID = "hyperda_v4_2015_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
 
 
 def aggregate_results(rows):

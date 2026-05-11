@@ -42,15 +42,15 @@ with open(FREEZE_MANIFEST) as f:
     FREEZE_ID = json.load(f)["freeze_id"]
 
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
-SEEDS = [0]  # Only 1 seed for smoke test
+SEEDS = [0, 1, 2]  # 3 seeds for development smoke test
 _ALL_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 CHUNK = 100
 
 # K settings per method
 _SOURCE_MEAN_K = [0]
-_TARGET_MEAN_K = [4, 12, 24]
-_MONTHLY_MEAN_K = [12, 24]
-_RIDGE_CORE_K = [4, 12, 24]
+_TARGET_MEAN_K = [4, 12]
+_MONTHLY_MEAN_K = [12]
+_RIDGE_CORE_K = [4, 12]
 
 _VARIABLE_PAIRS = [
     ("surface", "forecast_surface", "analysis_surface", "increment_surface", "pred_increment_surface", "pred_analysis_surface"),

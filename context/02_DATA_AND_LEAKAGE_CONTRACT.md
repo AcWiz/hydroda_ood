@@ -61,7 +61,7 @@ forecast/raw analysis 必须保留 raw physical units。
 increment_raw = analysis_raw - forecast_raw。
 ```
 
-如果模型使用 normalized target，应额外保存 target stats，并保证 stats 只来自 source train 或 allowed support。
+如果模型使用 normalized target，应额外保存 target stats，并保证 stats 只来自 source fit 或 allowed support。
 
 ---
 
@@ -100,8 +100,8 @@ obs_mask        = None unless independently recovered
 默认：
 
 ```text
-input_stats      来自 source train only
-increment_stats  来自 source train only
+input_stats      来自 source fit only
+increment_stats  来自 source fit only
 ```
 
 K>0 adaptation 可以使用 target support labels 计算 adaptation loss，但不要用 support stats 改变全局 normalization，除非该行为被明确记录为一个方法变体。

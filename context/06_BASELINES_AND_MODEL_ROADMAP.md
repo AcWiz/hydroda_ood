@@ -25,7 +25,7 @@ pred_analysis = forecast
 
 ### source_mean_increment
 
-用 source train regions 的平均 increment。
+用 source fit regions 的平均 increment。
 
 ### target_support_mean_increment
 

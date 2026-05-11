@@ -235,3 +235,10 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
 **不要**将 data/artifact 文件放入 conda environment。
+
+## Protocol V4-final update
+
+- `context/12_PROTOCOL_V4_FINAL_UPDATE.md`：冻结新时间协议 `source_fit=2015-2020`、`source_val=2021`、`target_context=2022`、`target_query=2023-2025`。
+- `specs/protocol_v4.yaml`：机器可读的 Protocol V4-final single source of truth。
+- `specs/kdate_protocol.yaml`：K-cycle support-year 与 query-year 的机器可读约束。
+

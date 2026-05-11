@@ -34,21 +34,21 @@ class ProtocolConfig:
     """Single source of truth for V4 time and K-cycle protocol."""
 
     protocol_name: str = "HydroDA-OOD-HyperDA-V4"
-    protocol_freeze_id: str = "hyperda_v4_2015_2025_k0_4_12"
+    protocol_freeze_id: str = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
     source_train: DateRange = field(
         default_factory=lambda: DateRange.from_strings("source_train", "2015-01-01", "2020-12-31")
     )
     source_fit: DateRange = field(
-        default_factory=lambda: DateRange.from_strings("source_fit", "2015-01-01", "2019-12-31")
+        default_factory=lambda: DateRange.from_strings("source_fit", "2015-01-01", "2020-12-31")
     )
     source_val: DateRange = field(
-        default_factory=lambda: DateRange.from_strings("source_val", "2020-01-01", "2020-12-31")
+        default_factory=lambda: DateRange.from_strings("source_val", "2021-01-01", "2021-12-31")
     )
     target_context: DateRange = field(
-        default_factory=lambda: DateRange.from_strings("target_context", "2021-01-01", "2021-12-31")
+        default_factory=lambda: DateRange.from_strings("target_context", "2022-01-01", "2022-12-31")
     )
     target_query: DateRange = field(
-        default_factory=lambda: DateRange.from_strings("target_query", "2022-01-01", "2025-12-31")
+        default_factory=lambda: DateRange.from_strings("target_query", "2023-01-01", "2025-12-31")
     )
     main_K_values: Sequence[int] = (0, 4, 12)
 
