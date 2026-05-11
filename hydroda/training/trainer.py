@@ -134,7 +134,7 @@ class Trainer:
         device: str = "cuda",
         checkpoint_dir: str = "artifacts/checkpoints/phase4_source_only",
         experiment_id: str = "phase4_source_only",
-        protocol_freeze_id: str = "hyperda_v4_2015_2025_k0_4_12",
+        protocol_freeze_id: str = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12",
         split_manifest_path: str = "artifacts/protocol/US_region_split_freeze_manifest.json",
         grad_clip: Optional[float] = None,
         model_width: int = 32,
