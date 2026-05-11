@@ -71,12 +71,12 @@ def build_region_masks_from_bbox(
         lon_min = bbox["lon_min"]
         lon_max = bbox["lon_max"]
 
-        # Axis-aligned bounding box assignment
+        # Axis-aligned bounding box assignment (half-open interval per spec)
         in_region = (
             (lat >= lat_min)
-            & (lat <= lat_max)
+            & (lat < lat_max)
             & (lon >= lon_min)
-            & (lon <= lon_max)
+            & (lon < lon_max)
         )
 
         mask_int = np.where(in_region, idx + 1, mask_int)

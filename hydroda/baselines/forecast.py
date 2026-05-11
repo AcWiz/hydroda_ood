@@ -1,48 +1,24 @@
-"""Forecast-only baseline — stateless, zero increment.
+"""Forecast-only baseline for DA increment emulation.
 
-No-leakage declaration:
-    - No fitting, no training, no target labels read
-    - pred_increment_surface and pred_increment_rootzone are strictly all zeros
-    - pred_analysis_surface == forecast_surface exactly
-    - pred_analysis_rootzone == forecast_rootzone exactly
+This is the natural zero-correction baseline:
+``pred_increment = 0`` and ``pred_analysis = forecast``.
 """
-
 from __future__ import annotations
 
+from typing import Any, Dict
+
 import numpy as np
-from typing import Dict, Any
 
 
 class ForecastBaseline:
-    """Stateless forecast-only baseline.
-
-    Predicts zero increment everywhere:
-        pred_increment = 0
-        pred_analysis = forecast
-
-    This is the sanity baseline — skill should be exactly 0.
-    """
+    method_name = "forecast_only"
 
     def predict(self, sample: Dict[str, Any]) -> Dict[str, np.ndarray]:
-        """Return prediction dict for a single sample.
-
-        Args:
-            sample: Dict with forecast_surface, forecast_rootzone keys.
-                Shape: (H, W) each.
-
-        Returns:
-            dict with keys:
-                pred_increment_surface: zeros_like(forecast_surface)
-                pred_increment_rootzone: zeros_like(forecast_rootzone)
-                pred_analysis_surface: forecast_surface.copy()
-                pred_analysis_rootzone: forecast_rootzone.copy()
-        """
-        forecast_surface = sample["forecast_surface"]
-        forecast_rootzone = sample["forecast_rootzone"]
-
+        forecast_surface = np.asarray(sample["forecast_surface"], dtype=np.float32)
+        forecast_rootzone = np.asarray(sample["forecast_rootzone"], dtype=np.float32)
         return {
-            "pred_increment_surface": np.zeros_like(forecast_surface),
-            "pred_increment_rootzone": np.zeros_like(forecast_rootzone),
+            "pred_increment_surface": np.zeros_like(forecast_surface, dtype=np.float32),
+            "pred_increment_rootzone": np.zeros_like(forecast_rootzone, dtype=np.float32),
             "pred_analysis_surface": forecast_surface.copy(),
             "pred_analysis_rootzone": forecast_rootzone.copy(),
         }

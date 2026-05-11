@@ -7,6 +7,7 @@ from hydroda.baselines.mean_increment import (
 )
 from hydroda.baselines.monthly_mean import TargetMonthlySupportIncrementBaseline
 from hydroda.baselines.ridge import RidgeBaseline
+from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
 
 __all__ = [
     "ForecastBaseline",
@@ -14,4 +15,5 @@ __all__ = [
     "TargetSupportMeanIncrementBaseline",
     "TargetMonthlySupportIncrementBaseline",
     "RidgeBaseline",
+    "SourceOnlyBackbonePredictor",
 ]

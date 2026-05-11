@@ -1,0 +1,28 @@
+# Debug config: SmallResUNet with width=16
+# NOT for main experiments — only for pipeline debugging
+# width=16 uses ~1/4 parameters of width=32
+
+model:
+  name: SmallResUNet
+  in_channels: 12
+  out_channels: 2
+  width: 16
+  zero_raw_increment_init: false  # standard zero-init for debug
+
+training:
+  max_epochs: 5
+  batch_size: 4
+  lr: 1e-3
+  weight_decay: 1e-4
+  grad_clip: 1.0
+  num_workers: 4
+
+data:
+  target_region: US-R1
+  K: 0
+  seed: 0
+  split_type: source_train
+
+output:
+  checkpoint_dir: artifacts/checkpoints/phase4_source_only/debug
+  experiment_id: phase4_source_only_debug

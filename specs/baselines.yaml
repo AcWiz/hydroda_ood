@@ -1,65 +1,37 @@
-schema_version: v2
-name: baselines
+paper_main_baselines:
+  K0:
+    - forecast_only
+    - source_only_backbone
+    - prompt_conditioned_shared_backbone
+    - hyperda_zero
+  K4_K12:
+    - forecast_only
+    - source_only_backbone
+    - adapter_tuning
+    - lora_tuning
+    - prompt_conditioned_shared_backbone_with_calibration_prompt
+    - hyperda_calib
+    - hyperda_refine
 
-required_simple_baselines:
-  - id: forecast
-    phase: 3
-    uses_target_support_labels: false
-    allowed_K: [0, 4, 12, 24]
-    prediction: pred_increment = 0
-  - id: source_mean_increment
-    phase: 3
-    uses_target_support_labels: false
-    allowed_K: [0, 4, 12, 24]
-    fit_data: source_train_regions_only
-  - id: target_support_mean_increment
-    phase: 3
-    uses_target_support_labels: true
-    allowed_K: [4, 12, 24]
-    fit_data: target_support_dates_only
-  - id: target_monthly_support_increment
-    phase: 3
-    uses_target_support_labels: true
-    allowed_K: [12, 24]
-    fit_data: target_support_dates_only_grouped_by_month
-  - id: ridge
-    phase: 3
-    uses_target_support_labels: true
-    allowed_K: [4, 12, 24]
-    features:
-      - forecast_surface
-      - forecast_rootzone
-      - tb_h_obs
-      - tb_v_obs
-      - tb_v_minus_tb_h
-      - mwrtm_vegopacity
-      - obs_mask
-      - sin_day_of_year
-      - cos_day_of_year
-      - optional_lat_lon_or_grid_encoding
+internal_sanity_only:
+  - source_mean_increment
+  - target_support_mean_increment
+  - source_monthly_mean_increment
+  - target_monthly_support_increment
+  - ridge_calibration
+  - nearest_source_specialist
+  - prompt_weighted_specialist
+  - knn_parameter_interpolation
+  - linear_prompt_to_parameter
+  - random_prompt_hyperda
 
-neural_baselines:
-  - id: small_conv_da_operator
-    phase: 4
-  - id: small_unet_da_operator
-    phase: 4
-  - id: pooled_sformer_wrapper
-    phase: 4
-    rule: must_use_hydroda_dataset_splits_metrics
-
-adaptation_baselines:
-  - full_finetune
-  - head_tuning
-  - bias_only
-  - adabn
-  - adapter
-  - lora
-  - region_latent
-  - gradient_topk_block
-  - fisa
-  - hisa_optional
-
-proposed_methods:
-  - hyrao
-  - hyrao_sparse
-  - hyrao_fisa
+fairness_requirements:
+  same_source_train_split: true
+  same_target_support_dates: true
+  same_target_query_dates: true
+  same_normalization_scope: source_train_only
+  same_support_seed: true
+  same_evaluation_mask: true
+  report_trainable_parameters: true
+  report_adaptation_steps: true
+  report_wall_clock_time: true

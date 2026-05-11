@@ -1,105 +1,102 @@
-# 01 Research Contract
+# 01_RESEARCH_CONTRACT.md — HyperDA V4 冻结研究契约
 
-## 1. 论文级问题定义
+本文件是 `hydroda_ood` 的 V4 研究契约。若旧文档仍出现 HyRAO、K=24、ridge 主表、source mean 主表、sparse Hessian/Fisher 主方法等设定，以本文件为准。
 
-HydroDA-OOD 研究真实部署问题：
+## 1. 论文定位
 
-> 当 neural land DA operator 被部署到新的水文气候区、新国家或新大陆时，目标区域通常只有少量历史 DA analysis cycles。我们研究如何在 K=0/4/12/24 target dates 下进行可靠、稀疏、高效的区域适配。
+本文研究的是 neural land DA analysis-increment emulation，而不是 ordinary soil moisture prediction。
 
-任务不是预测自然真值土壤湿度，而是模拟 reference DA analysis increment。
-
----
-
-## 2. 最终论文贡献边界
-
-主论文只保留三类核心贡献：
-
-### C1. HydroDA-OOD benchmark
-
-跨区域 / 跨大陆 neural land DA increment emulation benchmark。
-
-阶段性版本：
+核心表述：
 
 ```text
-HydroDA-OOD-US: 6 US hydroclimatic regions, leave-one-region-out
+HydroDA-OOD is a leakage-controlled cross-continental benchmark for neural land DA increment emulation.
+HyperDA is a hydroclimatic spatio-temporal prompt-conditioned hypernetwork for generating target-specific lightweight neural DA increment operators.
 ```
 
-完整版本：
+## 2. 任务定义
+
+对于每个 DA analysis cycle：
 
 ```text
-HydroDA-OOD-Full: US / CN / AU, 18 regions, cross-continent transfer
+ΔSM_surface  = SM_surface_analysis  - SM_surface_forecast
+ΔSM_rootzone = SM_rootzone_analysis - SM_rootzone_forecast
 ```
 
-### C2. K-date few-cycle calibration protocol
+模型输出 increment，并通过 forecast + increment 重建 estimated analysis。
 
-K 表示 target DA analysis dates/cycles，不是 pixels/patches。
+## 3. 主实验协议
+
+最终主实验是 US/CN/AU leave-one-continent-out：
 
 ```text
-K = 0, 4, 12, 24
+US + CN -> AU
+US + AU -> CN
+CN + AU -> US
 ```
 
-### C3. HyRAO: hydroclimate-conditioned region-adaptive operator
-
-方法不是普通 fine-tuning。HyRAO 必须包含：
+时间协议：
 
 ```text
-input-only region descriptor
-region-conditioned modulation / latent
-K-date sparse adaptation
+source_train:    2015-2020
+target_context:  2021
+target_query:    2022-2025
 ```
 
----
-
-## 3. 不应作为主贡献的内容
-
-以下内容可以做 ablation / appendix，但不要宣传成主贡献：
+K-cycle calibration：
 
 ```text
-普通 LoRA
-普通 adapter
-普通 full fine-tuning
-Hessian Top-K 本身
-把 Sformer 用到 DA 数据
+K ∈ {0, 4, 12}
 ```
 
-除非它们被证明是 HyRAO 的必要机制。
+K 表示 labeled target DA analysis cycles，不是 patches/pixels/mini-batches。
 
----
+## 4. 方法契约
 
-## 4. 审稿人视角下必须证明的命题
-
-论文必须回答：
+HyperDA 的核心不是 feature-level conditioning，而是 parameter-space transfer：
 
 ```text
-Q1. Forecast-only baseline 到底有多强？
-Q2. Source-only neural DA operator 是否存在 region OOD gap？
-Q3. K-date support 是否比普通 source pooling 有稳定收益？
-Q4. Target support mean / monthly mean / ridge 是否已经足够强？
-Q5. HyRAO 是否在 K=4/12 这种低预算下优于 adapter / LoRA / full fine-tuning？
-Q6. improvement 是否来自真实 increment learning，而不是 mask、seasonality 或均值偏差？
+ζ_R = H_ψ(P_R)
+f_{θ0, ζ_R}(x_R) -> ΔSM_hat_R
 ```
 
----
+只生成 lightweight parameters：adapter、output-head residual、optional FiLM。
 
-## 5. 必须保护的术语
-
-使用：
+第一版使用 deterministic basis-factorized generation：
 
 ```text
-reference DA analysis
-analysis increment
-few-cycle target calibration
-hydroclimatic shift
-region-conditioned adaptation
-input-only descriptor
-query-label isolation
+ζ_R,l = ζ_0,l + Σ_m α_R,l,m B_l,m
 ```
 
-避免：
+## 5. Baseline 契约
+
+论文主表只保留：
 
 ```text
-ground truth soil moisture
-true label
-real soil moisture prediction
-few-shot patches
+Forecast-only
+Source-only backbone
+Prompt-conditioned shared backbone
+Adapter tuning
+LoRA tuning
+HyperDA-Zero
+HyperDA-Calib
+HyperDA-Refine
 ```
+
+以下只允许作为 internal sanity check，不进入论文主表：
+
+```text
+source_mean_increment
+target_support_mean_increment
+monthly_mean_increment
+ridge_calibration
+nearest-source specialist
+prompt-weighted specialist
+kNN parameter interpolation
+linear prompt-to-parameter
+```
+
+## 6. 零泄漏契约
+
+禁止 target query labels 参与 prompt、normalization、support selection、early stopping、model selection、threshold calibration 或 prompt feature tuning。
+
+所有涉及时间、region、split、metric 的代码必须通过 `ProtocolConfig` / `LeakageGuard` 或等价机制进行检查。

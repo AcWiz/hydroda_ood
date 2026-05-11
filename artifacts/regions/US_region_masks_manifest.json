@@ -11,7 +11,7 @@
       640
     ],
     "dtype": "float32",
-    "sha256": "6155cd6df7eaa90f68ec39778b50b3a5ffe4d2e4212d80578ecd284b37582b57",
+    "sha256": "de281c13b6a9a596c5898f0456f5f82b6cc0e015b4061eb9104b04e00a13f778",
     "unique_region_ids": [
       0,
       1,
@@ -29,7 +29,7 @@
       640
     ],
     "dtype": "torch.uint8",
-    "sha256": "14f0cdb27c002ce8d138bdbb56956772fa11e98d0a43acad5678614dc558b039"
+    "sha256": "180022488b5d41d40e9eaf0fa401d0d12bded7efc239d7293892daf62bcbff09"
   },
   "geolocation_source": "artifacts/geolocation/US_latlon.nc",
   "data_source": "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc",

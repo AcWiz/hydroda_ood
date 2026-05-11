@@ -1,0 +1,57 @@
+method_name: HyperDA
+method_version: v4.0
+
+backbone:
+  first_version: SmallResUNet
+  alternatives:
+    - ConvNeXt_UNet
+  avoid_first:
+    - large_transformer
+    - sformer_wrapper
+
+parameter_generation:
+  generate_full_backbone: false
+  generated_blocks:
+    - adapter_parameters
+    - output_head_residual
+    - optional_film_parameters
+  factorization: basis_factorized
+  formula: zeta_R_l = zeta_0_l + sum_m alpha_R_l_m * B_l_m
+
+prompt:
+  token_types:
+    - STATIC
+    - SPATIAL_OBS
+    - MONTHLY_TEMPORAL
+    - CALIBRATION
+    - NO_CALIBRATION
+  forbidden_features:
+    - continent_embedding_for_main
+    - regime_id_for_main
+    - target_query_statistics
+    - target_query_labels
+
+variants:
+  HyperDA_Zero:
+    labels: none
+    prompt: target_2021_input_side_spatial_temporal_prompt
+  HyperDA_Calib:
+    labels: K_labeled_2021_calibration_cycles
+    K: [4, 12]
+    prompt: input_side_prompt_plus_calibration_summary_tokens
+  HyperDA_Refine:
+    initialization: HyperDA_generated_zeta
+    frozen:
+      - theta0
+      - H_psi
+    trainable:
+      - zeta_R_only
+    steps: [10, 50]
+
+loss:
+  DA_loss: masked_balanced_Huber
+  hyperda_terms:
+    L_func: 1.0
+    L_param: 0.05
+    L_prior: 0.0001
+    L_coeff: 0.0001

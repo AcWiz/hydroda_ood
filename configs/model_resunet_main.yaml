@@ -1,0 +1,37 @@
+# Main config: SmallResUNet with width=32
+# For primary experimental runs
+# zero_raw_increment_init=True ensures forecast-equivalent initialization
+
+model:
+  name: SmallResUNet
+  in_channels: 12
+  out_channels: 2
+  width: 32
+  zero_raw_increment_init: true
+  target_increment_normalization: true
+
+training:
+  max_epochs: 5
+  batch_size: 1
+  accum_steps: 4  # effective batch_size = 4
+  lr: 3e-4
+  weight_decay: 1e-4
+  grad_clip: 1.0
+  num_workers: 0
+
+data:
+  target_region: US-R1
+  K: 0
+  seed: 0
+  split_type: source_train
+
+output:
+  checkpoint_dir: artifacts/checkpoints/phase4_source_only/main
+  experiment_id: phase4_source_only_main
+
+notes: |
+  Rationale for width=32 vs width=16:
+  - width=16: ~250K params — too small for learning meaningful DA increment patterns
+  - width=32: ~1M params — sufficient capacity for SM DA increment emulation
+  - Trade-off: width=32 uses ~4x memory and compute, but necessary for useful results
+  - If OOM: use gradient accumulation (effective batch_size = batch_size * accum_steps)

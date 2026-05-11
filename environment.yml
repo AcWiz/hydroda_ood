@@ -24,6 +24,10 @@ dependencies:
   # Config & utilities
   - pyyaml>=6.0
   - tqdm>=4.65
+  - rich>=13.0
+  # Logging
+  - wandb>=0.15
+  - tensorboard>=2.13
   # Testing
   - pytest>=7.3
   - pytest-cov>=4.1
