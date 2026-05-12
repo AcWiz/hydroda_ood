@@ -53,6 +53,22 @@ CLAUDE.md
 
 ---
 
+## 环境管理
+
+conda 环境名称：
+- GPU：`hydroda-ood`（CUDA 12.4，RTX 5090 Blackwell）
+- CPU fallback：`hydroda-ood-cpu`
+
+激活方式：
+```bash
+conda activate hydroda-ood      # GPU
+conda activate hydroda-ood-cpu  # CPU fallback
+```
+
+不要在 base 环境安装任何东西。GPU 环境使用 `environment-gpu.yml`，CPU 环境使用 `environment.yml`。
+
+---
+
 ## 1. 科学任务定义
 
 禁止把本项目写成：

@@ -1,3 +1,12 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPRECATED — 2026-05-11
+# This file is superseded by specs/regions_v2.yaml (fixed_bbox_v1 protocol).
+# The v2 spec is the authoritative source for all region bounding boxes in
+# HydroDA-OOD V4 experiments. Do not use v1 bboxes for mask generation,
+# evaluation, or paper figures.
+#
+# Retained only for historical reference during protocol migration audits.
+# ═══════════════════════════════════════════════════════════════════════════════
 version: HydroDA-OOD 区域划分 V1.0
 main_regions_per_country: 6
 

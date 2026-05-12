@@ -1,7 +1,7 @@
 """Evaluation harness for HydroDA-OOD / HyperDA V4."""
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from hydroda.metrics.skill import (
     compute_variable_metrics,
@@ -41,16 +41,21 @@ def evaluate_split(
     deadzone_epsilon: float = 0.005,
     high_update_top_fraction: float = 0.2,
     preloaded: bool = True,
+    max_samples: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Evaluate a predictor over a dataset.
 
     ``predictor`` must implement ``predict(sample) -> dict`` and return both
     pred_increment_* and pred_analysis_* for surface/rootzone.
+
+    Args:
+        max_samples: If set, only evaluate the first max_samples samples.
     """
     all_samples = dataset.preload() if preloaded and hasattr(dataset, "preload") else None
     rows: List[Dict[str, Any]] = []
 
-    for idx in range(len(dataset)):
+    n_eval = len(dataset) if max_samples is None else min(len(dataset), max_samples)
+    for idx in range(n_eval):
         sample = all_samples[idx] if all_samples is not None else dataset[idx]
         pred = predictor.predict(sample)
         mask = sample["metric_mask"]

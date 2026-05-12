@@ -152,9 +152,9 @@ class TestRealDataContract:
                 f"All pixels invalid for {key} in valid region"
 
     def test_new_mask_fields_present(self, ds_query):
-        """label_valid_mask, obs_mask, region_mask are all present in sample."""
+        """label_valid_mask, base_valid_mask, region_mask are all present in sample."""
         sample = ds_query[0]
-        for key in ["label_valid_mask", "obs_mask", "region_mask"]:
+        for key in ["label_valid_mask", "base_valid_mask", "region_mask"]:
             assert key in sample, f"Missing field: {key}"
             arr = sample[key]
             assert arr.shape == sample["forecast_surface"].shape
@@ -163,19 +163,19 @@ class TestRealDataContract:
                 f"{key} values outside [0,1]: {unique}"
 
     def test_metric_mask_independent_of_obs_mask(self, ds_query):
-        """metric_mask should not go to zero just because obs_mask (ch11) is zero.
+        """metric_mask should not go to zero just because base_valid_mask (ch11) is zero.
 
         After mask policy fix: metric_mask = region_mask & label_valid_mask.
         SMAP coverage gaps should NOT prevent metric computation.
         """
         sample = ds_query[0]
-        obs = sample["obs_mask"]
+        base_valid = sample["base_valid_mask"]
         metric = sample["metric_mask"]
 
-        # obs_mask can be all zeros while metric_mask is not
+        # base_valid_mask can be all zeros while metric_mask is not
         # (this happens in SMAP coverage gaps but fields are still finite)
         # Just verify metric_mask has the right shape and is binary
-        assert metric.shape == obs.shape
+        assert metric.shape == base_valid.shape
         unique = np.unique(metric)
         assert all(v >= 0 and v <= 1 for v in unique), \
             f"metric_mask values outside [0,1]: {unique}"
