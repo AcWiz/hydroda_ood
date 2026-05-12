@@ -3,7 +3,7 @@
 Write region masks manifest JSON.
 
 Usage:
-    python scripts/write_region_masks_manifest.py
+    python scripts/data/write_region_masks_manifest.py
 
 Output:
     artifacts/regions/US_region_masks_manifest.json
@@ -21,7 +21,7 @@ from hydroda.data.file_hash import compute_sha256
 
 
 def main():
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent.parent
 
     nc_path = project_root / "artifacts/regions/US_region_masks.nc"
     pt_path = project_root / "artifacts/regions/US_region_mask_tensor.pt"
@@ -70,7 +70,7 @@ def main():
             "6": "US-R6 (mountain_cold_terrain_stress)"
         },
 
-        "generation_script": "scripts/export_region_mask_tensor.py",
+        "generation_script": "scripts/data/export_region_mask_tensor.py",
 
         "consistency_checks": {
             "nc_pt_shape_match": True,

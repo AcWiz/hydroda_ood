@@ -2,7 +2,7 @@
 """Train source-only SmallResUNet backbone with full experiment infrastructure.
 
 Usage:
-    PYTHONPATH=. python scripts/train_source_only_backbone.py \\
+    PYTHONPATH=. python scripts/train/train_source_only_backbone.py \\
         --target_region US-R1 --K 0 --seed 0 \\
         --max_epochs 30 --batch_size 4 --lr 1e-3 \\
         --device cuda --amp \\
@@ -47,25 +47,25 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train source-only backbone with experiment tracking")
     # Data
     parser.add_argument("--target_region", type=str, required=True, help="Target region, e.g. US-R1")
-    parser.add_argument("--K", type=int, default=0, help="K value for split")
-    parser.add_argument("--seed", type=int, default=0, help="Seed for split")
+    parser.add_argument("--K", type=int, default=None, help="K value for split (default from YAML or 0)")
+    parser.add_argument("--seed", type=int, default=None, help="Seed for split (default from YAML or 0)")
     # Model
-    parser.add_argument("--width", type=int, default=32,
-        help="SmallResUNet width: 16 for development, 32 for full model")
+    parser.add_argument("--width", type=int, default=None,
+        help="SmallResUNet width: 16 for development, 32 for full model (default from YAML or 32)")
     parser.add_argument("--zero_raw_increment_init", action="store_true",
         help="Zero-initialize output head so pred_inc_raw ≈ 0 at init")
     parser.add_argument("--target_increment_normalization", action="store_true",
         help="Normalize target increments during training")
     # Training
-    parser.add_argument("--max_epochs", type=int, default=30)
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--max_epochs", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--weight_decay", type=float, default=None)
     parser.add_argument("--grad_clip", type=float, default=None)
-    parser.add_argument("--accum_steps", type=int, default=1,
+    parser.add_argument("--accum_steps", type=int, default=None,
         help="Gradient accumulation steps for larger effective batch size")
     # Data loading
-    parser.add_argument("--num_workers", type=int, default=0,
+    parser.add_argument("--num_workers", type=int, default=None,
         help="DataLoader num_workers (default 0, avoid >0 due to netCDF threading issues)")
     # Device
     parser.add_argument("--device", type=str, default="cuda")
@@ -75,7 +75,7 @@ def parse_args():
         help="Enable automatic mixed precision")
     # Config
     parser.add_argument("--config", type=str, default=None,
-        help="Path to YAML config file (overrides CLI defaults)")
+        help="Path to YAML config file (CLI args override YAML values)")
     # Run management
     parser.add_argument("--run_name", type=str, default=None,
         help="Override run name")
@@ -92,6 +92,57 @@ def parse_args():
     parser.add_argument("--eval_every_epochs", type=int, default=1)
     parser.add_argument("--results_dir", type=str, default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
+
+    # First pass: check if --config is provided
+    preliminary_args, _ = parser.parse_known_args()
+
+    # Load YAML config as defaults (CLI will override)
+    yaml_defaults = {}
+    if preliminary_args.config and Path(preliminary_args.config).exists():
+        file_config = load_config(preliminary_args.config)
+        for section in ["model", "training", "data", "output"]:
+            if section in file_config and isinstance(file_config[section], dict):
+                yaml_defaults.update(file_config[section])
+
+    # Set YAML values as argparse defaults for key parameters
+    yaml_to_arg_map = {
+        "width": "width",
+        "max_epochs": "max_epochs",
+        "batch_size": "batch_size",
+        "accum_steps": "accum_steps",
+        "lr": "lr",
+        "weight_decay": "weight_decay",
+        "grad_clip": "grad_clip",
+        "num_workers": "num_workers",
+        "K": "K",
+        "seed": "seed",
+        "zero_raw_increment_init": "zero_raw_increment_init",
+        "target_increment_normalization": "target_increment_normalization",
+    }
+    for yaml_key, arg_key in yaml_to_arg_map.items():
+        if yaml_key in yaml_defaults and parser.get_default(arg_key) is None:
+            parser.set_defaults(**{arg_key: yaml_defaults[yaml_key]})
+
+    # Set hard-coded fallback defaults for required params not in YAML
+    if parser.get_default("K") is None:
+        parser.set_defaults(K=0)
+    if parser.get_default("seed") is None:
+        parser.set_defaults(seed=0)
+    if parser.get_default("width") is None:
+        parser.set_defaults(width=32)
+    if parser.get_default("max_epochs") is None:
+        parser.set_defaults(max_epochs=30)
+    if parser.get_default("batch_size") is None:
+        parser.set_defaults(batch_size=2)
+    if parser.get_default("lr") is None:
+        parser.set_defaults(lr=1e-3)
+    if parser.get_default("weight_decay") is None:
+        parser.set_defaults(weight_decay=1e-4)
+    if parser.get_default("accum_steps") is None:
+        parser.set_defaults(accum_steps=1)
+    if parser.get_default("num_workers") is None:
+        parser.set_defaults(num_workers=0)
+
     return parser.parse_args()
 
 
@@ -245,16 +296,7 @@ def main():
     print(f"  device={device}  width={args.width}  amp={args.amp}")
     print("=" * 60)
 
-    # Optionally load config for defaults
-    config = {}
-    if args.config and Path(args.config).exists():
-        file_config = load_config(args.config)
-        # Flatten nested config (model.*, training.*, data.*, output.*)
-        for section in ["model", "training", "data", "output"]:
-            if section in file_config and isinstance(file_config[section], dict):
-                config.update(file_config[section])
-
-    # Build config for RunManager
+    # Build config for RunManager (args already resolved with YAML defaults + CLI overrides)
     run_config = {
         "target_region": args.target_region,
         "K": args.K,
@@ -349,6 +391,13 @@ def main():
         freeze_manifest=FREEZE_MANIFEST,
     )
     print(f"  source_val samples: {len(source_val_dataset)}")
+
+    if len(source_val_dataset) == 0:
+        raise RuntimeError(
+            f"source_val_dataset is empty for target={args.target_region}, K={args.K}, seed={args.seed}. "
+            f"The split manifest must contain source_val_dates (2021 dates for source regions). "
+            f"Re-run build_kdate_splits.py with the updated code that populates source_val_dates."
+        )
 
     # Init model
     print(f"\nInitializing SmallResUNet (width={args.width})...")

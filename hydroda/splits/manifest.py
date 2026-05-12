@@ -10,7 +10,7 @@ No-leakage declaration:
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 
 import numpy as np
@@ -38,6 +38,7 @@ def create_split_manifest(
     source_train_dates: List[dict],
     support_dates: List[dict],
     query_dates: List[dict],
+    source_val_dates: List[dict] | None = None,
     country_id: str = "US",
     benchmark_id: str = "hydroda_ood_us_v1",
     protocol_version: str = "kdate_protocol_v2",
@@ -52,6 +53,7 @@ def create_split_manifest(
         source_train_dates: List of dicts with time_index, date_str, datetime_str
         support_dates: List of dicts for support dates (empty for K=0)
         query_dates: List of dicts for query dates
+        source_val_dates: List of dicts for source validation (2021). If None, defaults to [].
         country_id: Country identifier (default "US")
         benchmark_id: Benchmark identifier
         protocol_version: Protocol version string
@@ -59,6 +61,9 @@ def create_split_manifest(
     Returns:
         Manifest dict with all required fields per kdate_protocol.yaml
     """
+    if source_val_dates is None:
+        source_val_dates = []
+
     manifest = {
         "benchmark_id": benchmark_id,
         "protocol_version": protocol_version,
@@ -72,15 +77,17 @@ def create_split_manifest(
         "K": K,
         "seed": seed,
         "source_train_dates": source_train_dates,
+        "source_val_dates": source_val_dates,
         "target_support_dates": support_dates,
         "target_query_dates": query_dates,
         "source_train_cycle_count": len(source_train_dates),
+        "source_val_cycle_count": len(source_val_dates),
         "target_support_cycle_count": len(support_dates),
         "target_query_cycle_count": len(query_dates),
         "selection_uses_analysis": False,
         "selection_uses_query_labels": False,
         "created_by": "build_kdate_splits.py",
-        "created_utc": datetime.utcnow().isoformat() + "Z",
+        "created_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
     return manifest
@@ -181,10 +188,10 @@ def generate_split_summary_markdown(splits: List[Dict], output_path: str) -> Non
         "## Split Overview",
         "",
         "| Target | Sources | K | Seed | "
-        "Source Cycles | Support Cycles | Query Cycles | "
+        "Source Cycles | Val Cycles | Support Cycles | Query Cycles | "
         "Uses Analysis | Uses Labels |",
         "|--------|---------|---|------|"
-        "--------------|---------------|--------------|"
+        "--------------|-----------|---------------|--------------|"
         "--------------|--------------|",
     ]
 
@@ -194,6 +201,7 @@ def generate_split_summary_markdown(splits: List[Dict], output_path: str) -> Non
             f"| {s['target_region_id']} | {src_str} | "
             f"{s['K']} | {s['seed']} | "
             f"{s['source_train_cycle_count']:,} | "
+            f"{s.get('source_val_cycle_count', 0):,} | "
             f"{s['target_support_cycle_count']} | "
             f"{s['target_query_cycle_count']:,} | "
             f"{s['selection_uses_analysis']} | "

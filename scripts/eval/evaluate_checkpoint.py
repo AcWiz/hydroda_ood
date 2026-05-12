@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Evaluate trained source-only backbone checkpoint.
+"""Evaluate trained neural backbone checkpoints (source-only or prompt-conditioned).
 
 Usage:
-    PYTHONPATH=. python scripts/evaluate_checkpoint.py \\
+    # Source-only backbone
+    PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \\
         --checkpoint artifacts/checkpoints/phase4_source_only/US-R1/best.pt \\
         --target_region US-R1 --K 0 --seed 0 \\
-        --split_type target_query --max_samples 200
+        --split_type target_query --predictor_type source_only
+
+    # Prompt-conditioned shared backbone
+    PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \\
+        --checkpoint artifacts/checkpoints/phase4_prompt_conditioned/US-R1/best.pt \\
+        --target_region US-R1 --K 0 --seed 0 \\
+        --split_type target_query --predictor_type prompt_conditioned
 
 No-leakage declaration:
     - Evaluation uses target_query split (post-prediction label use only)
@@ -33,8 +40,12 @@ DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-OUTPUT_DIR = Path("artifacts/results/phase4_source_only")
 PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+
+_PREDICTOR_OUTPUT_DIRS = {
+    "source_only": Path("artifacts/results/phase4_source_only"),
+    "prompt_conditioned": Path("artifacts/results/phase4_prompt_conditioned"),
+}
 
 
 def aggregate_results(rows):
@@ -64,32 +75,46 @@ def aggregate_results(rows):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate source-only backbone checkpoint")
+    parser = argparse.ArgumentParser(description="Evaluate neural backbone checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint")
     parser.add_argument("--target_region", type=str, required=True)
     parser.add_argument("--K", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split_type", type=str, default="target_query")
-    parser.add_argument("--max_samples", type=int, default=200)
+    parser.add_argument("--max_samples", type=int, default=0,
+        help="Max samples to evaluate (0 = no limit, evaluate all)")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--require_gpu", action="store_true",
         help="Exit with error if CUDA unavailable")
+    parser.add_argument("--predictor_type", type=str, default="source_only",
+        choices=["source_only", "prompt_conditioned"],
+        help="Type of predictor to load")
+    parser.add_argument("--output_dir", type=str, default=None,
+        help="Override output directory")
     args = parser.parse_args()
 
     # Resolve device
     device = resolve_device(args.device, require_gpu=args.require_gpu)
 
     ckpt_path = Path(args.checkpoint)
-    region_output_dir = OUTPUT_DIR / args.target_region
+
+    # Determine output directory
+    if args.output_dir:
+        region_output_dir = Path(args.output_dir) / args.target_region
+    else:
+        base_dir = _PREDICTOR_OUTPUT_DIRS.get(args.predictor_type, Path("artifacts/results/phase4"))
+        region_output_dir = base_dir / args.target_region
     region_output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"=" * 60)
-    print(f"Phase 4A: Source-only Backbone Evaluation")
+    phase_label = "Phase 4A" if args.predictor_type == "source_only" else "Phase 4B"
+    print("=" * 60)
+    print(f"{phase_label}: Neural Backbone Evaluation")
+    print(f"  predictor_type={args.predictor_type}")
     print(f"  checkpoint={ckpt_path}")
     print(f"  target_region={args.target_region}  K={args.K}  seed={args.seed}")
-    print(f"  split_type={args.split_type}  max_samples={args.max_samples}")
+    print(f"  split_type={args.split_type}  max_samples={args.max_samples if args.max_samples > 0 else 'all'}")
     print(f"  device={device}")
-    print(f"=" * 60)
+    print("=" * 60)
 
     # Load dataset
     print(f"\nLoading dataset ({args.split_type})...")
@@ -103,15 +128,26 @@ def main():
         seed=args.seed,
         freeze_manifest=FREEZE_MANIFEST,
     )
-    n_samples = min(len(dataset), args.max_samples)
-    print(f"  dataset size: {len(dataset)}, evaluating first {n_samples}")
+
+    total_samples = len(dataset)
+    n_samples = min(total_samples, args.max_samples) if args.max_samples > 0 else total_samples
+    print(f"  dataset size: {total_samples}, evaluating {n_samples} samples")
 
     # Load predictor
     print(f"\nLoading checkpoint...")
-    predictor = SourceOnlyBackbonePredictor(
-        checkpoint_path=str(ckpt_path),
-        device=str(device),
-    )
+    if args.predictor_type == "prompt_conditioned":
+        from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+        predictor = PromptConditionedBackbonePredictor(
+            checkpoint_path=str(ckpt_path),
+            device=str(device),
+            target_region=args.target_region,
+        )
+    else:
+        predictor = SourceOnlyBackbonePredictor(
+            checkpoint_path=str(ckpt_path),
+            device=str(device),
+        )
     print(f"  method: {predictor.method_name}")
 
     # Run evaluation
@@ -122,12 +158,13 @@ def main():
         dataset=dataset,
         predictor=predictor,
         split_role=args.split_type,
-        experiment_id=f"phase4_source_only_{args.target_region}_K{args.K}_S{args.seed}",
+        experiment_id=f"phase4_{args.predictor_type}_{args.target_region}_K{args.K}_S{args.seed}",
         protocol_freeze_id=PROTOCOL_FREEZE_ID,
         method=predictor.method_name,
         split_file=SPLITS_JSON,
         mask_file=REGION_MASKS_NC,
         preloaded=False,
+        max_samples=args.max_samples if args.max_samples > 0 else None,
     )
 
     elapsed = time.time() - start_time
@@ -151,13 +188,11 @@ def main():
     # Aggregate
     agg = aggregate_results(rows)
 
-    # By-region
     if agg.get("by_region"):
         by_region_df = pd.DataFrame(agg["by_region"])
         by_region_path = region_output_dir / "metrics_by_region.csv"
         by_region_df.to_csv(by_region_path, index=False)
 
-    # By-season
     if agg.get("by_season"):
         by_season_df = pd.DataFrame(agg["by_season"])
         by_season_path = region_output_dir / "metrics_by_season.csv"
@@ -169,7 +204,7 @@ def main():
     inc_corr_rows = df[df["metric"] == "increment_corr"]
 
     summary = {
-        "method": "source_only_backbone",
+        "method": predictor.method_name,
         "checkpoint": str(ckpt_path),
         "target_region": args.target_region,
         "K": args.K,
@@ -198,8 +233,8 @@ def main():
         json.dump(summary, f, indent=2)
 
     print(f"\n  Summary saved to {summary_path}")
-    print(f"\n  Surface  skill={summary['surface']['skill_mean']:.4f} ± {summary['surface']['skill_std']:.4f}")
-    print(f"  Rootzone skill={summary['rootzone']['skill_mean']:.4f} ± {summary['rootzone']['skill_std']:.4f}")
+    print(f"\n  Surface  skill={summary['surface']['skill_mean']:.4f} \u00b1 {summary['surface']['skill_std']:.4f}")
+    print(f"  Rootzone skill={summary['rootzone']['skill_mean']:.4f} \u00b1 {summary['rootzone']['skill_std']:.4f}")
     print(f"  Surface  inc_rmse={summary['surface']['rmse_mean']:.4f}")
     print(f"  Rootzone inc_rmse={summary['rootzone']['rmse_mean']:.4f}")
     print(f"  Surface  inc_corr={summary['surface']['corr_mean']:.4f}")
@@ -210,7 +245,8 @@ def main():
         "checkpoint": str(ckpt_path),
         "target_region": args.target_region,
         "split_type": args.split_type,
-        "n_samples_total": len(dataset),
+        "predictor_type": args.predictor_type,
+        "n_samples_total": total_samples,
         "n_samples_evaluated": n_samples,
         "n_metric_rows": len(rows),
         "metrics_computed": sorted(df["metric"].unique().tolist()),
@@ -222,7 +258,7 @@ def main():
         json.dump(diagnostics, f, indent=2)
 
     print(f"\n{'=' * 60}")
-    print(f"Phase 4A Evaluation Complete")
+    print(f"{phase_label} Evaluation Complete")
     print(f"  Output: {region_output_dir}/")
     print(f"  metrics_long.csv | metrics_by_region.csv | metrics_by_season.csv")
     print(f"  summary.json | diagnostics.json")

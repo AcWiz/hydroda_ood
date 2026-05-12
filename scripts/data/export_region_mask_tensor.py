@@ -3,7 +3,7 @@
 Export US region mask from canonical NC to fast PyTorch tensor mirror.
 
 Usage:
-    python scripts/export_region_mask_tensor.py
+    python scripts/data/export_region_mask_tensor.py
 
 Output:
     artifacts/regions/US_region_mask_tensor.pt
@@ -22,7 +22,7 @@ from hydroda.data.file_hash import compute_sha256
 
 
 def main():
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent.parent
     nc_path = project_root / "artifacts/regions/US_region_masks.nc"
     pt_path = project_root / "artifacts/regions/US_region_mask_tensor.pt"
 

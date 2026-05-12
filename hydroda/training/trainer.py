@@ -12,6 +12,7 @@ import gc
 import json
 import subprocess
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,13 +20,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 
 from hydroda.data.dataset import HydroDADataset
 from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
 from hydroda.training.losses import MaskedHuberLoss
+from hydroda.utils.device import gpu_health_check
 from hydroda.utils.run_manager import RunManager
 from hydroda.utils.logger import WandbLogger
 from hydroda.utils.runtime import get_git_hash
@@ -175,12 +177,13 @@ class Trainer:
         # AMP scaler
         self._amp_scaler: Optional[GradScaler] = None
         if self.use_amp:
-            self._amp_scaler = GradScaler()
+            self._amp_scaler = GradScaler('cuda')
 
-        # Leakage guard: check normalization scope
+        # Leakage guard: check normalization scope with actual training dates
         protocol = ProtocolConfig()
         guard = LeakageGuard(protocol=protocol)
-        guard.check_normalization_scope([], scope_name="source_fit_only")
+        train_date_strs = [d["date_str"] for d in self.train_dataset._date_records] if hasattr(self.train_dataset, "_date_records") else []
+        guard.check_normalization_scope(train_date_strs, scope_name="source_fit_only")
 
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -230,6 +233,8 @@ class Trainer:
         if run_manager is not None:
             from hydroda.utils.logger import JSONLLogger
             self._jsonl_logger = JSONLLogger(run_manager.get_log_dir())
+            # Open console.log for tee output
+            run_manager.open_console_log()
 
     def _compute_normalization_stats(self) -> None:
         """Compute per-channel mean/std from training dataset (source_fit)."""
@@ -242,12 +247,23 @@ class Trainer:
         print(f"  Channel stds:  {stds[:4]}... (12 channels)")
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply channel-wise normalization to input tensor."""
+        """Apply channel-wise normalization to input tensor.
+
+        Includes NaN/Inf guard: if normalization produces invalid values,
+        returns original x with a warning (prevents GPU corruption from
+        NaN/Inf propagation through the model).
+        """
         if self._ch_mean is None or self._ch_std is None:
             return x
         mean_t = torch.from_numpy(self._ch_mean).to(x.device).view(1, 12, 1, 1)
         std_t = torch.from_numpy(self._ch_std).to(x.device).view(1, 12, 1, 1)
-        return (x - mean_t) / std_t
+        x_norm = (x - mean_t) / std_t
+        if torch.isnan(x_norm).any() or torch.isinf(x_norm).any():
+            n_nan = torch.isnan(x_norm).sum().item()
+            n_inf = torch.isinf(x_norm).sum().item()
+            print(f"  WARNING: normalize produced {n_nan} NaN / {n_inf} Inf — returning raw input", flush=True)
+            return x
+        return x_norm
 
     def _compute_increment_stats(self) -> None:
         """Compute mean/std of surface and rootzone increments from training dataset (source_fit)."""
@@ -338,7 +354,7 @@ class Trainer:
                     target = (target - inc_mean_t) / inc_std_t
 
                 if self.use_amp:
-                    with autocast():
+                    with autocast('cuda'):
                         pred = self.model(x_norm)
                         losses = self.loss_fn(pred, target, loss_mask)
                 else:
@@ -371,6 +387,44 @@ class Trainer:
         train_start_time = time.time()
         total_steps_per_epoch = len(dataloader)
 
+        # --- Training start header ---
+        num_params = sum(p.numel() for p in self.model.parameters())
+        header_lines = [
+            "=" * 60,
+            f"Training Start",
+            f"  Experiment:      {self.experiment_id}",
+            f"  Protocol:        {self.protocol_freeze_id}",
+            f"  Split manifest:  {self.split_manifest_path}",
+            f"  Device:          {self.device}",
+            f"  Model width:     {self.model_width}",
+            f"  Trainable params:{num_params:,}",
+            f"  Batch size:      {self.batch_size}",
+            f"  Accum steps:     {self.accum_steps}",
+            f"  Max epochs:      {self.max_epochs}",
+            f"  LR:              {self.lr}",
+            f"  Weight decay:    {self.weight_decay}",
+            f"  Grad clip:       {self.grad_clip}",
+            f"  AMP:             {self.use_amp}",
+            f"  Inc norm:        {self.target_increment_normalization}",
+            f"  Zero raw init:   {self.zero_raw_increment_init}",
+            f"  Train samples:   {len(self.train_dataset)}",
+            f"  Steps/epoch:     {total_steps_per_epoch}",
+            "=" * 60,
+        ]
+        for line in header_lines:
+            if self.run_manager is not None:
+                self.run_manager.log_console(line)
+            elif verbose:
+                print(line)
+
+        # GPU health check before training (catches dead/flaky GPUs early)
+        if self.device == "cuda":
+            if not gpu_health_check(torch.device("cuda")):
+                raise RuntimeError(
+                    "GPU health check FAILED — GPU is unresponsive. "
+                    "The device may be in an error state. Try rebooting or using a different GPU."
+                )
+
         for epoch in range(self.current_epoch, self.max_epochs):
             epoch_losses = []
             epoch_surface_losses = []
@@ -379,6 +433,9 @@ class Trainer:
             epoch_start = time.time()
             batches_since_eval = 0
 
+            # Zero gradients at start of epoch (gradient accumulation fix)
+            self.optimizer.zero_grad()
+
             for batch_idx, batch in enumerate(dataloader):
                 x = batch["x"].to(self.device)
                 inc_surface = batch["increment_surface"].to(self.device)
@@ -386,6 +443,14 @@ class Trainer:
                 loss_mask = batch["loss_mask"].to(self.device)
 
                 x_norm = self._normalize(x)
+
+                # NaN/Inf guard on normalized input: skip batch if invalid
+                if torch.isnan(x_norm).any() or torch.isinf(x_norm).any():
+                    n_nan = torch.isnan(x_norm).sum().item()
+                    n_inf = torch.isinf(x_norm).sum().item()
+                    print(f"  WARNING: E{epoch} S{batch_idx}: normalized input {n_nan} NaN / {n_inf} Inf — skipping batch", flush=True)
+                    continue
+
                 target = torch.stack([inc_surface, inc_rootzone], dim=1)
 
                 if self.target_increment_normalization and self._inc_mean is not None:
@@ -393,12 +458,19 @@ class Trainer:
                     inc_std_t = torch.from_numpy(self._inc_std).to(x.device).view(1, 2, 1, 1)
                     target = (target - inc_mean_t) / inc_std_t
 
-                self.optimizer.zero_grad()
+                # Forward pass
+                ctx = autocast('cuda') if self.use_amp else nullcontext()
+                with ctx:
+                    pred = self.model(x_norm)
+                    losses = self.loss_fn(pred, target, loss_mask)
 
+                # NaN/Inf guard on loss: skip batch if invalid
+                if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
+                    print(f"  WARNING: E{epoch} S{batch_idx}: loss is NaN/Inf — skipping batch", flush=True)
+                    continue
+
+                # Backward pass
                 if self.use_amp:
-                    with autocast():
-                        pred = self.model(x_norm)
-                        losses = self.loss_fn(pred, target, loss_mask)
                     self._amp_scaler.scale(losses["total_loss"]).backward()
                     if (batch_idx + 1) % self.accum_steps == 0:
                         if self.grad_clip is not None:
@@ -406,14 +478,14 @@ class Trainer:
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                         self._amp_scaler.step(self.optimizer)
                         self._amp_scaler.update()
+                        self.optimizer.zero_grad()
                 else:
-                    pred = self.model(x_norm)
-                    losses = self.loss_fn(pred, target, loss_mask)
                     losses["total_loss"].backward()
                     if (batch_idx + 1) % self.accum_steps == 0:
                         if self.grad_clip is not None:
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                         self.optimizer.step()
+                        self.optimizer.zero_grad()
 
                 epoch_losses.append(float(losses["total_loss"].item()))
                 epoch_surface_losses.append(float(losses["surface_loss"].item()))
@@ -443,8 +515,9 @@ class Trainer:
                     gpu_alloc = 0.0
                     gpu_res = 0.0
                     if self.device == "cuda":
-                        gpu_alloc = torch.cuda.memory_allocated(0) / 1e9
-                        gpu_res = torch.cuda.memory_reserved(0) / 1e9
+                        dev_idx = torch.cuda.current_device()
+                        gpu_alloc = torch.cuda.memory_allocated(dev_idx) / 1e9
+                        gpu_res = torch.cuda.memory_reserved(dev_idx) / 1e9
 
                     lr = float(self.optimizer.param_groups[0]["lr"])
                     valid_px = int(losses["valid_pixel_count"].item())
@@ -525,6 +598,8 @@ class Trainer:
                 if verbose:
                     sv_loss = source_val_metrics.get("source_val_loss", float("nan"))
                     print(f"  source_val loss={sv_loss:.6f}", flush=True)
+                if self._jsonl_logger is not None:
+                    self._jsonl_logger.log_eval({"epoch": epoch, **source_val_metrics})
 
             # Best checkpoint selection: use source_val loss if available, else train loss
             is_best = False
@@ -568,15 +643,53 @@ class Trainer:
                 self.wandb_logger.log_epoch(wandb_data)
 
             if verbose:
-                print(
+                # Per-epoch summary table
+                sv_str = ""
+                if source_val_metrics:
+                    sv_loss = source_val_metrics.get("source_val_loss", float("nan"))
+                    sv_str = f"  sv_loss={sv_loss:.6f}"
+                epoch_summary = (
                     f"Epoch {epoch:3d} | "
                     f"loss={avg_loss:.6f} | "
                     f"surface={avg_surface:.6f} | "
                     f"rootzone={avg_rootzone:.6f} | "
                     f"valid_px={total_valid:9d} | "
                     f"lr={record['lr']:.2e} | "
-                    f"{elapsed:.1f}s"
+                    f"{elapsed:.1f}s{sv_str}"
                 )
+                if self.run_manager is not None:
+                    self.run_manager.log_console(epoch_summary)
+                elif verbose:
+                    print(epoch_summary)
+
+                # Per-epoch divider every 5 epochs or at epoch 0
+                if epoch == 0 or (epoch + 1) % 5 == 0:
+                    divider = "  " + "-" * 40
+                    if self.run_manager is not None:
+                        self.run_manager.log_console(divider)
+                    elif verbose:
+                        print(divider)
+
+        # --- Training end summary ---
+        total_elapsed = time.time() - train_start_time
+        end_lines = [
+            "=" * 60,
+            f"Training Complete",
+            f"  Total epochs:     {self.max_epochs}",
+            f"  Best loss:        {self.best_loss:.6f}",
+            f"  Total time:       {total_elapsed:.1f}s ({total_elapsed/60:.1f}min)",
+            f"  Checkpoint dir:   {self.checkpoint_dir}",
+            "=" * 60,
+        ]
+        for line in end_lines:
+            if self.run_manager is not None:
+                self.run_manager.log_console(line)
+            elif verbose:
+                print(line)
+
+        # Close console.log if opened
+        if self.run_manager is not None:
+            self.run_manager.close_console_log()
 
         return self.train_history
 
@@ -608,8 +721,11 @@ class Trainer:
                 "weight_decay": self.weight_decay,
                 "max_epochs": self.max_epochs,
                 "batch_size": self.batch_size,
+                "accum_steps": self.accum_steps,
+                "effective_batch_size": self.batch_size * self.accum_steps,
                 "grad_clip": self.grad_clip,
                 "width": self.model_width,
+                "num_workers": self.num_workers,
                 "target_increment_normalization": self.target_increment_normalization,
                 "zero_raw_increment_init": self.zero_raw_increment_init,
                 "use_amp": self.use_amp,
@@ -625,11 +741,19 @@ class Trainer:
     def save_summary_json(self, path: Optional[Path] = None) -> None:
         """Save summary.json with protocol safety fields."""
         has_source_val = self.source_val_dataset is not None
+        num_params = sum(p.numel() for p in self.model.parameters())
         summary = {
             "experiment_id": self.experiment_id,
             "protocol_freeze_id": self.protocol_freeze_id,
             "best_loss": self.best_loss,
             "final_epoch": self.current_epoch - 1,
+            "total_epochs_completed": self.current_epoch,
+            "model_width": self.model_width,
+            "trainable_parameters": num_params,
+            "batch_size": self.batch_size,
+            "accum_steps": self.accum_steps,
+            "effective_batch_size": self.batch_size * self.accum_steps,
+            "source_val_available": has_source_val,
             "normalization_source": "source_fit_only",
             "early_stopping_source": "source_val_only" if has_source_val else "train_loss_only",
             "model_selection_source": "source_val_only" if has_source_val else "best_train_loss",

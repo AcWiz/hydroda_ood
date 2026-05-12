@@ -43,6 +43,7 @@ with open(FREEZE_MANIFEST) as f:
 
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 SEEDS = [0, 1, 2]  # 3 seeds for development smoke test
+_BASE_VALID_MASK_CHANNEL = 11
 _ALL_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 CHUNK = 100
 
@@ -64,7 +65,7 @@ _METRIC_FUNCS = [
     ("increment_mae", lambda p, t, m: increment_mae(p, t, m)),
     ("increment_bias", lambda p, t, m: increment_bias(p, t, m)),
     ("increment_corr", lambda p, t, m: increment_corr(p, t, m)),
-    ("sign_accuracy_deadzone", lambda p, t, m: sign_accuracy_deadzone(p, t, m)),
+    ("sign_accuracy_deadzone", lambda p, t, m: sign_accuracy_deadzone(p, t, m, epsilon=0.005)),
 ]
 
 
@@ -95,11 +96,15 @@ def compute_metrics_for_sample(
     for var_name, fcst_key, analy_key, incr_key, pred_incr_key, pred_analy_key in _VARIABLE_PAIRS:
         forecast = sample[fcst_key]
         true_analysis = sample[analy_key]
+        true_increment = sample[incr_key]
         pred_analysis = pred[pred_analy_key]
+        pred_increment = pred[pred_incr_key]
 
         for metric_name, metric_fn in _METRIC_FUNCS:
             if metric_name == "analysis_skill_vs_forecast":
                 value = metric_fn(pred_analysis, true_analysis, forecast, metric_mask)
+            elif metric_name.startswith("increment_") or metric_name.startswith("sign_accuracy"):
+                value = metric_fn(pred_increment, true_increment, metric_mask)
             else:
                 value = metric_fn(pred_analysis, true_analysis, metric_mask)
 
@@ -230,7 +235,7 @@ class RidgePixelPredictor:
         features.append(x[6].flatten())  # tb_v
         features.append((x[6] - x[5]).flatten())  # tb_v_minus_tb_h
         features.append(x[4].flatten())  # vegopacity
-        features.append((x[11] > 0.5).astype(np.float32).flatten())  # obs_mask
+        features.append((x[_BASE_VALID_MASK_CHANNEL] > 0.5).astype(np.float32).flatten())  # obs_mask
         features.append(np.full(H * W, sin_day, dtype=np.float32))
         features.append(np.full(H * W, cos_day, dtype=np.float32))
 

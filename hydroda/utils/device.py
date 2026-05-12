@@ -44,7 +44,10 @@ def resolve_device(device_arg: str = "cuda", require_gpu: bool = False) -> torch
 
 
 def get_gpu_memory_info() -> dict:
-    """Get GPU memory info for device 0.
+    """Get GPU memory info for the current CUDA device.
+
+    Uses torch.cuda.current_device() instead of hardcoded index 0
+    to be safe with CUDA_VISIBLE_DEVICES.
 
     Returns:
         dict with allocated_gb, reserved_gb, total_gb, free_gb
@@ -52,9 +55,10 @@ def get_gpu_memory_info() -> dict:
     if not torch.cuda.is_available():
         return {"allocated_gb": 0.0, "reserved_gb": 0.0, "total_gb": 0.0, "free_gb": 0.0}
 
-    allocated = torch.cuda.memory_allocated(0) / 1e9
-    reserved = torch.cuda.memory_reserved(0) / 1e9
-    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+    dev_idx = torch.cuda.current_device()
+    allocated = torch.cuda.memory_allocated(dev_idx) / 1e9
+    reserved = torch.cuda.memory_reserved(dev_idx) / 1e9
+    total = torch.cuda.get_device_properties(dev_idx).total_memory / 1e9
     return {
         "allocated_gb": round(allocated, 2),
         "reserved_gb": round(reserved, 2),
@@ -84,6 +88,29 @@ def log_device_summary() -> None:
     else:
         print("  No GPU — running on CPU")
     print("=" * 50)
+
+
+def gpu_health_check(device: torch.device) -> bool:
+    """Quick GPU sanity check: runs a small CUDA kernel to verify GPU is responsive.
+
+    Use before training to catch dead/flaky GPUs early.
+
+    Returns:
+        True if GPU passes health check, False otherwise
+    """
+    if device.type != "cuda":
+        return True  # CPU is always "healthy"
+    try:
+        a = torch.randn(100, 100, device=device)
+        b = torch.randn(100, 100, device=device)
+        c = a @ b
+        # Force synchronization to catch async errors
+        torch.cuda.synchronize(device)
+        del a, b, c
+        return True
+    except Exception as e:
+        print(f"  GPU HEALTH CHECK FAILED: {e}")
+        return False
 
 
 def supports_amp(device: torch.device) -> bool:

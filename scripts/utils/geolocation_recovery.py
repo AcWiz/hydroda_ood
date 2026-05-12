@@ -6,7 +6,7 @@ Attempts to recover spatial geolocation from DA.nc which lacks lat/lon coordinat
 If DA.nc itself lacks geolocation, attempts directory-level lookup for coordinate sources.
 
 Usage:
-    python scripts/geolocation_recovery.py \
+    python scripts/utils/geolocation_recovery.py \
         --data /fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc \
         --smap-dir /fastersharefiles2/fenglonghan/dataset/SMAP \
         --out-json artifacts/audits/geolocation_recovery_US.json \

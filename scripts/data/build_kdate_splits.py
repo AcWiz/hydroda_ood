@@ -2,7 +2,7 @@
 """Build US Leave-One-Region-Out K-Date Splits.
 
 Usage:
-    python scripts/build_kdate_splits.py \
+    python scripts/data/build_kdate_splits.py \
         --da-nc /fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc \
         --region-masks artifacts/regions/US_region_masks.nc \
         --out-json artifacts/splits/US_loro_kdate_splits.json \
@@ -75,10 +75,12 @@ def main():
     # Pre-index by year range to avoid scanning all cycles
     years = np.array([datetime.fromtimestamp(t).year for t in time_vals])
     source_mask = (years >= 2015) & (years <= 2020)
+    val_mask = years == 2021
     support_mask = years == 2022
     query_mask = (years >= 2023) & (years <= 2025)
 
     print(f"  Source train (2015-2020): {source_mask.sum()} cycles")
+    print(f"  Source val (2021): {val_mask.sum()} cycles")
     print(f"  Target context/support (2022): {support_mask.sum()} cycles")
     print(f"  Target query (2023-2025): {query_mask.sum()} cycles")
 
@@ -112,6 +114,16 @@ def main():
         if np.isfinite(base_valid[idx]).sum() > 0
     ]
     print(f"  Total source train cycles (all regions): {len(source_dates_all)}")
+
+    # Pre-compute source_val_dates ONCE outside region loop (2021 only).
+    print("Pre-computing source_val_dates for all source regions...")
+    all_val_indices = np.where(val_mask)[0]
+    val_dates_all = [
+        (int(idx), dts[idx])
+        for idx in all_val_indices
+        if np.isfinite(base_valid[idx]).sum() > 0
+    ]
+    print(f"  Total source val cycles (all regions): {len(val_dates_all)}")
 
     # Helper: get target dates for a region
     def get_target_dates(region_idx, target_mask, require_valid=False):
@@ -170,6 +182,20 @@ def main():
                     source_dates.append((idx, dt))
         print(f"  Source train cycles: {len(source_dates)}")
 
+        # Get source val dates from pre-computed val_dates_all (2021 only)
+        val_dates = []
+        for src_idx in source_region_indices:
+            region_mask_3d = region_onehot[src_idx]
+            region_size = region_sizes[src_idx]
+            if region_size == 0:
+                continue
+            for idx, dt in val_dates_all:
+                bv = base_valid[idx]
+                valid = (region_mask_3d & (bv > 0)).sum()
+                if valid > 0:
+                    val_dates.append((idx, dt))
+        print(f"  Source val cycles (2021): {len(val_dates)}")
+
         # Get available support dates in 2022
         support_available = get_target_dates(target_idx, support_mask, require_valid=False)
         print(f"  Available support dates in 2022: {len(support_available)}")
@@ -196,6 +222,7 @@ def main():
                     K=K,
                     seed=seed,
                     source_train_dates=dates_to_serializable(source_dates),
+                    source_val_dates=dates_to_serializable(val_dates),
                     support_dates=dates_to_serializable(support_selected),
                     query_dates=dates_to_serializable(query_dates),
                 )

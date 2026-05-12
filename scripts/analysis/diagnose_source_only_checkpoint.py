@@ -11,7 +11,7 @@ Computes detailed diagnostics to understand model behavior:
 - Oracle shrinkage: skill(α * pred_inc) for α ∈ {0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0}
 
 Usage:
-    PYTHONPATH=. python scripts/diagnose_source_only_checkpoint.py \\
+    PYTHONPATH=. python scripts/analysis/diagnose_source_only_checkpoint.py \\
         --checkpoint artifacts/checkpoints/phase4_source_only/US-R1/best.pt \\
         --target_region US-R1 --K 0 --seed 0 \\
         --max_samples 200

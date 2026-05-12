@@ -41,6 +41,7 @@ with open(FREEZE_MANIFEST) as f:
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 K_VALUES = [0, 4, 12]
 SEEDS = [0, 1, 2]  # 3-seed reference run
+_BASE_VALID_MASK_CHANNEL = 11
 _ALL_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 CHUNK = 100
 
@@ -56,7 +57,7 @@ _METRIC_FUNCS = [
     ("increment_mae", lambda p, t, m: increment_mae(p, t, m)),
     ("increment_bias", lambda p, t, m: increment_bias(p, t, m)),
     ("increment_corr", lambda p, t, m: increment_corr(p, t, m)),
-    ("sign_accuracy_deadzone", lambda p, t, m: sign_accuracy_deadzone(p, t, m)),
+    ("sign_accuracy_deadzone", lambda p, t, m: sign_accuracy_deadzone(p, t, m, epsilon=0.005)),
 ]
 
 
@@ -87,11 +88,15 @@ def compute_metrics_for_sample(
     for var_name, fcst_key, analy_key, incr_key, pred_incr_key, pred_analy_key in _VARIABLE_PAIRS:
         forecast = sample[fcst_key]
         true_analysis = sample[analy_key]
+        true_increment = sample[incr_key]
         pred_analysis = pred[pred_analy_key]
+        pred_increment = pred[pred_incr_key]
 
         for metric_name, metric_fn in _METRIC_FUNCS:
             if metric_name == "analysis_skill_vs_forecast":
                 value = metric_fn(pred_analysis, true_analysis, forecast, metric_mask)
+            elif metric_name.startswith("increment_") or metric_name.startswith("sign_accuracy"):
+                value = metric_fn(pred_increment, true_increment, metric_mask)
             else:
                 value = metric_fn(pred_analysis, true_analysis, metric_mask)
 
@@ -228,7 +233,7 @@ class RidgePixelPredictor:
         features.append(x[6].flatten())  # tb_v
         features.append((x[6] - x[5]).flatten())  # tb_v_minus_tb_h
         features.append(x[4].flatten())  # vegopacity
-        features.append((x[11] > 0.5).astype(np.float32).flatten())  # obs_mask
+        features.append((x[_BASE_VALID_MASK_CHANNEL] > 0.5).astype(np.float32).flatten())  # obs_mask
         features.append(np.full(H * W, sin_day, dtype=np.float32))
         features.append(np.full(H * W, cos_day, dtype=np.float32))
 
@@ -277,7 +282,7 @@ def fit_source_mean(target_region, K, splits_by_key, region_stats, region_mask_i
         tgt = tgt_var[time_indices[start:end]].astype(np.float32)
 
         for i in range(inp.shape[0]):
-            base_mask = (inp[i, 11] > 0.5).astype(np.float32)
+            base_mask = (inp[i, _BASE_VALID_MASK_CHANNEL] > 0.5).astype(np.float32)
             loss_mask = (
                 active_region_mask.astype(bool)
                 & (base_mask > 0.5)
@@ -324,7 +329,7 @@ def fit_target_mean(target_region, K, splits_by_key, region_mask_int):
         tgt = tgt_var[time_indices[start:end]].astype(np.float32)
 
         for i in range(inp.shape[0]):
-            base_mask = (inp[i, 11] > 0.5).astype(np.float32)
+            base_mask = (inp[i, _BASE_VALID_MASK_CHANNEL] > 0.5).astype(np.float32)
             loss_mask = (
                 active_region_mask.astype(bool)
                 & (base_mask > 0.5)
@@ -379,7 +384,7 @@ def fit_monthly_mean(target_region, K, splits_by_key, region_mask_int):
             date_str = date_str_map.get(int(ti), "")
             month = _parse_month(date_str)
 
-            base_mask = (inp[i, 11] > 0.5).astype(np.float32)
+            base_mask = (inp[i, _BASE_VALID_MASK_CHANNEL] > 0.5).astype(np.float32)
             loss_mask = (
                 active_region_mask.astype(bool)
                 & (base_mask > 0.5)
@@ -460,7 +465,7 @@ def fit_ridge(target_region, K, splits_by_key, region_mask_int, feature_set, geo
             ti = time_indices[start + i]
             date_str = date_str_map.get(int(ti), "")
 
-            base_mask = (inp[i, 11] > 0.5).astype(np.float32)
+            base_mask = (inp[i, _BASE_VALID_MASK_CHANNEL] > 0.5).astype(np.float32)
             metric_mask = (
                 active_region_mask.astype(bool)
                 & (base_mask > 0.5)
@@ -578,7 +583,7 @@ def evaluate_on_query(predictor, method_name, target_region, K, seed, splits_by_
             analysis_s = tgt[i, 0]
             analysis_r = tgt[i, 1]
 
-            base_mask = (inp[i, 11] > 0.5).astype(np.float32)
+            base_mask = (inp[i, _BASE_VALID_MASK_CHANNEL] > 0.5).astype(np.float32)
             metric_mask = (
                 active_region_mask.astype(bool)
                 & (base_mask > 0.5)

@@ -2,7 +2,7 @@
 """Lightweight runtime diagnostics script for HydroDA-OOD / HyperDA V4.
 
 Usage:
-    PYTHONPATH=. python scripts/print_runtime_info.py
+    PYTHONPATH=. python scripts/utils/print_runtime_info.py
 
 Lighter than check_environment.py — prints only runtime info needed
 for debugging and logging.

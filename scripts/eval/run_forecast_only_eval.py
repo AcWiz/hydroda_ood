@@ -7,7 +7,7 @@ No-leakage declaration:
     - mask coverage audit: computes obs_mask vs label_valid_mask per region
 
 Usage:
-    PYTHONPATH=. python scripts/run_forecast_only_eval.py
+    PYTHONPATH=. python scripts/eval/run_forecast_only_eval.py
 """
 from __future__ import annotations
 

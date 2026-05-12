@@ -2,8 +2,8 @@
 """Check and print environment information for HydroDA-OOD / HyperDA V4.
 
 Usage:
-    PYTHONPATH=. python scripts/check_environment.py
-    PYTHONPATH=. python scripts/check_environment.py --require_gpu  # exit if no CUDA
+    PYTHONPATH=. python scripts/utils/check_environment.py
+    PYTHONPATH=. python scripts/utils/check_environment.py --require_gpu  # exit if no CUDA
 
 This script checks:
 - python version, torch version, torch cuda version

@@ -4,7 +4,7 @@ Export US region data crops from DA.nc into per-region-per-year PT files.
 Memory-efficient: process one region-year at a time, close DA.nc between reads.
 
 Usage:
-    python scripts/export_region_data_crops.py
+    python scripts/data/export_region_data_crops.py
 
 Output structure:
     artifacts/region_crops/US/
@@ -251,7 +251,7 @@ def save_region_nc(rid, numeric_id, region_crop, crop_h, crop_w,
 
 
 def export_region_crops():
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent.parent
     out_root = project_root / "artifacts/region_crops" / "US"
     out_root.mkdir(parents=True, exist_ok=True)
     (out_root / "nc").mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,7 @@
 """Build US Scientific Region Masks from lat/lon grid + bbox definitions.
 
 Usage:
-    python scripts/build_us_region_masks.py \
+    python scripts/data/build_us_region_masks.py \
         --latlon-nc artifacts/geolocation/US_latlon.nc \
         --regions-spec specs/regions_v2.yaml \
         --out-masks artifacts/regions/US_region_masks.nc \
@@ -21,7 +21,7 @@ from pathlib import Path
 import yaml
 
 # Add project root to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from hydroda.regions.masks import (
     build_region_masks_from_bbox,

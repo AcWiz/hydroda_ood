@@ -7,7 +7,7 @@ Outputs:
   - reports/audits/smap_directory_manifest.md
 
 Usage:
-    python scripts/scan_smap_geolocation_sources.py \
+    python scripts/analysis/scan_smap_geolocation_sources.py \
         --smap-dir /fastersharefiles2/fenglonghan/dataset/SMAP \
         --out-manifest-json artifacts/audits/smap_directory_manifest.json \
         --out-manifest-md reports/audits/smap_directory_manifest.md
