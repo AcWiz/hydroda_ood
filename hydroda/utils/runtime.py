@@ -45,8 +45,8 @@ def get_cuda_visible_devices() -> str:
 
 def get_timestamp() -> str:
     """Return UTC ISO timestamp."""
-    from datetime import datetime as _dt
-    return _dt.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    from datetime import datetime as _dt, timezone
+    return _dt.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def format_elapsed(seconds: float) -> str:
@@ -78,11 +78,12 @@ def gather_runtime_info() -> dict:
         info["cudnn_enabled"] = torch.backends.cudnn.enabled
         info["gpu_count"] = torch.cuda.device_count()
         if torch.cuda.device_count() > 0:
-            info["gpu_name"] = torch.cuda.get_device_name(0)
+            dev_idx = torch.cuda.current_device()
+            info["gpu_name"] = torch.cuda.get_device_name(dev_idx)
             gpu = torch.cuda
-            allocated = gpu.memory_allocated(0) / 1e9
-            reserved = gpu.memory_reserved(0) / 1e9
-            total = gpu.get_device_properties(0).total_memory / 1e9
+            allocated = gpu.memory_allocated(dev_idx) / 1e9
+            reserved = gpu.memory_reserved(dev_idx) / 1e9
+            total = gpu.get_device_properties(dev_idx).total_memory / 1e9
             info["gpu_allocated_gb"] = round(allocated, 2)
             info["gpu_reserved_gb"] = round(reserved, 2)
             info["gpu_total_gb"] = round(total, 2)

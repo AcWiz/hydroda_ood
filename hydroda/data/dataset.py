@@ -25,7 +25,7 @@ _ALL_US_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 _SPLIT_TYPE_TO_DATES_KEY = {
     "source_train": "source_train_dates",
     "source_fit": "source_train_dates",
-    "source_val": "source_train_dates",
+    "source_val": "source_val_dates",
     "target_support": "target_support_dates",
     "target_query": "target_query_dates",
 }
@@ -98,22 +98,24 @@ class HydroDADataset(Dataset):
         date_key = _SPLIT_TYPE_TO_DATES_KEY[split_type]
         all_date_records = list(self._split_entry[date_key])
 
-        # Year filtering for source_fit (2015-2020) and source_val (2021)
-        # Protocol V4-final: source_fit: 2015-2020, source_val: 2021
+        # Safety: source_fit must only use 2015-2020 (already enforced by manifest)
         if split_type == "source_fit":
             all_date_records = [
                 d for d in all_date_records
                 if len(d.get("date_str", "")) >= 4 and 2015 <= int(d["date_str"][:4]) <= 2020
             ]
-        elif split_type == "source_val":
-            all_date_records = [
-                d for d in all_date_records
-                if d.get("date_str", "").startswith("2021")
-            ]
 
         self._date_records = all_date_records
         self._time_indices = [int(d["time_index"]) for d in self._date_records]
         self._date_str_map = {int(d["time_index"]): d.get("date_str", "") for d in self._date_records}
+
+        # Validate: source_fit and source_val must have at least one date
+        if split_type in ("source_train", "source_fit", "source_val") and len(self._date_records) == 0:
+            raise ValueError(
+                f"HydroDADataset: {split_type} has zero dates. "
+                f"Manifest {date_key} is empty for target={target_region}, K={K}, seed={seed}. "
+                f"Check split generation (source_val_dates must be populated from 2021 dates)."
+            )
 
         region_ds = xr.open_dataset(region_masks_nc)
         try:
@@ -169,7 +171,6 @@ class HydroDADataset(Dataset):
 
         # base_valid_mask: channel 11 — SMAP observation availability (diagnostic only)
         base_valid_mask = (input_arr[self.base_valid_mask_channel] > 0.5).astype(np.float32)
-        obs_mask = base_valid_mask  # alias for semantic clarity
 
         # label_valid_mask: all 6 SM fields must be finite — primary quality gate
         label_valid_mask = (
@@ -211,7 +212,6 @@ class HydroDADataset(Dataset):
             "increment_surface": increment_surface,
             "increment_rootzone": increment_rootzone,
             "base_valid_mask": base_valid_mask,
-            "obs_mask": obs_mask,
             "label_valid_mask": label_valid_mask,
             "region_mask_integer": self._region_mask_int.copy(),
             "active_region_mask": self._active_region_mask.copy(),
