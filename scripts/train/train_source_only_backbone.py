@@ -22,6 +22,7 @@ import json
 import time
 from pathlib import Path
 
+import numpy as np
 import yaml
 import torch
 
@@ -92,6 +93,10 @@ def parse_args():
     parser.add_argument("--eval_every_epochs", type=int, default=1)
     parser.add_argument("--results_dir", type=str, default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--resume_from", type=str, default=None,
+        help="Path to checkpoint.pt to resume from (last.pt or best.pt). "
+             "When provided, training continues from the saved epoch and "
+             "normalization stats are restored from the checkpoint.")
 
     # First pass: check if --config is provided
     preliminary_args, _ = parser.parse_known_args()
@@ -296,6 +301,14 @@ def main():
     print(f"  device={device}  width={args.width}  amp={args.amp}")
     print("=" * 60)
 
+    # Auto-derive output_dir from checkpoint when resuming without explicit output_dir
+    if args.resume_from and args.output_dir is None:
+        ckpt_path = Path(args.resume_from)
+        # checkpoint is at .../run_name/checkpoints/last.pt or best.pt
+        # run directory is checkpoints' parent
+        args.output_dir = str(ckpt_path.parent.parent)
+        print(f"  output_dir auto-derived from checkpoint: {args.output_dir}")
+
     # Build config for RunManager (args already resolved with YAML defaults + CLI overrides)
     run_config = {
         "target_region": args.target_region,
@@ -364,6 +377,20 @@ def main():
 
     start_time = time.time()
 
+    # Optional resume: load checkpoint before creating Trainer
+    resumed_epoch = 0
+    checkpoint_config = None
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"--resume_from checkpoint not found: {resume_path}")
+        print(f"\nResuming from checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        checkpoint_config = ckpt["config"]
+        resumed_epoch = ckpt["epoch"] + 1
+        print(f"  checkpoint epoch={ckpt['epoch']}  best_loss={ckpt.get('best_loss', 'N/A')}")
+        print(f"  resuming from epoch {resumed_epoch} ({resumed_epoch} already completed)")
+
     # Create source_fit dataset (2015-2020, excluding target region)
     print(f"\nLoading source_fit dataset...")
     train_dataset = HydroDADataset(
@@ -411,6 +438,22 @@ def main():
     # Get checkpoint dir from run_manager
     checkpoint_dir = args.checkpoint_dir or str(run_manager.get_checkpoint_dir())
 
+    # Resume: pre-compute normalization stats from checkpoint so Trainer.__init__
+    # skips recomputation (avoids dataset re-scan and ensures exact stats match)
+    resume_ch_mean = None
+    resume_ch_std = None
+    resume_inc_mean = None
+    resume_inc_std = None
+    if resumed_epoch > 0 and checkpoint_config is not None:
+        if checkpoint_config.get("ch_mean") is not None:
+            resume_ch_mean = np.array(checkpoint_config["ch_mean"], dtype=np.float32)
+        if checkpoint_config.get("ch_std") is not None:
+            resume_ch_std = np.array(checkpoint_config["ch_std"], dtype=np.float32)
+        if checkpoint_config.get("inc_mean") is not None:
+            resume_inc_mean = np.array(checkpoint_config["inc_mean"], dtype=np.float32)
+        if checkpoint_config.get("inc_std") is not None:
+            resume_inc_std = np.array(checkpoint_config["inc_std"], dtype=np.float32)
+
     # Create Trainer with run_manager
     trainer = Trainer(
         model=model,
@@ -436,7 +479,20 @@ def main():
         eval_every_epochs=args.eval_every_epochs,
         wandb_logger=wandb_logger,
         source_val_dataset=source_val_dataset,
+        # Resume: inject pre-computed stats so Trainer.__init__ skips recompute
+        _resume_ch_mean=resume_ch_mean,
+        _resume_ch_std=resume_ch_std,
+        _resume_inc_mean=resume_inc_mean,
+        _resume_inc_std=resume_inc_std,
     )
+
+    # Resume: restore full training state
+    if resumed_epoch > 0:
+        print(f"\nRestoring training state from checkpoint (resuming from epoch {resumed_epoch})...")
+        trainer.load_state(ckpt)
+        print(f"  Restored: optimizer, scheduler, epoch, best_loss, train_history")
+        print(f"  train_history entries so far: {len(trainer.train_history)}")
+        print(f"  val_history entries so far: {len(trainer.val_history)}")
 
     # Save environment info AFTER model is on GPU for accurate memory stats
     run_manager.save_environment_info(gather_runtime_info())

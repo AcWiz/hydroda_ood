@@ -47,7 +47,7 @@ from hydroda.training.losses import MaskedHuberLoss
 from hydroda.utils.run_manager import RunManager
 from hydroda.utils.logger import WandbLogger, ConsoleLogger
 from hydroda.utils.device import resolve_device, log_device_summary
-from hydroda.utils.runtime import gather_runtime_info, get_git_hash
+from hydroda.utils.runtime import gather_runtime_info, get_git_hash, get_timestamp
 
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
@@ -206,7 +206,7 @@ class PromptConditionedTrainer:
         self.eval_every_epochs = eval_every_epochs
         self.wandb_logger = wandb_logger
         self.source_val_dataset = source_val_dataset
-        self.global_to_source_lookup = global_to_source_lookup or [0] * 6
+        self.global_to_source_lookup = global_to_source_lookup if global_to_source_lookup is not None else {i: i for i in range(6)}
 
         # AMP
         self._amp_scaler: Optional[GradScaler] = None
@@ -311,8 +311,11 @@ class PromptConditionedTrainer:
             for s in batch:
                 valid_mask = np.isfinite(s["forecast_surface"]) & np.isfinite(s["forecast_rootzone"])
                 global_rid = _sample_region_from_mask(s["region_mask_integer"], valid_mask)
-                # Map to source-only index (0..num_source_regions-1)
-                src_rid = self.global_to_source_lookup[global_rid] if global_rid < len(self.global_to_source_lookup) else 0
+                # Guard: global_rid must be in source region set, not target
+                # Target region data should never appear in source_fit/val splits
+                assert global_rid in self.global_to_source_lookup, \
+                    f"collate_fn: global_rid={global_rid} not in lookup (target data in source split?)"
+                src_rid = self.global_to_source_lookup[global_rid]
                 region_ids.append(src_rid)
                 months.append(int(s.get("month", 6)))
             return {
@@ -376,6 +379,30 @@ class PromptConditionedTrainer:
         global_step = 0
         train_start_time = time.time()
 
+        # Open console.log for tee output
+        if self.run_manager is not None:
+            self.run_manager.open_console_log()
+            header_lines = [
+                "=" * 60,
+                "Phase 4B: Prompt-Conditioned Shared Backbone Training",
+                f"  target_region={self.run_manager.target_region}",
+                f"  Model params: {sum(p.numel() for p in self.model.parameters()):,}",
+                f"  Prompt encoder params: {sum(p.numel() for p in self.prompt_encoder.parameters()):,}",
+                f"  Max epochs: {self.max_epochs}",
+                f"  Batch size: {self.batch_size}",
+                f"  Accum steps: {self.accum_steps}",
+                f"  LR: {self.lr}",
+                f"  Width: {self.model_width}",
+                f"  Prompt dim: {self.prompt_dim}",
+                f"  AMP: {self.use_amp}",
+                f"  Target increment normalization: {self.target_increment_normalization}",
+                f"  Zero raw increment init: {self.zero_raw_increment_init}",
+                f"  Grad clip: {self.grad_clip}",
+                "=" * 60,
+            ]
+            for line in header_lines:
+                self.run_manager.log_console(line)
+
         for epoch in range(self.current_epoch, self.max_epochs):
             epoch_losses = []
             epoch_start = time.time()
@@ -389,6 +416,18 @@ class PromptConditionedTrainer:
                 months = batch["months"].to(self.device)
 
                 x_norm = self._normalize(x)
+
+                # NaN/Inf guard on normalized input: skip batch if invalid
+                if torch.isnan(x_norm).any() or torch.isinf(x_norm).any():
+                    n_nan = torch.isnan(x_norm).sum().item()
+                    n_inf = torch.isinf(x_norm).sum().item()
+                    line = f"  WARNING: E{epoch} S{batch_idx}: normalized input {n_nan} NaN / {n_inf} Inf — skipping batch"
+                    if self.run_manager is not None:
+                        self.run_manager.log_console(line)
+                    else:
+                        print(line, flush=True)
+                    continue
+
                 target = torch.stack([inc_surface, inc_rootzone], dim=1)
 
                 if self.target_increment_normalization and self._inc_mean is not None:
@@ -396,13 +435,21 @@ class PromptConditionedTrainer:
                     inc_std_t = torch.from_numpy(self._inc_std).to(x.device).view(1, 2, 1, 1)
                     target = (target - inc_mean_t) / inc_std_t
 
-                self.optimizer.zero_grad()
-
                 if self.use_amp:
                     with autocast('cuda'):
                         z = self.prompt_encoder(x_norm, region_ids, months)
                         pred = self.model(x_norm, z)
                         losses = self.loss_fn(pred, target, loss_mask)
+
+                    # NaN/Inf guard on loss: skip batch if invalid
+                    if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
+                        line = f"  WARNING: E{epoch} S{batch_idx}: loss is NaN/Inf — skipping batch"
+                        if self.run_manager is not None:
+                            self.run_manager.log_console(line)
+                        else:
+                            print(line, flush=True)
+                        continue
+
                     self._amp_scaler.scale(losses["total_loss"]).backward()
                     if (batch_idx + 1) % self.accum_steps == 0:
                         if self.grad_clip is not None:
@@ -411,16 +458,28 @@ class PromptConditionedTrainer:
                             torch.nn.utils.clip_grad_norm_(all_p, self.grad_clip)
                         self._amp_scaler.step(self.optimizer)
                         self._amp_scaler.update()
+                        self.optimizer.zero_grad()
                 else:
                     z = self.prompt_encoder(x_norm, region_ids, months)
                     pred = self.model(x_norm, z)
                     losses = self.loss_fn(pred, target, loss_mask)
+
+                    # NaN/Inf guard on loss: skip batch if invalid
+                    if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
+                        line = f"  WARNING: E{epoch} S{batch_idx}: loss is NaN/Inf — skipping batch"
+                        if self.run_manager is not None:
+                            self.run_manager.log_console(line)
+                        else:
+                            print(line, flush=True)
+                        continue
+
                     losses["total_loss"].backward()
                     if (batch_idx + 1) % self.accum_steps == 0:
                         if self.grad_clip is not None:
                             all_p = list(self.model.parameters()) + list(self.prompt_encoder.parameters())
                             torch.nn.utils.clip_grad_norm_(all_p, self.grad_clip)
                         self.optimizer.step()
+                        self.optimizer.zero_grad()
 
                 epoch_losses.append(float(losses["total_loss"].item()))
 
@@ -450,15 +509,18 @@ class PromptConditionedTrainer:
                     if verbose:
                         elapsed = time.time() - train_start_time
                         batches_per_sec = (batch_idx + 1) / max(elapsed, 0.1)
-                        print(
+                        line = (
                             f"  E{epoch:3d} S{batch_idx:5d} | "
                             f"loss={losses['total_loss'].item():.4f} "
                             f"surf={losses['surface_loss'].item():.4f} "
                             f"root={losses['rootzone_loss'].item():.4f} | "
                             f"valid={valid_fraction:.3f} g={grad_norm:.2e} | "
-                            f"{batches_per_sec:.1f}b/s | lr={lr_curr:.2e}",
-                            flush=True,
+                            f"{batches_per_sec:.1f}b/s | lr={lr_curr:.2e}"
                         )
+                        if self.run_manager is not None:
+                            self.run_manager.log_console(line)
+                        else:
+                            print(line, flush=True)
 
                     if self.wandb_logger is not None and self.wandb_logger.enabled:
                         self.wandb_logger.log_step({
@@ -481,7 +543,10 @@ class PromptConditionedTrainer:
             if self.source_val_dataset is not None and epoch % self.eval_every_epochs == 0:
                 source_val_metrics = self._eval_source_val()
                 if verbose:
-                    print(f"  source_val loss={source_val_metrics.get('source_val_loss', float('nan')):.6f}", flush=True)
+                    line = f"  source_val loss={source_val_metrics.get('source_val_loss', float('nan')):.6f}"
+                    if self.run_manager is not None:
+                        self.run_manager.log_console(line)
+                    print(line, flush=True)
 
             # Best checkpoint
             is_best = False
@@ -517,11 +582,17 @@ class PromptConditionedTrainer:
 
             if verbose:
                 sv_str = f" sv_loss={source_val_metrics.get('source_val_loss', float('nan')):.6f}" if source_val_metrics else ""
-                print(
+                line = (
                     f"Epoch {epoch:3d} | loss={avg_loss:.6f}{sv_str} | "
-                    f"lr={record['lr']:.2e} | {elapsed:.1f}s",
-                    flush=True,
+                    f"lr={record['lr']:.2e} | {elapsed:.1f}s"
                 )
+                if self.run_manager is not None:
+                    self.run_manager.log_console(line)
+                print(line, flush=True)
+
+        # Close console.log if opened
+        if self.run_manager is not None:
+            self.run_manager.close_console_log()
 
         return self.train_history
 
@@ -536,12 +607,13 @@ class PromptConditionedTrainer:
             "protocol_freeze_id": self.protocol_freeze_id,
             "split_manifest_path": self.split_manifest_path,
             "git_hash": get_git_hash(),
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": get_timestamp(),
             "model_state_dict": self.model.state_dict(),
             "prompt_encoder_state_dict": self.prompt_encoder.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "train_history": self.train_history,
+            "val_history": self.val_history,
             "config": {
                 "lr": self.lr,
                 "weight_decay": self.weight_decay,
@@ -563,6 +635,30 @@ class PromptConditionedTrainer:
         }
         torch.save(checkpoint, path)
 
+    def load_state(self, checkpoint: Dict[str, Any]) -> int:
+        """Restore full training state from a checkpoint. Returns resumed epoch."""
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.prompt_encoder.load_state_dict(checkpoint["prompt_encoder_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        self.best_loss = float(checkpoint.get("best_loss", float("inf")))
+        self.train_history = checkpoint.get("train_history", [])
+        self.val_history = checkpoint.get("val_history", [])
+        resumed_epoch = checkpoint["epoch"] + 1
+        self.current_epoch = resumed_epoch
+
+        # Restore normalization stats from checkpoint
+        if checkpoint["config"].get("ch_mean") is not None:
+            self._ch_mean = np.array(checkpoint["config"]["ch_mean"], dtype=np.float32)
+        if checkpoint["config"].get("ch_std") is not None:
+            self._ch_std = np.array(checkpoint["config"]["ch_std"], dtype=np.float32)
+        if checkpoint["config"].get("inc_mean") is not None:
+            self._inc_mean = np.array(checkpoint["config"]["inc_mean"], dtype=np.float32)
+        if checkpoint["config"].get("inc_std") is not None:
+            self._inc_std = np.array(checkpoint["config"]["inc_std"], dtype=np.float32)
+
+        return resumed_epoch
+
     def save_summary_json(self, path: Optional[Path] = None) -> None:
         has_source_val = self.source_val_dataset is not None
         summary = {
@@ -576,7 +672,7 @@ class PromptConditionedTrainer:
             "target_query_usage": "eval_only_no_early_stopping",
             "leakage_guard_status": "pass",
             "git_hash": get_git_hash(),
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": get_timestamp(),
             "train_history": self.train_history,
             "val_history": self.val_history,
         }
@@ -595,7 +691,7 @@ def parse_args():
     parser.add_argument("--zero_raw_increment_init", action="store_true")
     parser.add_argument("--target_increment_normalization", action="store_true")
     parser.add_argument("--max_epochs", type=int, default=30)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=None)
@@ -615,6 +711,10 @@ def parse_args():
     parser.add_argument("--log_every_steps", type=int, default=100)
     parser.add_argument("--eval_every_epochs", type=int, default=1)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--resume_from", type=str, default=None,
+        help="Path to checkpoint.pt to resume from (last.pt or best.pt). "
+             "When provided, training continues from the saved epoch and "
+             "normalization stats are restored from the checkpoint.")
     return parser.parse_args()
 
 
@@ -658,6 +758,16 @@ def main():
         "wandb_mode": args.wandb_mode,
         "source_regions": [r for r in _ALL_US_REGIONS if r != args.target_region],
     }
+
+    # Resolve output_dir for RunManager BEFORE creating it.
+    # If resuming, auto-derive from checkpoint path so run_name is consistent.
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"--resume_from checkpoint not found: {resume_path}")
+        if args.output_dir is None:
+            args.output_dir = str(resume_path.parent.parent)
+            print(f"[resume] output_dir auto-derived from checkpoint: {args.output_dir}")
 
     # RunManager
     run_manager = RunManager(
@@ -753,6 +863,22 @@ def main():
     # Checkpoint dir
     checkpoint_dir = args.checkpoint_dir or str(run_manager.get_checkpoint_dir())
 
+    # Optional resume: pre-load checkpoint before creating Trainer
+    resumed_epoch = 0
+    ckpt = None
+
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"--resume_from checkpoint not found: {resume_path}")
+        print(f"\nResuming from checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        resumed_epoch = ckpt["epoch"] + 1
+        print(f"  checkpoint epoch={ckpt['epoch']}  best_loss={ckpt.get('best_loss', 'N/A')}")
+        print(f"  resuming from epoch {resumed_epoch} ({resumed_epoch} already completed)")
+
+        # Auto-derive output_dir from checkpoint path (already done before RunManager creation)
+
     # Create trainer
     trainer = PromptConditionedTrainer(
         model=model,
@@ -780,8 +906,16 @@ def main():
         eval_every_epochs=args.eval_every_epochs,
         wandb_logger=wandb_logger,
         source_val_dataset=source_val_dataset,
-        global_to_source_lookup=_global_to_source_lookup,
+        global_to_source_lookup=global_to_source_idx,
     )
+
+    # Resume: restore full training state after Trainer creation
+    if resumed_epoch > 0 and ckpt is not None:
+        print(f"\nRestoring training state from checkpoint (resuming from epoch {resumed_epoch})...")
+        trainer.load_state(ckpt)
+        print(f"  Restored: optimizer, scheduler, epoch, best_loss, train_history")
+        print(f"  train_history entries so far: {len(trainer.train_history)}")
+        print(f"  val_history entries so far: {len(trainer.val_history)}")
 
     run_manager.save_environment_info(gather_runtime_info())
 

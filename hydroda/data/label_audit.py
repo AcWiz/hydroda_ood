@@ -18,6 +18,7 @@ import numpy as np
 import xarray as xr
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
+from hydroda.utils.runtime import get_timestamp
 from typing import Dict, List, Any, Set
 from collections import defaultdict
 from functools import reduce
@@ -455,7 +456,7 @@ def generate_json_report(
 
     report = {
         "audit_type": "label_availability",
-        "audit_timestamp": datetime.now().isoformat(),
+        "audit_timestamp": get_timestamp(),
         "total_timestamps": len(all_stats),
         "labeled_cycle_count": len(labeled_cycles),
         "labeled_cycle_fraction": len(labeled_cycles) / len(all_stats) if all_stats else 0.0,
@@ -569,7 +570,7 @@ timestamps that cannot be used for effective learning.
 
 ---
 
-*Generated: {datetime.now().isoformat()}*
+*Generated: {get_timestamp()}*
 """
 
     return md

@@ -16,7 +16,7 @@ set -euo pipefail
 TARGET_REGION="${1:-US-R1}"
 K="${2:-0}"
 SEED="${3:-0}"
-export CUDA_VISIBLE_DEVICES="${4:-0}"
+export CUDA_VISIBLE_DEVICES="${4:-1}"
 
 cd "$(dirname "$0")/.."
 
@@ -34,6 +34,7 @@ PYTHONPATH=. python scripts/train/train_source_only_backbone.py \
     --K "${K}" \
     --seed "${SEED}" \
     --device cuda \
-    --amp
+    --amp \
+    --resume_from artifacts/runs/phase4_source_only/phase4_source_only_source_only_US-R1_w32_e30_lr0.0003_nonorm_nozero_s0_20260512_142418/checkpoints/last.pt \
 
 echo "Done: ${TARGET_REGION} K=${K} seed=${SEED}"

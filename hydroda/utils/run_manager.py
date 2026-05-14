@@ -9,7 +9,7 @@ Creates:
     git_info.json
     protocol.json
     data_manifest.json
-    logs/ (train_steps.jsonl, train_epochs.jsonl, eval_metrics.jsonl, console.log)
+    logs_{timestamp}/ (train_steps.jsonl, train_epochs.jsonl, eval_metrics.jsonl, console.log)
     checkpoints/
     results/
     reports/
@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-from hydroda.utils.runtime import get_git_hash, get_git_status
+from hydroda.utils.runtime import get_git_hash, get_git_status, get_timestamp
 
 
 class RunManager:
@@ -83,14 +83,17 @@ class RunManager:
         if seed is not None:
             parts.append(f"s{seed}")
 
-        ts = timestamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ts = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
         parts.append(ts)
 
         self._run_name = run_name or "_".join(parts)
-        self._base_dir = Path(output_dir or "artifacts/runs") / phase / self._run_name
+        if output_dir:
+            self._base_dir = Path(output_dir)
+        else:
+            self._base_dir = Path("artifacts/runs") / phase / self._run_name
 
-        # Create all subdirectories
-        self._log_dir = self._base_dir / "logs"
+        # Create all subdirectories (logs subdir includes timestamp)
+        self._log_dir = self._base_dir / f"logs_{ts}"
         self._checkpoint_dir = self._base_dir / "checkpoints"
         self._results_dir = self._base_dir / "results"
         self._reports_dir = self._base_dir / "reports"
@@ -138,7 +141,7 @@ class RunManager:
         git_info = {
             "git_hash": git_hash,
             "git_status": git_status,
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": get_timestamp(),
         }
         path = self._base_dir / "git_info.json"
         with open(path, "w") as f:
@@ -168,7 +171,7 @@ class RunManager:
 
     def log_console(self, message: str) -> None:
         """Write message to console.log with timestamp."""
-        ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        ts = get_timestamp()
         line = f"[{ts}] {message}\n"
         if self._console_log_file is not None:
             self._console_log_file.write(line)

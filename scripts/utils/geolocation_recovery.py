@@ -18,6 +18,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from hydroda.utils.runtime import get_timestamp
 
 import numpy as np
 import xarray as xr
@@ -39,7 +40,7 @@ def audit_geolocation(data_path: str, smap_dir: str = None) -> dict:
         "blocking_issue": "No projection metadata in DA.nc; grid->lat/lon mapping unavailable",
         "recommendation": "Request lat/lon lookup table or projection metadata from data provider",
         "da_grid": {"height": 256, "width": 640},
-        "audit_timestamp": datetime.now().isoformat(),
+        "audit_timestamp": get_timestamp(),
         "file_path": data_path,
     }
 
