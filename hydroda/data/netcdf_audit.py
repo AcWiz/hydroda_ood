@@ -15,7 +15,7 @@ Memory-efficient: uses chunked reading for large arrays.
 import numpy as np
 import xarray as xr
 from typing import Dict, List, Any, Optional
-from datetime import datetime
+from hydroda.utils.runtime import get_timestamp
 
 
 def compute_memory_estimate(ds: xr.Dataset) -> float:
@@ -264,7 +264,7 @@ def audit_netcdf(path: str, country: str = "US") -> Dict[str, Any]:
 
     audit = {
         "country": country,
-        "audit_timestamp": datetime.now().isoformat(),
+        "audit_timestamp": get_timestamp(),
         "file_path": path,
     }
 

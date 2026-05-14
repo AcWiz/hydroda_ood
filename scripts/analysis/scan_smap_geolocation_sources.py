@@ -18,6 +18,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from hydroda.utils.runtime import get_timestamp
 from pathlib import Path
 
 import numpy as np
@@ -87,7 +88,7 @@ def scan_directory(root_dir: str, max_depth: int = 5) -> dict:
     Returns dict with scan results.
     """
     root_path = Path(root_dir)
-    scan_timestamp = datetime.now().isoformat()
+    scan_timestamp = get_timestamp()
 
     all_files = []
     candidates = {"latlon_npy": [], "grid_coord_nc": [], "proj_config": [],

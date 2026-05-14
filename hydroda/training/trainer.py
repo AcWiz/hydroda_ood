@@ -30,7 +30,7 @@ from hydroda.training.losses import MaskedHuberLoss
 from hydroda.utils.device import gpu_health_check
 from hydroda.utils.run_manager import RunManager
 from hydroda.utils.logger import WandbLogger
-from hydroda.utils.runtime import get_git_hash
+from hydroda.utils.runtime import get_git_hash, get_timestamp
 
 
 def _compute_channel_stats(dataset: HydroDADataset, sample_indices: List[int]) -> Tuple[np.ndarray, np.ndarray]:
@@ -149,6 +149,12 @@ class Trainer:
         eval_every_epochs: int = 1,
         wandb_logger: Optional[WandbLogger] = None,
         source_val_dataset: Optional[HydroDADataset] = None,
+        cuda_sync_debug: bool = False,
+        # Resume: optionally inject pre-computed normalization stats to skip recompute
+        _resume_ch_mean: Optional[np.ndarray] = None,
+        _resume_ch_std: Optional[np.ndarray] = None,
+        _resume_inc_mean: Optional[np.ndarray] = None,
+        _resume_inc_std: Optional[np.ndarray] = None,
     ) -> None:
         self.model = model.to(device)
         self.device = device
@@ -173,11 +179,12 @@ class Trainer:
         self.eval_every_epochs = eval_every_epochs
         self.wandb_logger = wandb_logger
         self.source_val_dataset = source_val_dataset
+        self.cuda_sync_debug = cuda_sync_debug
 
         # AMP scaler
         self._amp_scaler: Optional[GradScaler] = None
         if self.use_amp:
-            self._amp_scaler = GradScaler('cuda')
+            self._amp_scaler = GradScaler('cuda', init_scale=256.0)
 
         # Leakage guard: check normalization scope with actual training dates
         protocol = ProtocolConfig()
@@ -199,16 +206,26 @@ class Trainer:
         )
         self.loss_fn = MaskedHuberLoss(delta=0.01)
 
-        # Compute normalization stats from source_train
+        # Compute normalization stats from source_train (or restore from checkpoint on resume)
         self._ch_mean: Optional[np.ndarray] = None
         self._ch_std: Optional[np.ndarray] = None
-        self._compute_normalization_stats()
+        if _resume_ch_mean is not None and _resume_ch_std is not None:
+            self._ch_mean = _resume_ch_mean
+            self._ch_std = _resume_ch_std
+            print(f"  [resume] Restored ch_mean from checkpoint")
+        else:
+            self._compute_normalization_stats()
 
         # Increment normalization stats (for target increments)
         self._inc_mean: Optional[np.ndarray] = None
         self._inc_std: Optional[np.ndarray] = None
         if self.target_increment_normalization:
-            self._compute_increment_stats()
+            if _resume_inc_mean is not None and _resume_inc_std is not None:
+                self._inc_mean = _resume_inc_mean
+                self._inc_std = _resume_inc_std
+                print(f"  [resume] Restored inc_mean/inc_std from checkpoint")
+            else:
+                self._compute_increment_stats()
 
         # Zero-raw-increment initialization
         if self.zero_raw_increment_init:
@@ -225,6 +242,7 @@ class Trainer:
         # Training state
         self.current_epoch = 0
         self.best_loss = float("inf")
+        self._skipped_steps = 0
         self.train_history: List[Dict[str, float]] = []
         self.val_history: List[Dict[str, float]] = []
 
@@ -327,8 +345,29 @@ class Trainer:
             collate_fn=collate_fn,
         )
 
+    def _forward_and_loss(
+        self, x_norm: torch.Tensor, target: torch.Tensor, loss_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Forward pass + loss, handling AMP consistently.
+
+        Returns (pred, losses_dict).
+        """
+        if self.use_amp:
+            with autocast('cuda'):
+                pred = self.model(x_norm)
+            # pred in fp16 from autocast; cast to fp32 for numerical stability in loss
+            losses = self.loss_fn(pred.float(), target, loss_mask)
+        else:
+            pred = self.model(x_norm)
+            losses = self.loss_fn(pred, target, loss_mask)
+        return pred, losses
+
     def _eval_source_val(self) -> Dict[str, float]:
-        """Run evaluation on source_val split and return metrics dict."""
+        """Run evaluation on source_val split and return metrics dict.
+
+        Computes per-epoch pooled increment RMSE and forecast-relative skill,
+        consistent with ``compute_source_val_shrinkage`` methodology.
+        """
         if self.source_val_dataset is None:
             return {}
         self.model.eval()
@@ -338,6 +377,15 @@ class Trainer:
         total_rootzone = 0.0
         total_valid = 0
         n_batches = 0
+
+        # Accumulate squared errors for pooled RMSE and skill
+        # (same pooling strategy as compute_source_val_shrinkage)
+        sum_sq_err_s = 0.0
+        sum_sq_err_r = 0.0
+        sum_sq_fcst_err_s = 0.0  # (fcst - analysis)^2 for skill denominator
+        sum_sq_fcst_err_r = 0.0
+        n_pixels_s = 0
+        n_pixels_r = 0
 
         with torch.no_grad():
             for batch in loader:
@@ -353,13 +401,7 @@ class Trainer:
                     inc_std_t = torch.from_numpy(self._inc_std).to(x.device).view(1, 2, 1, 1)
                     target = (target - inc_mean_t) / inc_std_t
 
-                if self.use_amp:
-                    with autocast('cuda'):
-                        pred = self.model(x_norm)
-                        losses = self.loss_fn(pred, target, loss_mask)
-                else:
-                    pred = self.model(x_norm)
-                    losses = self.loss_fn(pred, target, loss_mask)
+                pred, losses = self._forward_and_loss(x_norm, target, loss_mask)
 
                 total_loss += float(losses["total_loss"].item())
                 total_surface += float(losses["surface_loss"].item())
@@ -367,12 +409,60 @@ class Trainer:
                 total_valid += int(losses["valid_pixel_count"].item())
                 n_batches += 1
 
+                # Denormalize pred and target for physical-space RMSE
+                pred_denorm_s = pred[:, 0].float()
+                pred_denorm_r = pred[:, 1].float()
+                target_denorm_s = target[:, 0].float()
+                target_denorm_r = target[:, 1].float()
+                if self.target_increment_normalization and self._inc_mean is not None:
+                    pred_denorm_s = pred_denorm_s * self._inc_std[0] + self._inc_mean[0]
+                    pred_denorm_r = pred_denorm_r * self._inc_std[1] + self._inc_mean[1]
+                    target_denorm_s = target_denorm_s * self._inc_std[0] + self._inc_mean[0]
+                    target_denorm_r = target_denorm_r * self._inc_std[1] + self._inc_mean[1]
+
+                # Mask: loss_mask > 0.5 and finite values
+                mask_bool = loss_mask > 0.5
+
+                # Surface
+                valid_s = mask_bool[:, 0]
+                pred_s_flat = pred_denorm_s[valid_s].cpu().numpy().reshape(-1).astype(np.float64)
+                targ_s_flat = target_denorm_s[valid_s].cpu().numpy().reshape(-1).astype(np.float64)
+                valid_finite_s = np.isfinite(pred_s_flat) & np.isfinite(targ_s_flat)
+                if valid_finite_s.sum() > 0:
+                    sum_sq_err_s += np.sum((pred_s_flat[valid_finite_s] - targ_s_flat[valid_finite_s]) ** 2)
+                    n_pixels_s += valid_finite_s.sum()
+                    # skill denominator: (forecast - analysis) = (0 - true_inc) since fcst + inc = analysis
+                    sum_sq_fcst_err_s += np.sum(targ_s_flat[valid_finite_s] ** 2)
+
+                # Rootzone
+                valid_r = mask_bool[:, 1]
+                pred_r_flat = pred_denorm_r[valid_r].cpu().numpy().reshape(-1).astype(np.float64)
+                targ_r_flat = target_denorm_r[valid_r].cpu().numpy().reshape(-1).astype(np.float64)
+                valid_finite_r = np.isfinite(pred_r_flat) & np.isfinite(targ_r_flat)
+                if valid_finite_r.sum() > 0:
+                    sum_sq_err_r += np.sum((pred_r_flat[valid_finite_r] - targ_r_flat[valid_finite_r]) ** 2)
+                    n_pixels_r += valid_finite_r.sum()
+                    sum_sq_fcst_err_r += np.sum(targ_r_flat[valid_finite_r] ** 2)
+
         self.model.train()
+
+        # Compute pooled RMSE and skill
+        rmse_s = np.sqrt(sum_sq_err_s / max(n_pixels_s, 1)) if n_pixels_s > 0 else float("nan")
+        rmse_r = np.sqrt(sum_sq_err_r / max(n_pixels_r, 1)) if n_pixels_r > 0 else float("nan")
+        rmse_fcst_s = np.sqrt(sum_sq_fcst_err_s / max(n_pixels_s, 1)) if n_pixels_s > 0 else float("nan")
+        rmse_fcst_r = np.sqrt(sum_sq_fcst_err_r / max(n_pixels_r, 1)) if n_pixels_r > 0 else float("nan")
+        skill_s = 1.0 - rmse_s / rmse_fcst_s if n_pixels_s > 0 and rmse_fcst_s > 0 else float("nan")
+        skill_r = 1.0 - rmse_r / rmse_fcst_r if n_pixels_r > 0 and rmse_fcst_r > 0 else float("nan")
+
         return {
             "source_val_loss": total_loss / max(n_batches, 1),
             "source_val_surface_loss": total_surface / max(n_batches, 1),
             "source_val_rootzone_loss": total_rootzone / max(n_batches, 1),
             "source_val_valid_px": total_valid,
+            "source_val_rmse_surface": float(rmse_s),
+            "source_val_rmse_rootzone": float(rmse_r),
+            "source_val_skill_surface": float(skill_s),
+            "source_val_skill_rootzone": float(skill_r),
         }
 
     def train(self, verbose: bool = True) -> List[Dict[str, float]]:
@@ -458,11 +548,12 @@ class Trainer:
                     inc_std_t = torch.from_numpy(self._inc_std).to(x.device).view(1, 2, 1, 1)
                     target = (target - inc_mean_t) / inc_std_t
 
-                # Forward pass
-                ctx = autocast('cuda') if self.use_amp else nullcontext()
-                with ctx:
-                    pred = self.model(x_norm)
-                    losses = self.loss_fn(pred, target, loss_mask)
+                # Forward pass + loss (AMP handled in _forward_and_loss)
+                pred, losses = self._forward_and_loss(x_norm, target, loss_mask)
+
+                # Optional CUDA sync for precise error attribution (debug only)
+                if self.cuda_sync_debug and self.device == "cuda":
+                    torch.cuda.synchronize()
 
                 # NaN/Inf guard on loss: skip batch if invalid
                 if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
@@ -473,12 +564,16 @@ class Trainer:
                 if self.use_amp:
                     self._amp_scaler.scale(losses["total_loss"]).backward()
                     if (batch_idx + 1) % self.accum_steps == 0:
+                        prev_scale = self._amp_scaler.get_scale()
                         if self.grad_clip is not None:
                             self._amp_scaler.unscale_(self.optimizer)
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                         self._amp_scaler.step(self.optimizer)
                         self._amp_scaler.update()
                         self.optimizer.zero_grad()
+                        # Track gradient overflow skips (scale reduction = Inf/NaN detected)
+                        if self._amp_scaler.get_scale() < prev_scale:
+                            self._skipped_steps += 1
                 else:
                     losses["total_loss"].backward()
                     if (batch_idx + 1) % self.accum_steps == 0:
@@ -523,6 +618,7 @@ class Trainer:
                     valid_px = int(losses["valid_pixel_count"].item())
                     total_px = loss_mask.numel()
                     valid_fraction = valid_px / max(total_px, 1)
+                    amp_scale = self._amp_scaler.get_scale() if self.use_amp else 0.0
 
                     step_data = {
                         "epoch": epoch,
@@ -544,6 +640,8 @@ class Trainer:
                         "true_inc_rootzone_std": round(target_r_std, 6),
                         "gpu_allocated_gb": round(gpu_alloc, 2),
                         "gpu_reserved_gb": round(gpu_res, 2),
+                        "amp_scale": amp_scale,
+                        "skipped_steps": self._skipped_steps,
                     }
 
                     # JSONL step log
@@ -561,7 +659,8 @@ class Trainer:
                             f"valid={valid_fraction:.3f} g={grad_norm:.2e} | "
                             f"pred_s={pred_s_mean:.3f}/{pred_s_std:.3f} pred_r={pred_r_mean:.3f}/{pred_r_std:.3f} | "
                             f"true_s={target_s_mean:.3f}/{target_s_std:.3f} true_r={target_r_mean:.3f}/{target_r_std:.3f} | "
-                            f"gpu={gpu_alloc:.1f}GB {batches_per_sec:.1f}b/s | lr={lr:.2e}",
+                            f"gpu={gpu_alloc:.1f}GB {batches_per_sec:.1f}b/s | lr={lr:.2e} "
+                            f"amp_scale={amp_scale:.0f} skip={self._skipped_steps}",
                             flush=True,
                         )
 
@@ -577,6 +676,7 @@ class Trainer:
                             "train/pred_inc_surface_std": pred_s_std,
                             "train/pred_inc_rootzone_std": pred_r_std,
                             "train/gpu_memory_gb": gpu_alloc,
+                            "train/skipped_steps": self._skipped_steps,
                         }
                         self.wandb_logger.log_step(wandb_data)
 
@@ -597,7 +697,16 @@ class Trainer:
                 source_val_metrics = self._eval_source_val()
                 if verbose:
                     sv_loss = source_val_metrics.get("source_val_loss", float("nan"))
-                    print(f"  source_val loss={sv_loss:.6f}", flush=True)
+                    sv_rmse_s = source_val_metrics.get("source_val_rmse_surface", float("nan"))
+                    sv_rmse_r = source_val_metrics.get("source_val_rmse_rootzone", float("nan"))
+                    sv_skill_s = source_val_metrics.get("source_val_skill_surface", float("nan"))
+                    sv_skill_r = source_val_metrics.get("source_val_skill_rootzone", float("nan"))
+                    print(
+                        f"  source_val loss={sv_loss:.6f}"
+                        f"  rmse_s={sv_rmse_s:.6f} r={sv_rmse_r:.6f}"
+                        f"  skill_s={sv_skill_s:.4f} r={sv_skill_r:.4f}",
+                        flush=True,
+                    )
                 if self._jsonl_logger is not None:
                     self._jsonl_logger.log_eval({"epoch": epoch, **source_val_metrics})
 
@@ -626,6 +735,7 @@ class Trainer:
                 "valid_pixel_count": total_valid,
                 "lr": float(self.optimizer.param_groups[0]["lr"]),
                 "elapsed_s": elapsed,
+                "skipped_steps": self._skipped_steps,
             }
             record.update(source_val_metrics)
             self.train_history.append(record)
@@ -647,7 +757,13 @@ class Trainer:
                 sv_str = ""
                 if source_val_metrics:
                     sv_loss = source_val_metrics.get("source_val_loss", float("nan"))
-                    sv_str = f"  sv_loss={sv_loss:.6f}"
+                    sv_rmse_s = source_val_metrics.get("source_val_rmse_surface", float("nan"))
+                    sv_rmse_r = source_val_metrics.get("source_val_rmse_rootzone", float("nan"))
+                    sv_skill_s = source_val_metrics.get("source_val_skill_surface", float("nan"))
+                    sv_skill_r = source_val_metrics.get("source_val_skill_rootzone", float("nan"))
+                    sv_str = (f"  sv_loss={sv_loss:.6f}"
+                              f"  sv_rmse_s={sv_rmse_s:.6f} r={sv_rmse_r:.6f}"
+                              f"  sv_skill_s={sv_skill_s:.4f} r={sv_skill_r:.4f}")
                 epoch_summary = (
                     f"Epoch {epoch:3d} | "
                     f"loss={avg_loss:.6f} | "
@@ -655,7 +771,8 @@ class Trainer:
                     f"rootzone={avg_rootzone:.6f} | "
                     f"valid_px={total_valid:9d} | "
                     f"lr={record['lr']:.2e} | "
-                    f"{elapsed:.1f}s{sv_str}"
+                    f"{elapsed:.1f}s | skip={self._skipped_steps}"
+                    f"{sv_str}"
                 )
                 if self.run_manager is not None:
                     self.run_manager.log_console(epoch_summary)
@@ -711,11 +828,12 @@ class Trainer:
             "protocol_freeze_id": self.protocol_freeze_id,
             "split_manifest_path": self.split_manifest_path,
             "git_hash": get_git_hash(),
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": get_timestamp(),
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "train_history": self.train_history,
+            "val_history": self.val_history,
             "config": {
                 "lr": self.lr,
                 "weight_decay": self.weight_decay,
@@ -760,7 +878,7 @@ class Trainer:
             "target_query_usage": "eval_only_no_early_stopping",
             "leakage_guard_status": "pass",
             "git_hash": get_git_hash(),
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": get_timestamp(),
             "train_history": self.train_history,
             "val_history": self.val_history,
         }
@@ -778,3 +896,15 @@ class Trainer:
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         return checkpoint
+
+    def load_state(self, checkpoint: Dict[str, Any]) -> int:
+        """Restore full training state from a checkpoint. Returns resumed epoch."""
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        self.current_epoch = checkpoint["epoch"] + 1
+        self.best_loss = checkpoint.get("best_loss", float("inf"))
+        self.train_history = checkpoint.get("train_history", [])
+        self.val_history = checkpoint.get("val_history", [])
+
+        return self.current_epoch

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from tqdm import tqdm
+
 from hydroda.metrics.skill import (
     compute_variable_metrics,
     effective_mask_fraction,
@@ -55,7 +57,7 @@ def evaluate_split(
     rows: List[Dict[str, Any]] = []
 
     n_eval = len(dataset) if max_samples is None else min(len(dataset), max_samples)
-    for idx in range(n_eval):
+    for idx in tqdm(range(n_eval), total=n_eval, desc=f"Evaluating {split_role}", unit="samples"):
         sample = all_samples[idx] if all_samples is not None else dataset[idx]
         pred = predictor.predict(sample)
         mask = sample["metric_mask"]

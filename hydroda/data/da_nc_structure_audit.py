@@ -16,7 +16,7 @@ import json
 import numpy as np
 import xarray as xr
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime, timedelta
+from hydroda.utils.runtime import get_timestamp
 from collections import Counter
 
 
@@ -589,7 +589,7 @@ def audit_da_nc_structure(
     ds = xr.open_dataset(da_nc_path, engine="netcdf4", decode_times=False)
 
     audit = {
-        "audit_timestamp": datetime.now().isoformat(),
+        "audit_timestamp": get_timestamp(),
         "file_path": da_nc_path,
         "country": "US",
     }

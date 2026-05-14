@@ -18,6 +18,7 @@ import numpy as np
 import xarray as xr
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
+from hydroda.utils.runtime import get_timestamp
 from typing import Dict, List, Any, Tuple, Set
 from collections import defaultdict
 import sys
@@ -417,7 +418,7 @@ def generate_json_report(
 
     report = {
         "audit_type": "label_threshold_sensitivity",
-        "audit_timestamp": datetime.now().isoformat(),
+        "audit_timestamp": get_timestamp(),
         "summary": summary,
         "sensitivity_tables": sensitivity_tables,
         "split_query_stats": split_stats_dict,
@@ -560,7 +561,7 @@ def generate_markdown_report(
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append(f"*Generated: {datetime.now().isoformat()}*")
+    lines.append(f"*Generated: {get_timestamp()}*")
 
     return "\n".join(lines)
 
