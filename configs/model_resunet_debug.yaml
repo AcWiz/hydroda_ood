@@ -7,7 +7,7 @@ model:
   in_channels: 12
   out_channels: 2
   width: 16
-  zero_raw_increment_init: false  # standard zero-init for debug
+  zero_raw_increment_init: true
 
 training:
   max_epochs: 5

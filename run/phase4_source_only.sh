@@ -35,6 +35,7 @@ PYTHONPATH=. python scripts/train/train_source_only_backbone.py \
     --seed "${SEED}" \
     --device cuda \
     --amp \
-    --resume_from artifacts/runs/phase4_source_only/phase4_source_only_source_only_US-R1_w32_e30_lr0.0003_nonorm_nozero_s0_20260512_142418/checkpoints/last.pt \
+    --resume_from "artifacts/runs/phase4_source_only/phase4_source_only_source_only_US-R1_w32_e30_lr0.0003_nonorm_s0_20260515_155806/checkpoints/last.pt" \
+    --max_epochs 70 \
 
 echo "Done: ${TARGET_REGION} K=${K} seed=${SEED}"
