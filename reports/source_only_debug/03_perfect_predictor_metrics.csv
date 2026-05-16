@@ -1,0 +1,4 @@
+split,predictor,skill_surface_mean,skill_surface_std,skill_rootzone_mean,skill_rootzone_std,an_rmse_surface_mean,an_rmse_rootzone_mean,inc_rmse_surface_mean,inc_rmse_rootzone_mean,n_samples
+source_train,perfect_increment,1.0,0.0,1.0,0.0,0.0,0.0,0.0,0.0,10
+source_val,perfect_increment,1.0,0.0,1.0,0.0,0.0,0.0,0.0,0.0,10
+target_query,perfect_increment,1.0,0.0,1.0,0.0,0.0,0.0,0.0,0.0,10

@@ -53,10 +53,14 @@ def parse_args():
     # Model
     parser.add_argument("--width", type=int, default=None,
         help="SmallResUNet width: 16 for development, 32 for full model (default from YAML or 32)")
-    parser.add_argument("--zero_raw_increment_init", action="store_true",
+    parser.add_argument("--zero_raw_increment_init", action="store_true", default=None,
         help="Zero-initialize output head so pred_inc_raw ≈ 0 at init")
-    parser.add_argument("--target_increment_normalization", action="store_true",
+    parser.add_argument("--no_zero_raw_increment_init", action="store_false", dest="zero_raw_increment_init",
+        help="Disable zero-raw-increment init")
+    parser.add_argument("--target_increment_normalization", action="store_true", default=None,
         help="Normalize target increments during training")
+    parser.add_argument("--no_target_increment_normalization", action="store_false", dest="target_increment_normalization",
+        help="Disable target increment normalization")
     # Training
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)

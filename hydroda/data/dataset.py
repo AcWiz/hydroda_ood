@@ -185,19 +185,12 @@ class HydroDADataset(Dataset):
         # region_mask: pixels in active region(s)
         region_mask = (self._active_region_mask > 0.5).astype(np.float32)
 
-        # loss_mask: for training compatibility (still requires obs + finiteness)
-        loss_mask = (
-            (self._active_region_mask > 0.5)
-            & (base_valid_mask > 0.5)
-            & np.isfinite(forecast_surface)
-            & np.isfinite(forecast_rootzone)
-            & np.isfinite(analysis_surface)
-            & np.isfinite(analysis_rootzone)
-        ).astype(np.float32)
-
-        # metric_mask: for evaluation — region_mask & label_valid_mask ONLY
-        # Channel 11 (obs_mask) is NOT included — SMAP coverage gaps do NOT block evaluation
-        metric_mask = np.logical_and(region_mask, label_valid_mask).astype(np.float32)
+        # loss_mask = metric_mask: training and evaluation use the same mask.
+        # Channel 11 (base_valid_mask) is NOT required in training — SMAP coverage
+        # gaps do not indicate missing input features and would cause a catastrophic
+        # train-eval distribution mismatch (see FINAL_SOURCE_ONLY_DIAGNOSIS.md).
+        loss_mask = np.logical_and(region_mask, label_valid_mask).astype(np.float32)
+        metric_mask = loss_mask
 
         date_str = self._date_str_map.get(time_index, "")
         month, season = _month_and_season(date_str)

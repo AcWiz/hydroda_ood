@@ -421,12 +421,11 @@ class Trainer:
                     target_denorm_r = target_denorm_r * self._inc_std[1] + self._inc_mean[1]
 
                 # Mask: loss_mask > 0.5 and finite values
-                mask_bool = loss_mask > 0.5
+                mask_bool = loss_mask > 0.5  # [B, H, W] — shared by surface and rootzone
 
                 # Surface
-                valid_s = mask_bool[:, 0]
-                pred_s_flat = pred_denorm_s[valid_s].cpu().numpy().reshape(-1).astype(np.float64)
-                targ_s_flat = target_denorm_s[valid_s].cpu().numpy().reshape(-1).astype(np.float64)
+                pred_s_flat = pred_denorm_s[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
+                targ_s_flat = target_denorm_s[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
                 valid_finite_s = np.isfinite(pred_s_flat) & np.isfinite(targ_s_flat)
                 if valid_finite_s.sum() > 0:
                     sum_sq_err_s += np.sum((pred_s_flat[valid_finite_s] - targ_s_flat[valid_finite_s]) ** 2)
@@ -435,9 +434,8 @@ class Trainer:
                     sum_sq_fcst_err_s += np.sum(targ_s_flat[valid_finite_s] ** 2)
 
                 # Rootzone
-                valid_r = mask_bool[:, 1]
-                pred_r_flat = pred_denorm_r[valid_r].cpu().numpy().reshape(-1).astype(np.float64)
-                targ_r_flat = target_denorm_r[valid_r].cpu().numpy().reshape(-1).astype(np.float64)
+                pred_r_flat = pred_denorm_r[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
+                targ_r_flat = target_denorm_r[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
                 valid_finite_r = np.isfinite(pred_r_flat) & np.isfinite(targ_r_flat)
                 if valid_finite_r.sum() > 0:
                     sum_sq_err_r += np.sum((pred_r_flat[valid_finite_r] - targ_r_flat[valid_finite_r]) ** 2)
