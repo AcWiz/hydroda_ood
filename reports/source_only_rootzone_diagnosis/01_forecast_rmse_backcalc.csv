@@ -1,0 +1,5 @@
+split,variable,skill_mean,increment_rmse,forecast_only_rmse,inc_rmse_over_fcst_rmse
+source_val,surface,0.43694512,0.00300059,0.00532912,0.56305488
+source_val,rootzone,-1.60620180,0.00064195,0.00024632,2.60620180
+target_query,surface,-1.95041783,0.00440130,0.00149176,2.95041783
+target_query,rootzone,-12.20868938,0.00057933,0.00004386,13.20868938

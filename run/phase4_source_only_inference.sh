@@ -158,12 +158,12 @@ if src and tgt:
     ood_gap_surf = (src["surface"]["skill_mean"] - tgt["surface"]["skill_mean"]) if src and tgt else None
     ood_gap_root = (src["rootzone"]["skill_mean"] - tgt["rootzone"]["skill_mean"]) if src and tgt else None
     print()
-    print("## OOD Gap (source_val − target_query)")
+    print("## OOD Gap (source_val − target_query, positive = OOD degradation)")
     print("|              |    Surface    |   Rootzone   |")
     print("|:-------------|-------------:|-------------:|")
     print(f"| skill_gap    | {fmt(ood_gap_surf, 2):>10} | {fmt(ood_gap_root, 2):>10} |")
     print()
-    print("> Note: positive gap = target better than expected (rare); negative = OOD degradation.")
+    print("> Note: positive gap = target_query worse than source_val (OOD degradation); negative gap = target better than expected (rare).")
 
     # ── Evaluation metadata ─────────────────────────────────────────────────────
     n_src  = src.get("n_samples_evaluated", "?")

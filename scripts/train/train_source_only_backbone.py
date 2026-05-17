@@ -61,6 +61,13 @@ def parse_args():
         help="Normalize target increments during training")
     parser.add_argument("--no_target_increment_normalization", action="store_false", dest="target_increment_normalization",
         help="Disable target increment normalization")
+    parser.add_argument("--target_normalization_mode", type=str, default=None,
+        choices=["none", "per_variable_increment_std"],
+        help="Convenience: set target normalization mode. "
+             "'none' = raw MSE (no target norm). "
+             "'per_variable_increment_std' = normalize each variable to unit variance "
+             "(maps to --target_increment_normalization --zero_raw_increment_init). "
+             "Overrides explicit --target_increment_normalization / --zero_raw_increment_init flags.")
     # Training
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
@@ -152,7 +159,22 @@ def parse_args():
     if parser.get_default("num_workers") is None:
         parser.set_defaults(num_workers=0)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Map --target_normalization_mode to underlying flags
+    if args.target_normalization_mode is not None:
+        if args.target_normalization_mode == "per_variable_increment_std":
+            args.target_increment_normalization = True
+            args.zero_raw_increment_init = True
+            print(f"  [target_normalization_mode] per_variable_increment_std → "
+                  f"target_increment_normalization=True, zero_raw_increment_init=True")
+        elif args.target_normalization_mode == "none":
+            args.target_increment_normalization = False
+            args.zero_raw_increment_init = False
+            print(f"  [target_normalization_mode] none → "
+                  f"target_increment_normalization=False, zero_raw_increment_init=False")
+
+    return args
 
 
 def compute_source_val_shrinkage(trainer, source_val_dataset, device):
@@ -330,6 +352,9 @@ def main():
         "use_amp": args.amp,
         "zero_raw_increment_init": args.zero_raw_increment_init,
         "target_increment_normalization": args.target_increment_normalization,
+        "target_normalization_mode": args.target_normalization_mode or (
+            "per_variable_increment_std" if args.target_increment_normalization else "none"
+        ),
         "log_every_steps": args.log_every_steps,
         "eval_every_epochs": args.eval_every_epochs,
         "wandb_mode": args.wandb_mode,
@@ -497,6 +522,19 @@ def main():
         print(f"  Restored: optimizer, scheduler, epoch, best_loss, train_history")
         print(f"  train_history entries so far: {len(trainer.train_history)}")
         print(f"  val_history entries so far: {len(trainer.val_history)}")
+
+    # Print normalization mode summary
+    print(f"\n{'=' * 40}")
+    print(f"Normalization Mode Summary")
+    print(f"  target_increment_normalization: {trainer.target_increment_normalization}")
+    print(f"  zero_raw_increment_init:        {trainer.zero_raw_increment_init}")
+    if trainer.target_increment_normalization and trainer._inc_mean is not None:
+        print(f"  inc_mean (surface, rootzone):   {trainer._inc_mean[0]:.6f}, {trainer._inc_mean[1]:.6f}")
+        print(f"  inc_std  (surface, rootzone):   {trainer._inc_std[0]:.6f}, {trainer._inc_std[1]:.6f}")
+        print(f"  → targets normalized to ~N(0,1) per variable; loss in normalized space")
+    else:
+        print(f"  → raw MSE loss (no target normalization)")
+    print(f"{'=' * 40}")
 
     # Save environment info AFTER model is on GPU for accurate memory stats
     run_manager.save_environment_info(gather_runtime_info())
