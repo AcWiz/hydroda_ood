@@ -120,8 +120,30 @@ class HydroDADataset(Dataset):
         region_ds = xr.open_dataset(region_masks_nc)
         try:
             self._region_mask_int = region_ds["region_mask_integer"].values.astype(np.int16)
+            # Latitude weight for cos(lat) area weighting (WeatherBench2 convention)
+            if "latitude" in region_ds:
+                self._latitude = region_ds["latitude"].values.astype(np.float32)
+            else:
+                self._latitude = None
         finally:
             region_ds.close()
+
+        # Fallback: load latitude from geolocation artifact if not in region masks
+        if self._latitude is None:
+            latlon_path = Path("artifacts/geolocation/US_latlon.nc")
+            if latlon_path.exists():
+                lat_ds = xr.open_dataset(latlon_path)
+                try:
+                    self._latitude = lat_ds["latitude"].values.astype(np.float32)
+                finally:
+                    lat_ds.close()
+
+        if self._latitude is not None:
+            lat_rad = np.deg2rad(self._latitude.astype(np.float64))
+            self._latitude_weight = np.cos(lat_rad).clip(min=0.0).astype(np.float32)
+        else:
+            # No latitude available — uniform weights
+            self._latitude_weight = np.ones(self._region_mask_int.shape, dtype=np.float32)
 
         rnum_list = [int(rid.split("-R")[1]) for rid in self._active_region_ids]
         self._active_region_mask = np.isin(self._region_mask_int, rnum_list).astype(np.float32)
@@ -154,6 +176,31 @@ class HydroDADataset(Dataset):
     def __len__(self) -> int:
         return len(self._time_indices)
 
+    def _resolve_sample_region_id(self, forecast_surface: np.ndarray) -> str:
+        """Resolve the actual region ID for a sample by sampling center pixel region.
+
+        Uses the center pixel of the forecast surface to look up the region ID
+        from region_mask_integer. Falls back to most frequent region in valid area.
+        """
+        # Try center pixel first
+        h, w = forecast_surface.shape
+        cy, cx = h // 2, w // 2
+        center_rnum = int(self._region_mask_int[cy, cx])
+        if center_rnum > 0:
+            return f"US-R{center_rnum}"
+
+        # Fallback: most frequent valid region
+        valid_mask = np.isfinite(forecast_surface)
+        if valid_mask.any():
+            valid_rnums = self._region_mask_int[valid_mask]
+            unique, counts = np.unique(valid_rnums, return_counts=True)
+            if len(unique) > 0:
+                most_freq = unique[np.argmax(counts)]
+                if most_freq > 0:
+                    return f"US-R{most_freq}"
+
+        return self.target_region
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Index {idx} out of range for dataset of size {len(self)}")
@@ -185,6 +232,10 @@ class HydroDADataset(Dataset):
         # region_mask: pixels in active region(s)
         region_mask = (self._active_region_mask > 0.5).astype(np.float32)
 
+        # Resolve sample_region_id: determine the actual region ID for this sample
+        # by sampling the center pixel region from region_mask_integer
+        sample_region_id = self._resolve_sample_region_id(forecast_surface)
+
         # loss_mask = metric_mask: training and evaluation use the same mask.
         # Channel 11 (base_valid_mask) is NOT required in training — SMAP coverage
         # gaps do not indicate missing input features and would cause a catastrophic
@@ -206,11 +257,13 @@ class HydroDADataset(Dataset):
             "increment_rootzone": increment_rootzone,
             "base_valid_mask": base_valid_mask,
             "label_valid_mask": label_valid_mask,
-            "region_mask_integer": self._region_mask_int.copy(),
-            "active_region_mask": self._active_region_mask.copy(),
+            "region_mask_integer": self._region_mask_int,
+            "active_region_mask": self._active_region_mask,
             "region_mask": region_mask,
             "loss_mask": loss_mask,
             "metric_mask": metric_mask,
+            "latitude": self._latitude,
+            "latitude_weight": self._latitude_weight,
             "date_str": date_str,
             "month": month,
             "season": season,
@@ -221,6 +274,7 @@ class HydroDADataset(Dataset):
             "split_role": self.split_type,
             "regime_id": self.regime_id,
             "split_id": split_id,
+            "sample_region_id": sample_region_id,
             "K": self.K,
             "seed": self.seed,
         }

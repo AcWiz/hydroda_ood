@@ -150,6 +150,7 @@ class Trainer:
         wandb_logger: Optional[WandbLogger] = None,
         source_val_dataset: Optional[HydroDADataset] = None,
         cuda_sync_debug: bool = False,
+        checkpoint_every_n_epochs: int = 5,
         # Resume: optionally inject pre-computed normalization stats to skip recompute
         _resume_ch_mean: Optional[np.ndarray] = None,
         _resume_ch_std: Optional[np.ndarray] = None,
@@ -180,6 +181,11 @@ class Trainer:
         self.wandb_logger = wandb_logger
         self.source_val_dataset = source_val_dataset
         self.cuda_sync_debug = cuda_sync_debug
+        self.checkpoint_every_n_epochs = checkpoint_every_n_epochs
+
+        # Checkpoint selection tracking (beyond best loss)
+        self.best_source_val_skill_mean = -float("inf")
+        self.best_source_val_rmse_mean = float("inf")
 
         # AMP scaler
         self._amp_scaler: Optional[GradScaler] = None
@@ -421,7 +427,7 @@ class Trainer:
                     target_denorm_r = target_denorm_r * self._inc_std[1] + self._inc_mean[1]
 
                 # Mask: loss_mask > 0.5 and finite values
-                mask_bool = loss_mask > 0.5  # [B, H, W] — shared by surface and rootzone
+                mask_bool = (loss_mask > 0.5).squeeze(1)  # [B, H, W] — shared by surface and rootzone
 
                 # Surface
                 pred_s_flat = pred_denorm_s[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
@@ -723,6 +729,43 @@ class Trainer:
                 self.best_loss = best_metric
                 self.save_checkpoint(self.checkpoint_dir / "best.pt", epoch, best_metric, "best")
 
+            # --- Flexible checkpoint strategy ---
+            # Always save latest
+            self.save_checkpoint(self.checkpoint_dir / "checkpoint_latest.pt", epoch, avg_loss, "latest")
+
+            # Periodic epoch snapshots (every N epochs)
+            if epoch > 0 and epoch % self.checkpoint_every_n_epochs == 0:
+                self.save_checkpoint(
+                    self.checkpoint_dir / f"checkpoint_epoch_{epoch:03d}.pt",
+                    epoch, avg_loss, f"epoch_{epoch}"
+                )
+
+            # Best by source_val skill (mean of surface + rootzone)
+            if source_val_metrics:
+                skill_s = source_val_metrics.get("source_val_skill_surface", float("nan"))
+                skill_r = source_val_metrics.get("source_val_skill_rootzone", float("nan"))
+                if np.isfinite(skill_s) and np.isfinite(skill_r):
+                    skill_mean = (skill_s + skill_r) / 2.0
+                    if skill_mean > self.best_source_val_skill_mean:
+                        self.best_source_val_skill_mean = skill_mean
+                        self.save_checkpoint(
+                            self.checkpoint_dir / "checkpoint_best_source_val_skill_mean.pt",
+                            epoch, avg_loss, "best_skill"
+                        )
+
+                # Best by source_val RMSE (mean of surface + rootzone)
+                rmse_s = source_val_metrics.get("source_val_rmse_surface", float("nan"))
+                rmse_r = source_val_metrics.get("source_val_rmse_rootzone", float("nan"))
+                if np.isfinite(rmse_s) and np.isfinite(rmse_r):
+                    rmse_mean = (rmse_s + rmse_r) / 2.0
+                    if rmse_mean < self.best_source_val_rmse_mean:
+                        self.best_source_val_rmse_mean = rmse_mean
+                        self.save_checkpoint(
+                            self.checkpoint_dir / "checkpoint_best_source_val_rmse_mean.pt",
+                            epoch, avg_loss, "best_rmse"
+                        )
+
+            # Backward compatibility: also save last.pt
             self.save_checkpoint(self.checkpoint_dir / "last.pt", epoch, avg_loss, "last")
 
             record = {
@@ -850,6 +893,8 @@ class Trainer:
                 "ch_std": self._ch_std.tolist() if self._ch_std is not None else None,
                 "inc_mean": self._inc_mean.tolist() if self._inc_mean is not None else None,
                 "inc_std": self._inc_std.tolist() if self._inc_std is not None else None,
+                "checkpoint_every_n_epochs": self.checkpoint_every_n_epochs,
+                "increment_scale": self._inc_std.tolist() if self._inc_std is not None else None,
             },
         }
         torch.save(checkpoint, path)

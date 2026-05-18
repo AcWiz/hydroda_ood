@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 from tqdm import tqdm
 
 from hydroda.metrics.skill import (
     compute_variable_metrics,
     effective_mask_fraction,
     valid_pixel_count,
+    weighted_mse,
+    weighted_analysis_skill_components,
 )
 
 _VARIABLES = {
@@ -64,6 +67,15 @@ def evaluate_split(
         n_valid = valid_pixel_count(mask)
         mask_frac = effective_mask_fraction(mask)
 
+        # Latitude weight: required for latw metrics (no silent fallback)
+        if "latitude_weight" not in sample:
+            raise ValueError(
+                f"Sample missing 'latitude_weight' field. "
+                f"Dataset must provide latitude_weight (cos(lat)). "
+                f"Ensure HydroDADataset is up to date."
+            )
+        latw = sample["latitude_weight"]
+
         for variable, keys in _VARIABLES.items():
             missing = [k for k in (keys["pred_increment"], keys["pred_analysis"]) if k not in pred]
             if missing:
@@ -80,6 +92,41 @@ def evaluate_split(
                 high_update_top_fraction=high_update_top_fraction,
             )
 
+            # Latitude-weighted metrics (5 additional rows per variable)
+            analysis_mse_latw = weighted_analysis_skill_components(
+                pred_analysis=pred[keys["pred_analysis"]],
+                true_analysis=sample[keys["analysis"]],
+                forecast=sample[keys["forecast"]],
+                mask=mask,
+                latitude_weight=latw,
+            )
+            inc_mse_latw = weighted_mse(
+                pred=pred[keys["pred_increment"]],
+                true=sample[keys["increment"]],
+                mask=mask,
+                latitude_weight=latw,
+            )
+
+            # Diagnostic: sqrt-before-time-avg versions (not for summary aggregation)
+            model_mse_latw, fcst_mse_latw = analysis_mse_latw
+            if np.isfinite(model_mse_latw) and np.isfinite(fcst_mse_latw) and fcst_mse_latw > 0:
+                analysis_rmse_latw_inst = float(np.sqrt(model_mse_latw))
+                analysis_skill_latw_inst = float(1.0 - np.sqrt(model_mse_latw) / np.sqrt(fcst_mse_latw))
+            else:
+                analysis_rmse_latw_inst = np.nan
+                analysis_skill_latw_inst = np.nan
+
+            latw_metrics = {
+                "analysis_mse_latw": model_mse_latw,
+                "forecast_mse_latw": fcst_mse_latw,
+                "increment_mse_latw": inc_mse_latw,
+                "analysis_rmse_sqrt_before_time_avg_latw": analysis_rmse_latw_inst,
+                "analysis_skill_sqrt_before_time_avg_latw": analysis_skill_latw_inst,
+            }
+
+            # Add latw metrics to output
+            metrics.update(latw_metrics)
+
             for metric_name, value in metrics.items():
                 rows.append(
                     {
@@ -95,6 +142,7 @@ def evaluate_split(
                         "mask_file": mask_file,
                         "country_id": sample.get("country_id", ""),
                         "target_region_id": sample.get("target_region_id", ""),
+                        "sample_region_id": sample.get("sample_region_id", ""),
                         "active_region_ids": "|".join(sample.get("active_region_ids", [])),
                         "split_role": split_role,
                         "K": int(sample.get("K", -1)),

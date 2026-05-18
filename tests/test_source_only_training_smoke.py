@@ -10,6 +10,8 @@ No-leakage: uses synthetic data, no real DA.nc access.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -205,6 +207,52 @@ def test_source_only_predictor_output_contract():
         os.unlink(tmp_path)
 
 
+def test_checkpoint_every_5_epochs_smoke():
+    """Verify Trainer with checkpoint_every_n_epochs saves periodic checkpoints."""
+    import tempfile
+    import os
+
+    from hydroda.models.resunet import SmallResUNet
+    from hydroda.training.trainer import Trainer
+
+    # Create fake training datasets
+    dataset = FakeDataset(n_samples=6, H=32, W=48)
+    source_val_dataset = FakeDataset(n_samples=3, H=32, W=48)
+
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trainer = Trainer(
+            model=model,
+            train_dataset=dataset,
+            max_epochs=2,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+            checkpoint_dir=tmpdir,
+            checkpoint_every_n_epochs=1,  # Save every epoch
+            source_val_dataset=source_val_dataset,
+            eval_every_epochs=1,
+        )
+
+        trainer.train(verbose=False)
+
+        # Check that checkpoint files exist
+        ckpt_dir = Path(tmpdir)
+        assert (ckpt_dir / "checkpoint_latest.pt").exists(), "checkpoint_latest.pt should exist"
+        assert (ckpt_dir / "last.pt").exists(), "last.pt should exist"
+
+        # Since checkpoint_every_n_epochs=1 and max_epochs=2, epoch 1 snapshot should exist
+        epoch_files = list(ckpt_dir.glob("checkpoint_epoch_*.pt"))
+        assert len(epoch_files) >= 1, f"Expected checkpoint_epoch_*.pt files, found {epoch_files}"
+
+        # Since source_val_dataset is provided, best_skill checkpoint should exist
+        skill_files = list(ckpt_dir.glob("checkpoint_best_source_val_*.pt"))
+        assert len(skill_files) >= 1, f"Expected best source_val checkpoint, found {skill_files}"
+
+        print(f"  Checkpoint smoke test passed: {sorted([p.name for p in ckpt_dir.glob('*.pt')])}")
+
+
 if __name__ == "__main__":
     import pytest
     import sys
@@ -212,4 +260,5 @@ if __name__ == "__main__":
     test_source_only_training_smoke()
     test_tiny_overfit()
     test_source_only_predictor_output_contract()
+    test_checkpoint_every_5_epochs_smoke()
     print("\nAll smoke tests passed.")

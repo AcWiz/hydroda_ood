@@ -150,6 +150,88 @@ def effective_mask_fraction(mask: np.ndarray, total: int | None = None) -> float
     return float(valid_pixel_count(mask)) / float(total)
 
 
+# ---------------------------------------------------------------------------
+# Latitude-weighted metric functions (WeatherBench2 / ECMWF best practice)
+# ---------------------------------------------------------------------------
+
+
+def _valid_weighted_flat(
+    *arrays: np.ndarray,
+    mask: np.ndarray,
+    latitude_weight: np.ndarray,
+) -> tuple:
+    """Return flattened arrays + weights over valid pixels only."""
+    valid = (mask > 0.5) & np.isfinite(latitude_weight) & (latitude_weight >= 0)
+    for arr in arrays:
+        valid = valid & np.isfinite(arr)
+    if valid.sum() == 0:
+        return tuple(np.asarray([], dtype=np.float64) for _ in arrays) + (np.asarray([], dtype=np.float64),)
+    w = np.asarray(latitude_weight[valid], dtype=np.float64).reshape(-1)
+    return tuple(np.asarray(arr[valid], dtype=np.float64).reshape(-1) for arr in arrays) + (w,)
+
+
+def weighted_mse(pred: np.ndarray, true: np.ndarray, mask: np.ndarray, latitude_weight: np.ndarray) -> float:
+    """Latitude-weighted MSE (pre-sqrt)."""
+    p, t, w = _valid_weighted_flat(pred, true, mask=mask, latitude_weight=latitude_weight)
+    if p.size == 0 or w.sum() <= 0:
+        return np.nan
+    return float(np.average((p - t) ** 2, weights=w))
+
+
+def weighted_mae(pred: np.ndarray, true: np.ndarray, mask: np.ndarray, latitude_weight: np.ndarray) -> float:
+    p, t, w = _valid_weighted_flat(pred, true, mask=mask, latitude_weight=latitude_weight)
+    if p.size == 0 or w.sum() <= 0:
+        return np.nan
+    return float(np.average(np.abs(p - t), weights=w))
+
+
+def weighted_bias(pred: np.ndarray, true: np.ndarray, mask: np.ndarray, latitude_weight: np.ndarray) -> float:
+    p, t, w = _valid_weighted_flat(pred, true, mask=mask, latitude_weight=latitude_weight)
+    if p.size == 0 or w.sum() <= 0:
+        return np.nan
+    return float(np.average(p - t, weights=w))
+
+
+def weighted_corr(pred: np.ndarray, true: np.ndarray, mask: np.ndarray, latitude_weight: np.ndarray) -> float:
+    """Weighted Pearson correlation coefficient."""
+    p, t, w = _valid_weighted_flat(pred, true, mask=mask, latitude_weight=latitude_weight)
+    if p.size < 2 or w.sum() <= 0:
+        return np.nan
+    w_sum = w.sum()
+    mean_p = np.average(p, weights=w)
+    mean_t = np.average(t, weights=w)
+    cov_pt = np.average((p - mean_p) * (t - mean_t), weights=w)
+    var_p = np.average((p - mean_p) ** 2, weights=w)
+    var_t = np.average((t - mean_t) ** 2, weights=w)
+    denom = np.sqrt(var_p * var_t)
+    if denom <= 0:
+        return np.nan
+    return float(cov_pt / denom)
+
+
+def weighted_analysis_skill_components(
+    pred_analysis: np.ndarray,
+    true_analysis: np.ndarray,
+    forecast: np.ndarray,
+    mask: np.ndarray,
+    latitude_weight: np.ndarray,
+) -> tuple:
+    """Return (model_mse, forecast_mse) using latitude weighting.
+
+    Skill = 1 - sqrt(mean_model_mse) / sqrt(mean_forecast_mse)
+    where mean is aggregated over time first, then sqrt.
+    """
+    pa, ta, fc, w = _valid_weighted_flat(
+        pred_analysis, true_analysis, forecast,
+        mask=mask, latitude_weight=latitude_weight,
+    )
+    if pa.size == 0 or w.sum() <= 0:
+        return (np.nan, np.nan)
+    model_mse = float(np.average((pa - ta) ** 2, weights=w))
+    forecast_mse = float(np.average((fc - ta) ** 2, weights=w))
+    return (model_mse, forecast_mse)
+
+
 def compute_variable_metrics(
     *,
     pred_analysis: np.ndarray,

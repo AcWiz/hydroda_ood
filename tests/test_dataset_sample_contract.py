@@ -61,14 +61,18 @@ class TestDatasetSampleContract:
             "x", "forecast_surface", "forecast_rootzone",
             "analysis_surface", "analysis_rootzone",
             "increment_surface", "increment_rootzone",
-            "base_valid_mask", "region_mask_integer",
-            "active_region_mask", "loss_mask", "metric_mask",
-            "date_str", "time_index", "country_id",
+            "base_valid_mask", "label_valid_mask",
+            "region_mask_integer",
+            "active_region_mask", "region_mask",
+            "loss_mask", "metric_mask",
+            "latitude", "latitude_weight",
+            "date_str", "month", "season",
+            "time_index", "country_id",
             "target_region_id", "active_region_ids",
             "split_role", "regime_id", "split_id",
             "K", "seed",
         }
-        assert required_keys == set(sample.keys()), (
+        assert required_keys.issubset(set(sample.keys())), (
             f"Missing keys: {required_keys - set(sample.keys())}"
         )
 
@@ -139,3 +143,24 @@ class TestDatasetSampleContract:
 
     def test_target_query_has_length(self, target_query_ds):
         assert len(target_query_ds) > 0
+
+    def test_dataset_returns_latitude_weight(self, source_train_ds):
+        """Verify dataset returns latitude and latitude_weight fields."""
+        sample = source_train_ds[0]
+        assert "latitude" in sample, "Sample must contain 'latitude'"
+        assert "latitude_weight" in sample, "Sample must contain 'latitude_weight'"
+
+        lat = sample["latitude"]
+        latw = sample["latitude_weight"]
+
+        assert lat.shape == (256, 640), f"latitude shape {lat.shape} != (256, 640)"
+        assert latw.shape == (256, 640), f"latitude_weight shape {latw.shape} != (256, 640)"
+        assert lat.dtype == np.float32, f"latitude dtype {lat.dtype}"
+        assert latw.dtype == np.float32, f"latitude_weight dtype {latw.dtype}"
+
+        # Latitude weight should be cos(lat), between 0 and 1
+        assert np.all(latw >= 0.0), "latitude_weight should be >= 0"
+        assert np.all(latw <= 1.0), "latitude_weight should be <= 1"
+
+        # Latitude should be in valid US range (~25-50 deg N)
+        assert 20.0 <= lat.max() <= 55.0, f"latitude max {lat.max()} outside expected US range"

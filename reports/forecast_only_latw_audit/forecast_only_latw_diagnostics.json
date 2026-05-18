@@ -1,0 +1,107 @@
+{
+  "protocol_freeze_id": "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12",
+  "generated_at": "2026-05-18T00:30:51.187745",
+  "K": 0,
+  "seed": 0,
+  "splits_evaluated": [
+    "source_val",
+    "target_query"
+  ],
+  "strict_latitude_weight": true,
+  "sanity_check_results": {
+    "forecast_only_skill_is_zero": {
+      "status": "skip",
+      "note": "Column analysis_skill_vs_forecast not in rows"
+    },
+    "analysis_mse_latw_equals_increment_mse_latw": {
+      "surface": {
+        "status": "pass",
+        "max_rel_err": 2.9615741978654987e-08,
+        "rtol": 1e-05,
+        "note": "analysis_mse_latw vs increment_mse_latw max rel err = 2.96e-08"
+      },
+      "rootzone": {
+        "status": "pass",
+        "max_rel_err": 4.524688204488609e-10,
+        "rtol": 1e-05,
+        "note": "analysis_mse_latw vs increment_mse_latw max rel err = 4.52e-10"
+      }
+    }
+  },
+  "data_coverage_stats": {
+    "source_val": {
+      "regions": {
+        "US-R1": {
+          "n_samples": 2892,
+          "n_valid_pixels_mean": 34425.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R2": {
+          "n_samples": 2864,
+          "n_valid_pixels_mean": 32835.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R3": {
+          "n_samples": 2953,
+          "n_valid_pixels_mean": 36244.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R4": {
+          "n_samples": 2894,
+          "n_valid_pixels_mean": 30846.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R5": {
+          "n_samples": 2717,
+          "n_valid_pixels_mean": 27290.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R6": {
+          "n_samples": 3025,
+          "n_valid_pixels_mean": 32910.0,
+          "latw_sum_mean": 128736.71875
+        }
+      }
+    },
+    "target_query": {
+      "regions": {
+        "US-R1": {
+          "n_samples": 3359,
+          "n_valid_pixels_mean": 4485.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R2": {
+          "n_samples": 3359,
+          "n_valid_pixels_mean": 6075.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R3": {
+          "n_samples": 3359,
+          "n_valid_pixels_mean": 2666.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R4": {
+          "n_samples": 3359,
+          "n_valid_pixels_mean": 8064.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R5": {
+          "n_samples": 3359,
+          "n_valid_pixels_mean": 11620.0,
+          "latw_sum_mean": 128736.71875
+        },
+        "US-R6": {
+          "n_samples": 3359,
+          "n_valid_pixels_mean": 6000.0,
+          "latw_sum_mean": 128736.71875
+        }
+      }
+    }
+  },
+  "latw_vs_unweighted_ratio": {
+    "mean": NaN,
+    "min": NaN,
+    "max": NaN
+  },
+  "n_total_rows": 1049972
+}

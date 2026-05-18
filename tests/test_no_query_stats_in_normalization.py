@@ -94,3 +94,46 @@ class TestNoQueryStatsInNormalization:
         assert "increment_surface" in sample
         assert "increment_rootzone" in sample
         ds.close()
+
+    def test_no_target_query_in_increment_stats(self):
+        """compute_source_fit_increment_stats must reject non-source_fit datasets."""
+        from hydroda.data.increment_stats import compute_source_fit_increment_stats
+        import pytest
+
+        ds = HydroDADataset(
+            da_nc_path=f"{DATA_DIR}/DA.nc",
+            region_masks_nc=REGION_MASKS,
+            splits_json=SPLITS_JSON,
+            target_region="US-R1",
+            split_type="target_query",
+            K=0, seed=0,
+            freeze_manifest=MANIFEST,
+        )
+
+        with pytest.raises(ValueError, match="source_fit"):
+            compute_source_fit_increment_stats(ds, max_samples=5)
+        ds.close()
+
+    def test_increment_stats_accepts_source_fit(self):
+        """compute_source_fit_increment_stats should accept source_fit datasets."""
+        from hydroda.data.increment_stats import compute_source_fit_increment_stats
+
+        ds = HydroDADataset(
+            da_nc_path=f"{DATA_DIR}/DA.nc",
+            region_masks_nc=REGION_MASKS,
+            splits_json=SPLITS_JSON,
+            target_region="US-R1",
+            split_type="source_fit",
+            K=0, seed=0,
+            freeze_manifest=MANIFEST,
+        )
+
+        stats = compute_source_fit_increment_stats(ds, max_samples=10)
+        assert "surface_mean" in stats
+        assert "surface_std" in stats
+        assert "rootzone_mean" in stats
+        assert "rootzone_std" in stats
+        assert stats["surface_std"] > 0
+        assert stats["rootzone_std"] > 0
+        assert stats["n_samples"] > 0
+        ds.close()
