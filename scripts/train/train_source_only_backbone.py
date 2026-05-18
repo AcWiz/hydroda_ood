@@ -108,8 +108,6 @@ def parse_args():
         help="Path to checkpoint.pt to resume from (last.pt or best.pt). "
              "When provided, training continues from the saved epoch and "
              "normalization stats are restored from the checkpoint.")
-    parser.add_argument("--checkpoint_every", type=int, default=5,
-        help="Save periodic epoch snapshot every N epochs (default: 5)")
 
     # First pass: check if --config is provided
     preliminary_args, _ = parser.parse_known_args()
@@ -510,7 +508,6 @@ def main():
         eval_every_epochs=args.eval_every_epochs,
         wandb_logger=wandb_logger,
         source_val_dataset=source_val_dataset,
-        checkpoint_every_n_epochs=args.checkpoint_every,
         # Resume: inject pre-computed stats so Trainer.__init__ skips recompute
         _resume_ch_mean=resume_ch_mean,
         _resume_ch_std=resume_ch_std,
