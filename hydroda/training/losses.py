@@ -220,12 +220,14 @@ class WeightedMaskedHuberLoss(nn.Module):
         surface_weight: float = 1.0,
         rootzone_weight: float = 1.0,
         use_lat_weight: bool = True,
+        lambda_amp: float = 0.0,
     ) -> None:
         super().__init__()
         self.delta = float(delta)
         self.surface_weight = float(surface_weight)
         self.rootzone_weight = float(rootzone_weight)
         self.use_lat_weight = use_lat_weight
+        self.lambda_amp = float(lambda_amp)
 
     def forward(
         self,
@@ -257,6 +259,8 @@ class WeightedMaskedHuberLoss(nn.Module):
         if self.use_lat_weight and latitude_weight is not None:
             if latitude_weight.ndim == 2:
                 lat_w = latitude_weight.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+            elif latitude_weight.ndim == 3:
+                lat_w = latitude_weight.unsqueeze(1)  # [B, 1, H, W]
             else:
                 lat_w = latitude_weight
             valid_weight = mask.float() * lat_w.float().to(mask.device)
@@ -297,6 +301,14 @@ class WeightedMaskedHuberLoss(nn.Module):
 
         total_loss = self.surface_weight * surface_loss + self.rootzone_weight * rootzone_loss
 
+        # Amplitude penalty: penalize when |pred| / |true| > 1.5
+        if self.lambda_amp > 0:
+            pred_abs_mean = (torch.abs(pred.float()) * valid_weight_exp).sum(dim=(2, 3)) / weight_per_channel
+            true_abs_mean = (torch.abs(target.float()) * valid_weight_exp).sum(dim=(2, 3)) / weight_per_channel
+            amp_ratio = pred_abs_mean / (true_abs_mean + 1e-8)
+            L_amp = torch.mean(torch.clamp(amp_ratio - 1.5, min=0.0) ** 2)
+            total_loss = total_loss + self.lambda_amp * L_amp
+
         total_weight = valid_weight_exp.sum()
         valid_fraction = total_weight / max(1.0, float(valid_weight_exp.numel()))
 
@@ -306,4 +318,5 @@ class WeightedMaskedHuberLoss(nn.Module):
             "rootzone_loss": rootzone_loss,
             "valid_weight_sum": total_weight.detach(),
             "valid_pixel_fraction": valid_fraction.detach(),
+            "valid_pixel_count": mask.expand_as(pred).sum().detach(),
         }

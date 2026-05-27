@@ -83,12 +83,20 @@ def aggregate_summary(rows: list) -> dict:
         if var_df.empty:
             continue
         summary[variable] = {}
-        for metric in ["analysis_skill_vs_forecast", "increment_rmse", "analysis_rmse"]:
+        for metric in ["analysis_skill_vs_forecast", "analysis_skill_vs_forecast_global",
+                        "analysis_skill_vs_forecast_latw_global",
+                        "increment_rmse", "analysis_rmse"]:
             metric_df = var_df[var_df["metric"] == metric]
             if metric_df.empty:
                 continue
-            summary[variable][f"{metric}_mean"] = float(metric_df["value"].mean())
-            summary[variable][f"{metric}_std"] = float(metric_df["value"].std())
+            # Global metrics are single-row per variable (aggregate-then-sqrt),
+            # not per-sample metrics — take the scalar value directly
+            if metric in ("analysis_skill_vs_forecast_global",
+                          "analysis_skill_vs_forecast_latw_global"):
+                summary[variable][metric] = float(metric_df["value"].iloc[0])
+            else:
+                summary[variable][f"{metric}_mean"] = float(metric_df["value"].mean())
+                summary[variable][f"{metric}_std"] = float(metric_df["value"].std())
 
     summary["n_metric_rows"] = len(df)
     summary["regions"] = sorted(df["target_region_id"].unique().tolist())

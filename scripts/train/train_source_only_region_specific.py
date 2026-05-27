@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""Train source-only SmallResUNet backbone with full experiment infrastructure.
+"""Train region-specific source-only SmallResUNet backbone.
+
+Each region (R1-R6) gets its own model trained ONLY on that region's source_fit
+data (2015-2020). After training, auto-evaluates on source_val (2021) and
+target_query (2023-2025) for that specific region.
+
+This is NOT a LORO (leave-one-region-out) model — the model sees only the
+target region's own data, providing a region-specific baseline.
 
 Usage:
-    PYTHONPATH=. python scripts/train/train_source_only_backbone.py \\
+    PYTHONPATH=. python scripts/train/train_source_only_region_specific.py \\
         --target_region US-R1 --K 0 --seed 0 \\
-        --max_epochs 30 --batch_size 4 --lr 1e-3 \\
+        --max_epochs 30 --batch_size 2 --lr 1e-3 \\
         --device cuda --amp \\
-        --wandb_mode disabled \\
         --config configs/model_resunet_main.yaml
 
 No-leakage declaration:
-    - Only source_train split used for training
-    - Normalization stats from source_train only
+    - Only source_fit split used for training
+    - Normalization stats from source_fit only
     - No target_query labels used in training/normalization/early_stopping
     - No target prompt used
+    - Post-training evaluation uses target_query labels only for metric computation
 """
 from __future__ import annotations
 
@@ -23,15 +30,18 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import yaml
 import torch
 
+from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
 from hydroda.data.dataset import HydroDADataset
+from hydroda.evaluation.harness import evaluate_split, build_per_region_summary
 from hydroda.models.resunet import SmallResUNet
 from hydroda.training.trainer import Trainer
 from hydroda.utils.run_manager import RunManager
-from hydroda.utils.logger import WandbLogger, ConsoleLogger, JSONLLogger
-from hydroda.utils.device import resolve_device, log_device_summary
+from hydroda.utils.logger import WandbLogger, ConsoleLogger
+from hydroda.utils.device import resolve_device
 from hydroda.utils.runtime import gather_runtime_info
 
 
@@ -39,20 +49,26 @@ DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-CHECKPOINT_DIR = "artifacts/checkpoints/phase4_source_only"
 PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
-PHASE = "phase4_source_only"
+PHASE = "phase4_source_only_region_specific"
+
+# Use US-R1 for split manifest lookup (has the most date coverage).
+# The region mask is overridden post-construction via set_active_region().
+_SPLIT_LOOKUP_REGION = "US-R1"
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train source-only backbone with experiment tracking")
+    parser = argparse.ArgumentParser(description="Train region-specific source-only backbone")
     # Data
-    parser.add_argument("--target_region", type=str, required=True, help="Target region, e.g. US-R1")
-    parser.add_argument("--K", type=int, default=None, help="K value for split (default from YAML or 0)")
-    parser.add_argument("--seed", type=int, default=None, help="Seed for split (default from YAML or 0)")
+    parser.add_argument("--target_region", type=str, required=True,
+        help="Target region, e.g. US-R1")
+    parser.add_argument("--K", type=int, default=None,
+        help="K value for split (default from YAML or 0)")
+    parser.add_argument("--seed", type=int, default=None,
+        help="Seed for split (default from YAML or 0)")
     # Model
     parser.add_argument("--width", type=int, default=None,
-        help="SmallResUNet width: 16 for development, 32 for full model (default from YAML or 32)")
+        help="SmallResUNet width: 16 for development, 32 for full model (default 32)")
     parser.add_argument("--zero_raw_increment_init", action="store_true", default=None,
         help="Zero-initialize output head so pred_inc_raw ≈ 0 at init")
     parser.add_argument("--no_zero_raw_increment_init", action="store_false", dest="zero_raw_increment_init",
@@ -105,9 +121,7 @@ def parse_args():
     parser.add_argument("--results_dir", type=str, default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--resume_from", type=str, default=None,
-        help="Path to checkpoint.pt to resume from (last.pt or best.pt). "
-             "When provided, training continues from the saved epoch and "
-             "normalization stats are restored from the checkpoint.")
+        help="Path to checkpoint.pt to resume from (last.pt or best.pt).")
     # Lat-weighted loss and gain calibration
     parser.add_argument("--use_lat_weighted_loss", action="store_true", default=True,
         help="Use WeightedMaskedHuberLoss with latitude weighting (default: True)")
@@ -124,6 +138,9 @@ def parse_args():
         help="Disable residual gain calibration")
     parser.add_argument("--lambda_amp", type=float, default=0.0,
         help="Amplitude penalty weight (0=disabled, default: 0.0)")
+    # Post-training evaluation
+    parser.add_argument("--skip_post_train_eval", action="store_true",
+        help="Skip post-training evaluation on source_val and target_query")
 
     # First pass: check if --config is provided
     preliminary_args, _ = parser.parse_known_args()
@@ -182,12 +199,12 @@ def parse_args():
         if args.target_normalization_mode == "per_variable_increment_std":
             args.target_increment_normalization = True
             args.zero_raw_increment_init = True
-            print(f"  [target_normalization_mode] per_variable_increment_std → "
+            print(f"  [target_normalization_mode] per_variable_increment_std -> "
                   f"target_increment_normalization=True, zero_raw_increment_init=True")
         elif args.target_normalization_mode == "none":
             args.target_increment_normalization = False
             args.zero_raw_increment_init = False
-            print(f"  [target_normalization_mode] none → "
+            print(f"  [target_normalization_mode] none -> "
                   f"target_increment_normalization=False, zero_raw_increment_init=False")
 
     return args
@@ -199,30 +216,129 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _run_post_train_evaluation(
+    checkpoint_path: Path,
+    region_id: str,
+    device: str,
+    run_manager: RunManager,
+    K: int,
+    seed: int,
+    split_type: str,
+) -> None:
+    """Evaluate best checkpoint on a specific split for a specific region.
+
+    Args:
+        checkpoint_path: Path to the checkpoint .pt file.
+        region_id: The region to evaluate (e.g. US-R1).
+        device: Torch device string.
+        run_manager: RunManager for output paths.
+        K: K value for split lookup.
+        seed: Seed for split lookup.
+        split_type: "source_val" or "target_query".
+    """
+    print(f"\n{'=' * 60}")
+    print(f"Post-training evaluation: {split_type} for {region_id}")
+    print(f"  checkpoint: {checkpoint_path}")
+    print(f"{'=' * 60}")
+
+    if not checkpoint_path.exists():
+        print(f"  WARNING: checkpoint not found at {checkpoint_path}, skipping evaluation")
+        return
+
+    # Load predictor
+    predictor = SourceOnlyBackbonePredictor(
+        checkpoint_path=str(checkpoint_path),
+        device=device,
+        apply_residual_gain=True,
+    )
+    print(f"  alpha_s={predictor.alpha_surface:.3f}  alpha_r={predictor.alpha_rootzone:.3f}")
+
+    # For source_val: use _SPLIT_LOOKUP_REGION for split manifest lookup,
+    # then restrict pixels to the specific region.
+    # For target_query: use region_id directly as the target region.
+    if split_type == "source_val":
+        target_region_for_lookup = _SPLIT_LOOKUP_REGION
+    else:
+        target_region_for_lookup = region_id
+
+    dataset = HydroDADataset(
+        da_nc_path=DA_NC,
+        region_masks_nc=REGION_MASKS_NC,
+        splits_json=SPLITS_JSON,
+        target_region=target_region_for_lookup,
+        split_type=split_type,
+        K=K,
+        seed=seed,
+        freeze_manifest=FREEZE_MANIFEST,
+    )
+    dataset.set_active_region(region_id)
+
+    dates = [d.get("date_str", "") for d in dataset._date_records]
+    years = sorted(set(d[:4] for d in dates if len(d) >= 4))
+    print(f"  samples={len(dataset)}  years={years}")
+
+    rows = evaluate_split(
+        dataset=dataset,
+        predictor=predictor,
+        split_role=split_type,
+        experiment_id=run_manager.get_run_name(),
+        protocol_freeze_id=PROTOCOL_FREEZE_ID,
+        method="source_only_region_specific",
+        split_file=SPLITS_JSON,
+        mask_file=REGION_MASKS_NC,
+    )
+
+    # Override sample_region_id to the evaluated region
+    for row in rows:
+        row["sample_region_id"] = region_id
+
+    dataset.close()
+
+    # Save outputs
+    results_dir = run_manager.get_results_dir() / split_type
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    df_all = pd.DataFrame(rows)
+    per_region_summary = build_per_region_summary(df_all, results_dir)
+    print(f"  metrics_long.csv: {len(rows)} rows -> {results_dir / 'metrics_long.csv'}")
+    print(f"  per_region_summary.json -> {results_dir / 'per_region_summary.json'}")
+
+    # Print key metrics
+    if region_id in per_region_summary:
+        s_skill = per_region_summary[region_id].get("surface", {}).get("analysis_skill_vs_forecast_latw", {})
+        r_skill = per_region_summary[region_id].get("rootzone", {}).get("analysis_skill_vs_forecast_latw", {})
+        s_val = s_skill.get("mean") if isinstance(s_skill, dict) else s_skill
+        r_val = r_skill.get("mean") if isinstance(r_skill, dict) else r_skill
+        s_str = f"{s_val:.6f}" if s_val is not None else "N/A"
+        r_str = f"{r_val:.6f}" if r_val is not None else "N/A"
+        print(f"  {region_id} {split_type}: surface_skill={s_str}  rootzone_skill={r_str}")
+
+
 def main():
     args = parse_args()
 
     # Resolve device
     device = resolve_device(args.device, require_gpu=args.require_gpu)
 
+    region_id = args.target_region
+
     print("=" * 60)
-    print("Phase 4A: Source-only Backbone Training")
-    print(f"  target_region={args.target_region}  K={args.K}  seed={args.seed}")
+    print("Phase 4: Region-Specific Source-Only Baseline")
+    print(f"  training ONLY on {region_id} data")
+    print(f"  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
     print(f"  device={device}  width={args.width}  amp={args.amp}")
     print("=" * 60)
 
-    # Auto-derive output_dir from checkpoint when resuming without explicit output_dir
+    # Auto-derive output_dir from checkpoint when resuming
     if args.resume_from and args.output_dir is None:
         ckpt_path = Path(args.resume_from)
-        # checkpoint is at .../run_name/checkpoints/last.pt or best.pt
-        # run directory is checkpoints' parent
         args.output_dir = str(ckpt_path.parent.parent)
         print(f"  output_dir auto-derived from checkpoint: {args.output_dir}")
 
-    # Build config for RunManager (args already resolved with YAML defaults + CLI overrides)
+    # Build config for RunManager
     run_config = {
-        "target_region": args.target_region,
+        "target_region": region_id,
         "K": args.K,
         "seed": args.seed,
         "width": args.width,
@@ -247,6 +363,7 @@ def main():
         "selection_metric": args.selection_metric,
         "apply_source_val_residual_gain": args.apply_source_val_residual_gain,
         "lambda_amp": args.lambda_amp,
+        "skip_post_train_eval": args.skip_post_train_eval,
         "wandb_mode": args.wandb_mode,
         "wandb_project": args.wandb_project,
         "wandb_entity": args.wandb_entity,
@@ -257,7 +374,7 @@ def main():
     run_manager = RunManager(
         phase=PHASE,
         method="source_only",
-        target_region=args.target_region,
+        target_region=region_id,
         config=run_config,
         output_dir=args.output_dir,
         run_name=args.run_name,
@@ -310,39 +427,65 @@ def main():
         print(f"  checkpoint epoch={ckpt['epoch']}  best_loss={ckpt.get('best_loss', 'N/A')}")
         print(f"  resuming from epoch {resumed_epoch} ({resumed_epoch} already completed)")
 
-    # Create source_fit dataset (2015-2020, excluding target region)
+    # Create source_fit dataset (2015-2020, restricted to the specific region)
     print(f"\nLoading source_fit dataset...")
     train_dataset = HydroDADataset(
         da_nc_path=DA_NC,
         region_masks_nc=REGION_MASKS_NC,
         splits_json=SPLITS_JSON,
-        target_region=args.target_region,
+        target_region=_SPLIT_LOOKUP_REGION,
         split_type="source_fit",
         K=args.K,
         seed=args.seed,
         freeze_manifest=FREEZE_MANIFEST,
     )
+    train_dataset.set_active_region(region_id)
     print(f"  source_fit samples: {len(train_dataset)}")
+    print(f"  active_region_ids: {train_dataset._active_region_ids}")
 
-    # Create source_val dataset (2021, excluding target region)
+    # Date range check (leakage guard)
+    if train_dataset._date_records:
+        dates = [d.get("date_str", "") for d in train_dataset._date_records]
+        years = sorted(set(d[:4] for d in dates if len(d) >= 4))
+        print(f"  source_fit years: {years}")
+        post_2020 = [y for y in years if int(y) > 2020]
+        if post_2020:
+            raise RuntimeError(
+                f"LEAKAGE: source_fit contains post-2020 dates: {post_2020}. "
+                f"All source_fit dates must be 2015-2020."
+            )
+
+    # Create source_val dataset (2021, restricted to the specific region)
     print(f"\nLoading source_val dataset...")
     source_val_dataset = HydroDADataset(
         da_nc_path=DA_NC,
         region_masks_nc=REGION_MASKS_NC,
         splits_json=SPLITS_JSON,
-        target_region=args.target_region,
+        target_region=_SPLIT_LOOKUP_REGION,
         split_type="source_val",
         K=args.K,
         seed=args.seed,
         freeze_manifest=FREEZE_MANIFEST,
     )
+    source_val_dataset.set_active_region(region_id)
     print(f"  source_val samples: {len(source_val_dataset)}")
+    print(f"  active_region_ids: {source_val_dataset._active_region_ids}")
+
+    if source_val_dataset._date_records:
+        dates = [d.get("date_str", "") for d in source_val_dataset._date_records]
+        years = sorted(set(d[:4] for d in dates if len(d) >= 4))
+        print(f"  source_val years: {years}")
+        non_2021 = [y for y in years if int(y) != 2021]
+        if non_2021:
+            raise RuntimeError(
+                f"LEAKAGE: source_val contains non-2021 dates: {non_2021}. "
+                f"All source_val dates must be 2021."
+            )
 
     if len(source_val_dataset) == 0:
         raise RuntimeError(
-            f"source_val_dataset is empty for target={args.target_region}, K={args.K}, seed={args.seed}. "
-            f"The split manifest must contain source_val_dates (2021 dates for source regions). "
-            f"Re-run build_kdate_splits.py with the updated code that populates source_val_dates."
+            f"source_val_dataset is empty for target={region_id}, K={args.K}, seed={args.seed}. "
+            f"Check split manifest or region mask."
         )
 
     # Init model
@@ -357,8 +500,7 @@ def main():
     # Get checkpoint dir from run_manager
     checkpoint_dir = args.checkpoint_dir or str(run_manager.get_checkpoint_dir())
 
-    # Resume: pre-compute normalization stats from checkpoint so Trainer.__init__
-    # skips recomputation (avoids dataset re-scan and ensures exact stats match)
+    # Resume: pre-compute normalization stats from checkpoint
     resume_ch_mean = None
     resume_ch_std = None
     resume_inc_mean = None
@@ -373,7 +515,7 @@ def main():
         if checkpoint_config.get("inc_std") is not None:
             resume_inc_std = np.array(checkpoint_config["inc_std"], dtype=np.float32)
 
-    # Create Trainer with run_manager
+    # Create Trainer
     trainer = Trainer(
         model=model,
         train_dataset=train_dataset,
@@ -425,9 +567,9 @@ def main():
     if trainer.target_increment_normalization and trainer._inc_mean is not None:
         print(f"  inc_mean (surface, rootzone):   {trainer._inc_mean[0]:.6f}, {trainer._inc_mean[1]:.6f}")
         print(f"  inc_std  (surface, rootzone):   {trainer._inc_std[0]:.6f}, {trainer._inc_std[1]:.6f}")
-        print(f"  → targets normalized to ~N(0,1) per variable; loss in normalized space")
+        print(f"  -> targets normalized to ~N(0,1) per variable; loss in normalized space")
     else:
-        print(f"  → raw MSE loss (no target normalization)")
+        print(f"  -> raw MSE loss (no target normalization)")
     print(f"{'=' * 40}")
 
     # Save environment info AFTER model is on GPU for accurate memory stats
@@ -467,6 +609,39 @@ def main():
     if wandb_logger.enabled:
         wandb_logger.finish()
         print(f"  wandb_run_id={wandb_logger.run_id}")
+
+    # ---- Post-training evaluation ----
+    if not args.skip_post_train_eval:
+        # Use safe_score checkpoint if available, otherwise best.pt
+        eval_checkpoint = safe_ckpt if safe_ckpt.exists() else best_ckpt
+
+        # Evaluate on source_val (2021)
+        _run_post_train_evaluation(
+            checkpoint_path=eval_checkpoint,
+            region_id=region_id,
+            device=str(device),
+            run_manager=run_manager,
+            K=args.K,
+            seed=args.seed,
+            split_type="source_val",
+        )
+
+        # Evaluate on target_query (2023-2025)
+        _run_post_train_evaluation(
+            checkpoint_path=eval_checkpoint,
+            region_id=region_id,
+            device=str(device),
+            run_manager=run_manager,
+            K=args.K,
+            seed=args.seed,
+            split_type="target_query",
+        )
+    else:
+        print(f"\n  Skipping post-training evaluation (--skip_post_train_eval)")
+
+    # Cleanup
+    train_dataset.close()
+    source_val_dataset.close()
 
 
 if __name__ == "__main__":

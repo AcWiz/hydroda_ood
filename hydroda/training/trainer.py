@@ -26,7 +26,8 @@ from torch.utils.data import DataLoader
 from hydroda.data.dataset import HydroDADataset
 from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
-from hydroda.training.losses import MaskedHuberLoss
+from hydroda.training.calibration import calibrate_residual_gain
+from hydroda.training.losses import MaskedHuberLoss, WeightedMaskedHuberLoss
 from hydroda.utils.device import gpu_health_check
 from hydroda.utils.run_manager import RunManager
 from hydroda.utils.logger import WandbLogger
@@ -93,7 +94,8 @@ class Trainer:
     - DataLoader construction from source_train split
     - Optimization (AdamW, weight_decay)
     - Training loop with loss recording
-    - Checkpoint saving (best.pt, last.pt)
+    - Lat-weighted loss + residual gain calibration on source_val
+    - Checkpoint saving (best.pt, last.pt, safe_score, min_skill, epoch snapshots)
     - Source-train-only normalization stats
     - LeakageGuard integration (check_normalization_scope before training)
     - Optional RunManager + JSONL logging + WandbLogger + AMP
@@ -122,6 +124,10 @@ class Trainer:
         eval_every_epochs: run source_val eval every N epochs (default 1)
         wandb_logger: Optional WandbLogger instance
         source_val_dataset: Optional source_val dataset for eval
+        use_lat_weighted_loss: use WeightedMaskedHuberLoss (default True)
+        checkpoint_every_n_epochs: save epoch checkpoints every N epochs (default 5)
+        source_val_gain_grid: list of alpha values for residual gain calibration
+        lambda_amp: amplitude penalty weight (0=disabled)
     """
 
     def __init__(
@@ -149,6 +155,10 @@ class Trainer:
         eval_every_epochs: int = 1,
         wandb_logger: Optional[WandbLogger] = None,
         source_val_dataset: Optional[HydroDADataset] = None,
+        use_lat_weighted_loss: bool = True,
+        checkpoint_every_n_epochs: int = 5,
+        source_val_gain_grid: Optional[List[float]] = None,
+        lambda_amp: float = 0.0,
         cuda_sync_debug: bool = False,
         # Resume: optionally inject pre-computed normalization stats to skip recompute
         _resume_ch_mean: Optional[np.ndarray] = None,
@@ -180,6 +190,10 @@ class Trainer:
         self.wandb_logger = wandb_logger
         self.source_val_dataset = source_val_dataset
         self.cuda_sync_debug = cuda_sync_debug
+        self.use_lat_weighted_loss = use_lat_weighted_loss
+        self.checkpoint_every_n_epochs = checkpoint_every_n_epochs
+        self.source_val_gain_grid = source_val_gain_grid or [0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]
+        self.lambda_amp = lambda_amp
 
         # AMP scaler
         self._amp_scaler: Optional[GradScaler] = None
@@ -204,7 +218,14 @@ class Trainer:
             patience=5,
             min_lr=1e-6,
         )
-        self.loss_fn = MaskedHuberLoss(delta=0.01)
+        # Loss function selection
+        if self.use_lat_weighted_loss:
+            self.loss_fn = WeightedMaskedHuberLoss(
+                delta=0.01,
+                lambda_amp=self.lambda_amp,
+            )
+        else:
+            self.loss_fn = MaskedHuberLoss(delta=0.01)
 
         # Compute normalization stats from source_train (or restore from checkpoint on resume)
         self._ch_mean: Optional[np.ndarray] = None
@@ -242,6 +263,7 @@ class Trainer:
         # Training state
         self.current_epoch = 0
         self.best_loss = float("inf")
+        self.best_safe_score = float("-inf")
         self._skipped_steps = 0
         self.train_history: List[Dict[str, float]] = []
         self.val_history: List[Dict[str, float]] = []
@@ -328,12 +350,25 @@ class Trainer:
             loss_mask = torch.from_numpy(
                 np.stack([s["loss_mask"] for s in batch], axis=0)
             )
-            return {
+            result = {
                 "x": x,
                 "increment_surface": increment_surface,
                 "increment_rootzone": increment_rootzone,
                 "loss_mask": loss_mask,
             }
+            # Add latitude_weight if available (for lat-weighted loss)
+            if "latitude_weight" in batch[0]:
+                latitude_weight = torch.from_numpy(
+                    np.stack([s["latitude_weight"] for s in batch], axis=0)
+                )
+                result["latitude_weight"] = latitude_weight
+            # Add forecast fields (for gain calibration)
+            for key in ["forecast_surface", "forecast_rootzone"]:
+                if key in batch[0]:
+                    result[key] = torch.from_numpy(
+                        np.stack([s[key] for s in batch], axis=0)
+                    )
+            return result
 
         pin_mem = self.device == "cuda"
         return DataLoader(
@@ -346,7 +381,11 @@ class Trainer:
         )
 
     def _forward_and_loss(
-        self, x_norm: torch.Tensor, target: torch.Tensor, loss_mask: torch.Tensor
+        self,
+        x_norm: torch.Tensor,
+        target: torch.Tensor,
+        loss_mask: torch.Tensor,
+        latitude_weight: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Forward pass + loss, handling AMP consistently.
 
@@ -355,37 +394,80 @@ class Trainer:
         if self.use_amp:
             with autocast('cuda'):
                 pred = self.model(x_norm)
-            # pred in fp16 from autocast; cast to fp32 for numerical stability in loss
-            losses = self.loss_fn(pred.float(), target, loss_mask)
         else:
             pred = self.model(x_norm)
+
+        # Cast to fp32 for numerical stability in loss
+        pred = pred.float()
+
+        if self.use_lat_weighted_loss:
+            if latitude_weight is None:
+                raise ValueError(
+                    "use_lat_weighted_loss=True but latitude_weight not provided in batch. "
+                    "Ensure dataset returns latitude_weight."
+                )
+            losses = self.loss_fn(pred, target, loss_mask, latitude_weight=latitude_weight)
+        else:
             losses = self.loss_fn(pred, target, loss_mask)
         return pred, losses
+
+    @staticmethod
+    def _make_source_val_metrics(gain_results: Dict[str, Any]) -> Dict[str, float]:
+        """Extract a flat metrics dict from gain calibration results."""
+        return {
+            "source_val_loss": gain_results["source_val_loss"],
+            "source_val_surface_loss": gain_results.get("source_val_surface_loss", float("nan")),
+            "source_val_rootzone_loss": gain_results.get("source_val_rootzone_loss", float("nan")),
+            "source_val_valid_px": gain_results.get("source_val_valid_px", 0),
+            "source_val_rmse_surface": gain_results["rmse_surface_model"],
+            "source_val_rmse_rootzone": gain_results["rmse_rootzone_model"],
+            "source_val_skill_surface": gain_results["skill_surface_with_alpha"],
+            "source_val_skill_rootzone": gain_results["skill_rootzone_with_alpha"],
+        }
 
     def _eval_source_val(self) -> Dict[str, float]:
         """Run evaluation on source_val split and return metrics dict.
 
-        Computes per-epoch pooled increment RMSE and forecast-relative skill,
-        consistent with ``compute_source_val_shrinkage`` methodology.
+        Kept for backward compatibility — delegates to gain calibration
+        and returns simplified dict. Prefer _calibrate_source_val_residual_gain
+        for full results.
+        """
+        gain_results = self._calibrate_source_val_residual_gain()
+        if not gain_results:
+            return {}
+        return self._make_source_val_metrics(gain_results)
+
+    def _calibrate_source_val_residual_gain(self) -> Dict[str, Any]:
+        """Calibrate residual gain alphas on source_val using latitude weighting.
+
+        Iterates over source_val, accumulates per-sample arrays (pred_inc,
+        true_inc, forecast, mask, latw) for surface and rootzone. Then scans
+        alpha grid, computing analysis skill for each alpha as:
+
+            skill(alpha) = 1 - sqrt(mean(model_mse_alpha)) / sqrt(mean(forecast_mse))
+
+        where mean is over time samples.
+
+        Selection: primary = max(min_skill), tie-break = max(mean_skill),
+        tie-break = min(mean_rmse_ratio). alpha=0 is always in the candidate set.
+
+        Returns dict with best_alpha, skills, RMSEs, per_alpha_results, etc.
         """
         if self.source_val_dataset is None:
             return {}
+
         self.model.eval()
         loader = self._build_dataloader(self.source_val_dataset)
+        alphas = self.source_val_gain_grid
+
+        # Per-sample storage for post-hoc alpha scan
+        samples_s = []  # each: (pred_inc, true_inc, forecast, mask, latw)
+        samples_r = []
         total_loss = 0.0
         total_surface = 0.0
         total_rootzone = 0.0
         total_valid = 0
         n_batches = 0
-
-        # Accumulate squared errors for pooled RMSE and skill
-        # (same pooling strategy as compute_source_val_shrinkage)
-        sum_sq_err_s = 0.0
-        sum_sq_err_r = 0.0
-        sum_sq_fcst_err_s = 0.0  # (fcst - analysis)^2 for skill denominator
-        sum_sq_fcst_err_r = 0.0
-        n_pixels_s = 0
-        n_pixels_r = 0
 
         with torch.no_grad():
             for batch in loader:
@@ -393,6 +475,15 @@ class Trainer:
                 inc_surface = batch["increment_surface"].to(self.device)
                 inc_rootzone = batch["increment_rootzone"].to(self.device)
                 loss_mask = batch["loss_mask"].to(self.device)
+                latitude_weight = batch.get("latitude_weight")
+                if latitude_weight is not None:
+                    latitude_weight = latitude_weight.to(self.device)
+                forecast_s = batch.get("forecast_surface")
+                forecast_r = batch.get("forecast_rootzone")
+                if forecast_s is not None:
+                    forecast_s = forecast_s.to(self.device)
+                if forecast_r is not None:
+                    forecast_r = forecast_r.to(self.device)
 
                 x_norm = self._normalize(x)
                 target = torch.stack([inc_surface, inc_rootzone], dim=1)
@@ -401,67 +492,66 @@ class Trainer:
                     inc_std_t = torch.from_numpy(self._inc_std).to(x.device).view(1, 2, 1, 1)
                     target = (target - inc_mean_t) / inc_std_t
 
-                pred, losses = self._forward_and_loss(x_norm, target, loss_mask)
+                pred, losses = self._forward_and_loss(x_norm, target, loss_mask, latitude_weight=latitude_weight)
 
                 total_loss += float(losses["total_loss"].item())
-                total_surface += float(losses["surface_loss"].item())
-                total_rootzone += float(losses["rootzone_loss"].item())
-                total_valid += int(losses["valid_pixel_count"].item())
+                total_surface += float(losses.get("surface_loss", 0.0))
+                total_rootzone += float(losses.get("rootzone_loss", 0.0))
+                total_valid += int(
+                    losses.get("valid_pixel_count", losses.get("valid_weight_sum", 0)).item()
+                )
                 n_batches += 1
 
-                # Denormalize pred and target for physical-space RMSE
+                # Denormalize pred for physical-space
                 pred_denorm_s = pred[:, 0].float()
                 pred_denorm_r = pred[:, 1].float()
-                target_denorm_s = target[:, 0].float()
-                target_denorm_r = target[:, 1].float()
                 if self.target_increment_normalization and self._inc_mean is not None:
                     pred_denorm_s = pred_denorm_s * self._inc_std[0] + self._inc_mean[0]
                     pred_denorm_r = pred_denorm_r * self._inc_std[1] + self._inc_mean[1]
-                    target_denorm_s = target_denorm_s * self._inc_std[0] + self._inc_mean[0]
-                    target_denorm_r = target_denorm_r * self._inc_std[1] + self._inc_mean[1]
 
-                # Mask: loss_mask > 0.5 and finite values
-                mask_bool = loss_mask > 0.5  # [B, H, W] — shared by surface and rootzone
+                # Accumulate per-sample numpy arrays for post-hoc alpha scan
+                for b in range(x.size(0)):
+                    # Squeeze channel dim from mask if present: [1, H, W] or [H, W] -> [H, W]
+                    mask_b = loss_mask[b]
+                    if mask_b.ndim == 3:
+                        mask_b = mask_b.squeeze(0)
+                    mask_np = mask_b.cpu().numpy().astype(np.float32)
+                    latw_np = (
+                        latitude_weight[b].cpu().numpy().astype(np.float32)
+                        if latitude_weight is not None
+                        else np.ones(mask_np.shape, dtype=np.float32)
+                    )
 
-                # Surface
-                pred_s_flat = pred_denorm_s[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
-                targ_s_flat = target_denorm_s[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
-                valid_finite_s = np.isfinite(pred_s_flat) & np.isfinite(targ_s_flat)
-                if valid_finite_s.sum() > 0:
-                    sum_sq_err_s += np.sum((pred_s_flat[valid_finite_s] - targ_s_flat[valid_finite_s]) ** 2)
-                    n_pixels_s += valid_finite_s.sum()
-                    # skill denominator: (forecast - analysis) = (0 - true_inc) since fcst + inc = analysis
-                    sum_sq_fcst_err_s += np.sum(targ_s_flat[valid_finite_s] ** 2)
+                    pred_inc_s = pred_denorm_s[b].cpu().numpy().astype(np.float32)
+                    true_inc_s = inc_surface[b].cpu().numpy().astype(np.float32)
+                    fcst_s = (
+                        forecast_s[b].cpu().numpy().astype(np.float32)
+                        if forecast_s is not None
+                        else np.zeros_like(true_inc_s, dtype=np.float32)
+                    )
+                    samples_s.append((pred_inc_s, true_inc_s, fcst_s, mask_np, latw_np))
 
-                # Rootzone
-                pred_r_flat = pred_denorm_r[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
-                targ_r_flat = target_denorm_r[mask_bool].cpu().numpy().reshape(-1).astype(np.float64)
-                valid_finite_r = np.isfinite(pred_r_flat) & np.isfinite(targ_r_flat)
-                if valid_finite_r.sum() > 0:
-                    sum_sq_err_r += np.sum((pred_r_flat[valid_finite_r] - targ_r_flat[valid_finite_r]) ** 2)
-                    n_pixels_r += valid_finite_r.sum()
-                    sum_sq_fcst_err_r += np.sum(targ_r_flat[valid_finite_r] ** 2)
+                    pred_inc_r = pred_denorm_r[b].cpu().numpy().astype(np.float32)
+                    true_inc_r = inc_rootzone[b].cpu().numpy().astype(np.float32)
+                    fcst_r = (
+                        forecast_r[b].cpu().numpy().astype(np.float32)
+                        if forecast_r is not None
+                        else np.zeros_like(true_inc_r, dtype=np.float32)
+                    )
+                    samples_r.append((pred_inc_r, true_inc_r, fcst_r, mask_np, latw_np))
 
         self.model.train()
 
-        # Compute pooled RMSE and skill
-        rmse_s = np.sqrt(sum_sq_err_s / max(n_pixels_s, 1)) if n_pixels_s > 0 else float("nan")
-        rmse_r = np.sqrt(sum_sq_err_r / max(n_pixels_r, 1)) if n_pixels_r > 0 else float("nan")
-        rmse_fcst_s = np.sqrt(sum_sq_fcst_err_s / max(n_pixels_s, 1)) if n_pixels_s > 0 else float("nan")
-        rmse_fcst_r = np.sqrt(sum_sq_fcst_err_r / max(n_pixels_r, 1)) if n_pixels_r > 0 else float("nan")
-        skill_s = 1.0 - rmse_s / rmse_fcst_s if n_pixels_s > 0 and rmse_fcst_s > 0 else float("nan")
-        skill_r = 1.0 - rmse_r / rmse_fcst_r if n_pixels_r > 0 and rmse_fcst_r > 0 else float("nan")
+        if not samples_s:
+            return {}
 
-        return {
-            "source_val_loss": total_loss / max(n_batches, 1),
-            "source_val_surface_loss": total_surface / max(n_batches, 1),
-            "source_val_rootzone_loss": total_rootzone / max(n_batches, 1),
-            "source_val_valid_px": total_valid,
-            "source_val_rmse_surface": float(rmse_s),
-            "source_val_rmse_rootzone": float(rmse_r),
-            "source_val_skill_surface": float(skill_s),
-            "source_val_skill_rootzone": float(skill_r),
-        }
+        # Delegate alpha scan to shared calibration function
+        gain_results = calibrate_residual_gain(samples_s, samples_r, alphas)
+        gain_results["source_val_loss"] = total_loss / max(n_batches, 1)
+        gain_results["source_val_surface_loss"] = total_surface / max(n_batches, 1)
+        gain_results["source_val_rootzone_loss"] = total_rootzone / max(n_batches, 1)
+        gain_results["source_val_valid_px"] = total_valid
+        return gain_results
 
     def train(self, verbose: bool = True) -> List[Dict[str, float]]:
         """Run the training loop.
@@ -486,19 +576,26 @@ class Trainer:
             f"  Device:          {self.device}",
             f"  Model width:     {self.model_width}",
             f"  Trainable params:{num_params:,}",
+            f"  Loss fn:         {type(self.loss_fn).__name__}",
+            f"  Lat-weighted:    {self.use_lat_weighted_loss}",
             f"  Batch size:      {self.batch_size}",
             f"  Accum steps:     {self.accum_steps}",
             f"  Max epochs:      {self.max_epochs}",
+            f"  Checkpoint every:{self.checkpoint_every_n_epochs} epochs",
             f"  LR:              {self.lr}",
             f"  Weight decay:    {self.weight_decay}",
             f"  Grad clip:       {self.grad_clip}",
             f"  AMP:             {self.use_amp}",
             f"  Inc norm:        {self.target_increment_normalization}",
             f"  Zero raw init:   {self.zero_raw_increment_init}",
+            f"  Lambda amp:      {self.lambda_amp}",
             f"  Train samples:   {len(self.train_dataset)}",
             f"  Steps/epoch:     {total_steps_per_epoch}",
-            "=" * 60,
         ]
+        if self.target_increment_normalization and self._inc_mean is not None:
+            header_lines.append(f"  inc_mean:        s={self._inc_mean[0]:.6f} r={self._inc_mean[1]:.6f}")
+            header_lines.append(f"  inc_std:         s={self._inc_std[0]:.6f} r={self._inc_std[1]:.6f}")
+        header_lines.append("=" * 60)
         for line in header_lines:
             if self.run_manager is not None:
                 self.run_manager.log_console(line)
@@ -529,6 +626,9 @@ class Trainer:
                 inc_surface = batch["increment_surface"].to(self.device)
                 inc_rootzone = batch["increment_rootzone"].to(self.device)
                 loss_mask = batch["loss_mask"].to(self.device)
+                latitude_weight = batch.get("latitude_weight")
+                if latitude_weight is not None:
+                    latitude_weight = latitude_weight.to(self.device)
 
                 x_norm = self._normalize(x)
 
@@ -547,7 +647,7 @@ class Trainer:
                     target = (target - inc_mean_t) / inc_std_t
 
                 # Forward pass + loss (AMP handled in _forward_and_loss)
-                pred, losses = self._forward_and_loss(x_norm, target, loss_mask)
+                pred, losses = self._forward_and_loss(x_norm, target, loss_mask, latitude_weight=latitude_weight)
 
                 # Optional CUDA sync for precise error attribution (debug only)
                 if self.cuda_sync_debug and self.device == "cuda":
@@ -583,7 +683,10 @@ class Trainer:
                 epoch_losses.append(float(losses["total_loss"].item()))
                 epoch_surface_losses.append(float(losses["surface_loss"].item()))
                 epoch_rootzone_losses.append(float(losses["rootzone_loss"].item()))
-                epoch_valid_counts.append(int(losses["valid_pixel_count"].item()))
+                valid_count = int(
+                    losses.get("valid_pixel_count", losses.get("valid_weight_sum", 0)).item()
+                )
+                epoch_valid_counts.append(valid_count)
 
                 # Per-step logging
                 if batch_idx % self.log_every_steps == 0:
@@ -613,7 +716,9 @@ class Trainer:
                         gpu_res = torch.cuda.memory_reserved(dev_idx) / 1e9
 
                     lr = float(self.optimizer.param_groups[0]["lr"])
-                    valid_px = int(losses["valid_pixel_count"].item())
+                    valid_px = int(
+                        losses.get("valid_pixel_count", losses.get("valid_weight_sum", 0)).item()
+                    )
                     total_px = loss_mask.numel()
                     valid_fraction = valid_px / max(total_px, 1)
                     amp_scale = self._amp_scaler.get_scale() if self.use_amp else 0.0
@@ -689,29 +794,47 @@ class Trainer:
 
             self.scheduler.step(avg_loss)
 
-            # Source val eval every eval_every_epochs
+            # Source val eval + gain calibration every eval_every_epochs
             source_val_metrics = {}
+            gain_results = {}
             if self.source_val_dataset is not None and epoch % self.eval_every_epochs == 0:
-                source_val_metrics = self._eval_source_val()
-                if verbose:
-                    sv_loss = source_val_metrics.get("source_val_loss", float("nan"))
-                    sv_rmse_s = source_val_metrics.get("source_val_rmse_surface", float("nan"))
-                    sv_rmse_r = source_val_metrics.get("source_val_rmse_rootzone", float("nan"))
-                    sv_skill_s = source_val_metrics.get("source_val_skill_surface", float("nan"))
-                    sv_skill_r = source_val_metrics.get("source_val_skill_rootzone", float("nan"))
+                gain_results = self._calibrate_source_val_residual_gain()
+                if gain_results:
+                    source_val_metrics = self._make_source_val_metrics(gain_results)
+                if verbose and gain_results:
+                    sv_loss = gain_results.get("source_val_loss", float("nan"))
+                    sv_rmse_s = gain_results.get("rmse_surface_model", float("nan"))
+                    sv_rmse_r = gain_results.get("rmse_rootzone_model", float("nan"))
+                    sv_skill_s = gain_results.get("skill_surface_with_alpha", float("nan"))
+                    sv_skill_r = gain_results.get("skill_rootzone_with_alpha", float("nan"))
+                    alpha_s = gain_results.get("best_alpha_surface", 1.0)
+                    alpha_r = gain_results.get("best_alpha_rootzone", 1.0)
+                    sel_score = gain_results.get("selection_score", float("-inf"))
                     print(
                         f"  source_val loss={sv_loss:.6f}"
                         f"  rmse_s={sv_rmse_s:.6f} r={sv_rmse_r:.6f}"
-                        f"  skill_s={sv_skill_s:.4f} r={sv_skill_r:.4f}",
+                        f"  skill_s={sv_skill_s:.4f} r={sv_skill_r:.4f}"
+                        f"  alpha_s={alpha_s:.3f} alpha_r={alpha_r:.3f}"
+                        f"  sel_score={sel_score:.4f}",
                         flush=True,
                     )
                 if self._jsonl_logger is not None:
-                    self._jsonl_logger.log_eval({"epoch": epoch, **source_val_metrics})
+                    log_data = {"epoch": epoch}
+                    log_data.update(source_val_metrics)
+                    if gain_results:
+                        log_data["selection_score"] = gain_results.get("selection_score", float("nan"))
+                        log_data["best_alpha_surface"] = gain_results.get("best_alpha_surface", 1.0)
+                        log_data["best_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
+                    self._jsonl_logger.log_eval(log_data)
 
-            # Best checkpoint selection: use source_val loss if available, else train loss
+            # Best checkpoint selection: use safe_score from gain calibration, else source_val loss, else train loss
             is_best = False
             best_metric = avg_loss
-            if source_val_metrics and "source_val_loss" in source_val_metrics:
+            if gain_results and "selection_score" in gain_results:
+                if gain_results["selection_score"] > self.best_safe_score:
+                    is_best = True
+                    best_metric = gain_results["selection_score"]
+            elif source_val_metrics and "source_val_loss" in source_val_metrics:
                 sv_loss = source_val_metrics["source_val_loss"]
                 if sv_loss < self.best_loss:
                     is_best = True
@@ -721,9 +844,36 @@ class Trainer:
 
             if is_best:
                 self.best_loss = best_metric
-                self.save_checkpoint(self.checkpoint_dir / "best.pt", epoch, best_metric, "best")
+                ckpt_path = self.checkpoint_dir / "best.pt"
+                self.save_checkpoint(ckpt_path, epoch, best_metric, "best", gain_results=gain_results)
 
-            self.save_checkpoint(self.checkpoint_dir / "last.pt", epoch, avg_loss, "last")
+            # Save safe_score checkpoint (selection_score == min_skill, the primary criterion)
+            if gain_results:
+                if gain_results["selection_score"] > self.best_safe_score:
+                    self.best_safe_score = gain_results["selection_score"]
+                    self.save_checkpoint(
+                        self.checkpoint_dir / "checkpoint_best_source_val_safe_score.pt",
+                        epoch, gain_results["selection_score"], "best_safe_score",
+                        gain_results=gain_results,
+                    )
+
+            # Always save last.pt
+            self.save_checkpoint(
+                self.checkpoint_dir / "last.pt", epoch, avg_loss, "last",
+                gain_results=gain_results,
+            )
+
+            # Epoch checkpoint
+            self.save_checkpoint(
+                self.checkpoint_dir / "checkpoint_latest.pt", epoch, avg_loss, "latest",
+                gain_results=gain_results,
+            )
+            if (epoch + 1) % self.checkpoint_every_n_epochs == 0:
+                self.save_checkpoint(
+                    self.checkpoint_dir / f"checkpoint_epoch_{epoch:03d}.pt",
+                    epoch, avg_loss, f"epoch_{epoch:03d}",
+                    gain_results=gain_results,
+                )
 
             record = {
                 "epoch": epoch,
@@ -814,10 +964,11 @@ class Trainer:
         epoch: int,
         loss: float,
         tag: str = "",
+        gain_results: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Save a checkpoint with config, protocol_freeze_id, split_manifest_path, git_hash."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint = {
+        checkpoint: Dict[str, Any] = {
             "tag": tag,
             "epoch": epoch,
             "loss": loss,
@@ -846,12 +997,24 @@ class Trainer:
                 "zero_raw_increment_init": self.zero_raw_increment_init,
                 "use_amp": self.use_amp,
                 "log_every_steps": self.log_every_steps,
+                "use_lat_weighted_loss": self.use_lat_weighted_loss,
+                "checkpoint_every_n_epochs": self.checkpoint_every_n_epochs,
+                "lambda_amp": self.lambda_amp,
                 "ch_mean": self._ch_mean.tolist() if self._ch_mean is not None else None,
                 "ch_std": self._ch_std.tolist() if self._ch_std is not None else None,
                 "inc_mean": self._inc_mean.tolist() if self._inc_mean is not None else None,
                 "inc_std": self._inc_std.tolist() if self._inc_std is not None else None,
             },
         }
+        # Attach gain calibration results
+        if gain_results:
+            checkpoint["residual_gain_alpha_surface"] = gain_results.get("best_alpha_surface", 1.0)
+            checkpoint["residual_gain_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
+            checkpoint["source_val_safe_metrics"] = gain_results
+            checkpoint["source_val_gain_grid"] = gain_results.get("alpha_grid", self.source_val_gain_grid)
+            checkpoint["selection_score"] = gain_results.get("selection_score", float("nan"))
+            checkpoint["min_skill"] = gain_results.get("min_skill", float("nan"))
+            checkpoint["mean_skill"] = gain_results.get("mean_skill", float("nan"))
         torch.save(checkpoint, path)
 
     def save_summary_json(self, path: Optional[Path] = None) -> None:
@@ -902,6 +1065,7 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.current_epoch = checkpoint["epoch"] + 1
         self.best_loss = checkpoint.get("best_loss", float("inf"))
+        self.best_safe_score = checkpoint.get("selection_score", float("-inf"))
         self.train_history = checkpoint.get("train_history", [])
         self.val_history = checkpoint.get("val_history", [])
 

@@ -273,6 +273,18 @@ class HydroDADataset(Dataset):
             "seed": self.seed,
         }
 
+    def set_active_region(self, region_id: str) -> None:
+        """Restrict active region mask to a single region's pixels."""
+        self._active_region_ids = [region_id]
+        rnum = int(region_id.split("-R")[1])
+        self._active_region_mask = (self._region_mask_int == rnum).astype(np.float32)
+
+    def set_active_all_regions(self) -> None:
+        """Set active region mask to all US regions."""
+        self._active_region_ids = list(_ALL_US_REGIONS)
+        rnum_list = [int(rid.split("-R")[1]) for rid in _ALL_US_REGIONS]
+        self._active_region_mask = np.isin(self._region_mask_int, rnum_list).astype(np.float32)
+
     def close(self) -> None:
         self._da_ds.close()
 

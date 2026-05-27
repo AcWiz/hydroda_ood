@@ -9,32 +9,13 @@ Outputs: reports/source_val_cross_domain/forecast_only_source_val_cross_domain.c
 """
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
 import pandas as pd
 
+from hydroda.baselines.forecast import ForecastBaseline
 from hydroda.data.dataset import HydroDADataset
 from hydroda.evaluation.harness import evaluate_split
-
-
-class ForecastBaseline:
-    """Zero-increment baseline: pred_increment = 0, pred_analysis = forecast."""
-
-    def predict(self, sample: dict) -> dict:
-        forecast_surface = sample["forecast_surface"]
-        forecast_rootzone = sample["forecast_rootzone"]
-        return {
-            "pred_increment_surface": (
-                forecast_surface - forecast_surface
-            ),  # zero increment
-            "pred_increment_rootzone": (
-                forecast_rootzone - forecast_rootzone
-            ),  # zero increment
-            "pred_analysis_surface": forecast_surface,
-            "pred_analysis_rootzone": forecast_rootzone,
-        }
 
 
 def main():
@@ -89,8 +70,8 @@ def main():
     # Filter to rootzone only
     df_rootzone = df[df["variable"] == "rootzone"].copy()
 
-    # Filter to specific latw metric
-    metric_name = "analysis_rmse_sqrt_before_time_avg_latw"
+    # Filter to specific metric (analysis_rmse - sqrt-before-avg rootzone)
+    metric_name = "analysis_rmse"
     df_metric = df_rootzone[df_rootzone["metric"] == metric_name].copy()
 
     # Compute per-row domain label

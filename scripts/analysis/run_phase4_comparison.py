@@ -41,6 +41,8 @@ def load_metrics(region: str, method: str, base_dir: str) -> Optional[pd.DataFra
 def build_summary(df: pd.DataFrame) -> Dict:
     """Build method-level summary from long-format metrics."""
     skill = df[df["metric"] == "analysis_skill_vs_forecast"]
+    skill_global = df[df["metric"] == "analysis_skill_vs_forecast_global"]
+    skill_latw_global = df[df["metric"] == "analysis_skill_vs_forecast_latw_global"]
     inc_rmse = df[df["metric"] == "increment_rmse"]
     inc_corr = df[df["metric"] == "increment_corr"]
     inc_bias = df[df["metric"] == "increment_bias"]
@@ -50,9 +52,18 @@ def build_summary(df: pd.DataFrame) -> Dict:
         vals = df_sub[df_sub["variable"] == var]["value"]
         return float(vals.mean()) if len(vals) > 0 else float("nan")
 
+    def _single(df_sub: pd.DataFrame, var: str) -> float:
+        """Extract single global row value (not per-sample mean)."""
+        match = df_sub[df_sub["variable"] == var]
+        return float(match["value"].iloc[0]) if len(match) > 0 else float("nan")
+
     return {
         "surface_skill": _mean(skill, "surface"),
+        "surface_skill_global": _single(skill_global, "surface"),
+        "surface_skill_latw_global": _single(skill_latw_global, "surface"),
         "rootzone_skill": _mean(skill, "rootzone"),
+        "rootzone_skill_global": _single(skill_global, "rootzone"),
+        "rootzone_skill_latw_global": _single(skill_latw_global, "rootzone"),
         "surface_inc_rmse": _mean(inc_rmse, "surface"),
         "rootzone_inc_rmse": _mean(inc_rmse, "rootzone"),
         "surface_inc_corr": _mean(inc_corr, "surface"),
@@ -115,15 +126,18 @@ def main():
     lines.append("")
     lines.append("## Main Comparison Table")
     lines.append("")
-    lines.append("| Method | Surf Skill | Root Skill | Surf Inc-RMSE | Root Inc-RMSE | Surf Inc-Corr | Root Inc-Corr | Surf Inc-Bias | Root Inc-Bias |")
-    lines.append("|--------|-----------|-----------|--------------|--------------|--------------|--------------|--------------|--------------|")
+    lines.append("| Method | Surf Skill | Surf Skill(global) | Surf Skill(latw) | Root Skill | Root Skill(global) | Root Skill(latw) | Surf Inc-RMSE | Root Inc-RMSE | Surf Inc-Corr | Root Inc-Corr | Surf Inc-Bias | Root Inc-Bias |")
+    lines.append("|--------|-----------|-------------------|-----------------|-----------|-------------------|-----------------|--------------|--------------|--------------|--------------|--------------|--------------|")
 
     for method in args.methods:
         s = method_summaries.get(method)
         if s is None:
             continue
         lines.append(
-            f"| {method} | {s['surface_skill']:.4f} | {s['rootzone_skill']:.4f} | "
+            f"| {method} | {s['surface_skill']:.4f} | {s['surface_skill_global']:.4f} | "
+            f"{s['surface_skill_latw_global']:.4f} | "
+            f"{s['rootzone_skill']:.4f} | {s['rootzone_skill_global']:.4f} | "
+            f"{s['rootzone_skill_latw_global']:.4f} | "
             f"{s['surface_inc_rmse']:.6f} | {s['rootzone_inc_rmse']:.6f} | "
             f"{s['surface_inc_corr']:.4f} | {s['rootzone_inc_corr']:.4f} | "
             f"{s['surface_inc_bias']:.6f} | {s['rootzone_inc_bias']:.6f} |"
@@ -136,8 +150,8 @@ def main():
     for region in regions:
         lines.append(f"### {region}")
         lines.append("")
-        lines.append("| Method | Surf Skill | Root Skill | Surf Inc-RMSE | Root Inc-RMSE | Surf Inc-Corr | Root Inc-Corr |")
-        lines.append("|--------|-----------|-----------|--------------|--------------|--------------|--------------|")
+        lines.append("| Method | Surf Skill | Surf Skill(global) | Surf Skill(latw) | Root Skill | Root Skill(global) | Root Skill(latw) | Surf Inc-RMSE | Root Inc-RMSE | Surf Inc-Corr | Root Inc-Corr |")
+        lines.append("|--------|-----------|-------------------|-----------------|-----------|-------------------|-----------------|--------------|--------------|--------------|--------------|")
 
         for method in args.methods:
             base_dir = _METRIC_DIRS.get(method)
@@ -149,7 +163,10 @@ def main():
             df = pd.read_csv(csv_path)
             s = build_summary(df)
             lines.append(
-                f"| {method} | {s['surface_skill']:.4f} | {s['rootzone_skill']:.4f} | "
+                f"| {method} | {s['surface_skill']:.4f} | {s['surface_skill_global']:.4f} | "
+                f"{s['surface_skill_latw_global']:.4f} | "
+                f"{s['rootzone_skill']:.4f} | {s['rootzone_skill_global']:.4f} | "
+                f"{s['rootzone_skill_latw_global']:.4f} | "
                 f"{s['surface_inc_rmse']:.6f} | {s['rootzone_inc_rmse']:.6f} | "
                 f"{s['surface_inc_corr']:.4f} | {s['rootzone_inc_corr']:.4f} |"
             )

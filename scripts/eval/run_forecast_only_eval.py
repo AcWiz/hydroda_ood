@@ -12,9 +12,8 @@ Usage:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
@@ -28,21 +27,6 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Limit samples per region for fast pipeline verification
 MAX_SAMPLES_PER_REGION = 100
-
-
-def compute_sample_mask_coverage(sample: Dict[str, Any]) -> Dict[str, float]:
-    """Compute per-sample mask coverage fractions."""
-    region = (sample["active_region_mask"] > 0.5).astype(np.float32)
-    obs = (sample["base_valid_mask"] > 0.5).astype(np.float32)
-    label_valid = sample["label_valid_mask"]
-
-    region_px = int(region.sum())
-    if region_px == 0:
-        return {"label_valid_fraction": 0.0, "obs_fraction": 0.0}
-    return {
-        "label_valid_fraction": float(label_valid.sum()) / float(region_px),
-        "obs_fraction": float(obs.sum()) / float(region_px),
-    }
 
 
 def audit_mask_coverage(

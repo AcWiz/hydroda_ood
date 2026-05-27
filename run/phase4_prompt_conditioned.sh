@@ -26,11 +26,11 @@ echo "Phase 4 Prompt-Conditioned Shared Backbone"
 echo "  target_region=${TARGET_REGION}"
 echo "  K=${K}"
 echo "  seed=${SEED}"
-echo "  config=configs/model_resunet_main.yaml"
+echo "  width=32 prompt_dim=64 lr=3e-4 batch_size=8 accum_steps=4"
+echo "  lat_weighted_loss=True zero_init=True inc_norm=True amp=True"
 echo "============================================"
 
 PYTHONPATH=. python scripts/train/train_prompt_conditioned_shared.py \
-    --config configs/model_resunet_main.yaml \
     --target_region "${TARGET_REGION}" \
     --K "${K}" \
     --seed "${SEED}" \
@@ -39,9 +39,10 @@ PYTHONPATH=. python scripts/train/train_prompt_conditioned_shared.py \
     --accum_steps 4 \
     --zero_raw_increment_init \
     --target_increment_normalization \
-    --batch_size 8 \
-    --max_epochs 31 \
-    --lr 1e-3 \
+    --use_lat_weighted_loss \
+    --batch_size 16 \
+    --max_epochs 50 \
+    --lr 3e-4 \
     --weight_decay 1e-4 \
     --grad_clip 1.0 \
     --num_workers 0 \
@@ -49,7 +50,7 @@ PYTHONPATH=. python scripts/train/train_prompt_conditioned_shared.py \
     --prompt_dim 64 \
     --log_every_steps 100 \
     --eval_every_epochs 1 \
-    --run_name "" \
-    --resume_from "artifacts/runs/phase4_prompt_conditioned/phase4_prompt_conditioned_prompt_conditioned_US-R1_w32_e30_lr0.001_norm_zero_s0_20260513_092533/checkpoints/last.pt" 
+    --checkpoint_every 10 \
+    --selection_metric source_val_transfer_safe_score \
 
 echo "Done: ${TARGET_REGION} K=${K} seed=${SEED}"

@@ -3,16 +3,14 @@
 ## Protocol
 
 - **Protocol freeze ID**: `hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12`
-- **K**: 0, **seed**: 0
-- **Generated**: 2026-05-19T00:49:25.393203
+- **K**: 12, **seed**: 0
+- **Generated**: 2026-05-19T00:50:14.246747
 
 ## Splits evaluated
 
 | Split | Role |
 |-------|------|
-| source_val | source_val |
 | target_context | target_support |
-| target_query | target_query |
 
 ## Sanity check results
 

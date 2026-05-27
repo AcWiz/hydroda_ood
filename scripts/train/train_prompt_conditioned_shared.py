@@ -24,6 +24,7 @@ No-leakage declaration:
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import json
 import time
@@ -43,10 +44,12 @@ from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
 from hydroda.models.prompt_encoder import RegionPromptEncoder
-from hydroda.training.losses import MaskedHuberLoss
+from hydroda.training.calibration import calibrate_residual_gain, calibrate_residual_gain_region_aware
+from hydroda.training.losses import MaskedHuberLoss, WeightedMaskedHuberLoss
+from hydroda.metrics.skill import weighted_analysis_skill_components
 from hydroda.utils.run_manager import RunManager
 from hydroda.utils.logger import WandbLogger, ConsoleLogger
-from hydroda.utils.device import resolve_device, log_device_summary
+from hydroda.utils.device import resolve_device, log_device_summary, gpu_health_check
 from hydroda.utils.runtime import gather_runtime_info, get_git_hash, get_timestamp
 
 
@@ -122,28 +125,112 @@ def _compute_increment_stats(
     return inc_mean, inc_std
 
 
-def _sample_region_from_mask(region_mask_integer: np.ndarray, valid_mask: np.ndarray) -> int:
+def _sample_region_from_mask(
+    region_mask_integer: np.ndarray,
+    valid_mask: np.ndarray,
+    active_global_indices: set | None = None,
+) -> int:
     """Determine the dominant region from region_mask_integer and valid pixels.
 
     Args:
         region_mask_integer: [H, W] with region indices (1-6)
         valid_mask: [H, W] boolean valid pixel mask
+        active_global_indices: optional set of 0-indexed global region indices
+            to restrict sampling to (e.g. source-only regions). If None,
+            all regions 1-6 are considered.
 
     Returns:
         region index (0-5)
     """
-    for r_idx in range(1, 7):
+    if active_global_indices is not None:
+        # Convert 0-indexed global indices to 1-indexed region numbers
+        candidate_nums = sorted(r + 1 for r in active_global_indices)
+    else:
+        candidate_nums = list(range(1, 7))
+
+    for r_idx in candidate_nums:
         count = int(((region_mask_integer == r_idx) & valid_mask).sum())
         if count > 0:
             return r_idx - 1  # 0-indexed
 
-    # Fallback: count per region
+    # Fallback: count per region (restricted to candidates)
     counts = {}
-    for r_idx in range(1, 7):
+    for r_idx in candidate_nums:
         counts[r_idx] = int((region_mask_integer == r_idx).sum())
 
     best = max(counts, key=counts.get)
     return best - 1
+
+
+class PromptQualityTracker:
+    """Track prompt embedding quality across regions to detect collapse.
+
+    Accumulates prompt embeddings per region during evaluation and computes
+    pairwise cosine distances to measure prompt diversity.
+    """
+
+    def __init__(self, num_regions: int):
+        self.num_regions = num_regions
+        self.reset()
+
+    def reset(self) -> None:
+        self._embeddings: Dict[int, List[np.ndarray]] = {i: [] for i in range(self.num_regions)}
+
+    def update(self, prompt_emb: torch.Tensor, region_ids: torch.Tensor) -> None:
+        """Accumulate prompt embeddings keyed by region id.
+
+        Args:
+            prompt_emb: [B, prompt_dim] prompt embeddings
+            region_ids: [B] region indices (0-indexed)
+        """
+        emb_np = prompt_emb.detach().cpu().numpy()
+        rids = region_ids.detach().cpu().numpy()
+        for b in range(emb_np.shape[0]):
+            rid = int(rids[b])
+            if rid in self._embeddings:
+                self._embeddings[rid].append(emb_np[b].copy())
+
+    def compute_metrics(self) -> Dict[str, float]:
+        """Compute prompt quality metrics from accumulated embeddings.
+
+        Returns dict with:
+            prompt_pairwise_cosine_distance_mean
+            prompt_pairwise_cosine_distance_min
+            prompt_collapse_detected
+        """
+        region_means = []
+        for rid in sorted(self._embeddings.keys()):
+            embs = self._embeddings[rid]
+            if embs:
+                region_means.append(np.mean(np.stack(embs, axis=0), axis=0))
+
+        n = len(region_means)
+        if n < 2:
+            return {
+                "prompt_pairwise_cosine_distance_mean": float("nan"),
+                "prompt_pairwise_cosine_distance_min": float("nan"),
+                "prompt_collapse_detected": False,
+            }
+
+        cos_distances = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                a = region_means[i]
+                b = region_means[j]
+                a_norm = a / (np.linalg.norm(a) + 1e-8)
+                b_norm = b / (np.linalg.norm(b) + 1e-8)
+                cos_sim = float(np.dot(a_norm, b_norm))
+                cos_distances.append(1.0 - cos_sim)
+
+        mean_cos_dist = float(np.mean(cos_distances)) if cos_distances else float("nan")
+        min_cos_dist = float(np.min(cos_distances)) if cos_distances else float("nan")
+        collapsed = bool(mean_cos_dist < 0.01) if np.isfinite(mean_cos_dist) else False
+
+        return {
+            "prompt_pairwise_cosine_distance_mean": mean_cos_dist,
+            "prompt_pairwise_cosine_distance_min": min_cos_dist,
+            "prompt_collapse_detected": collapsed,
+        }
 
 
 class PromptConditionedTrainer:
@@ -180,6 +267,19 @@ class PromptConditionedTrainer:
         wandb_logger: Optional[WandbLogger] = None,
         source_val_dataset: Optional[HydroDADataset] = None,
         global_to_source_lookup: Optional[List[int]] = None,
+        use_lat_weighted_loss: bool = True,
+        source_val_gain_grid: Optional[List[float]] = None,
+        source_regions: Optional[List[str]] = None,
+        checkpoint_every_n_epochs: int = 5,
+        lambda_amp: float = 0.0,
+        selection_metric: str = "source_val_transfer_safe_score",
+        source_val_residual_gain: bool = True,
+        cuda_sync_debug: bool = False,
+        # Resume: optionally inject pre-computed stats to skip recompute
+        _resume_ch_mean: Optional[np.ndarray] = None,
+        _resume_ch_std: Optional[np.ndarray] = None,
+        _resume_inc_mean: Optional[np.ndarray] = None,
+        _resume_inc_std: Optional[np.ndarray] = None,
     ) -> None:
         self.model = model.to(device)
         self.prompt_encoder = prompt_encoder.to(device)
@@ -207,16 +307,26 @@ class PromptConditionedTrainer:
         self.wandb_logger = wandb_logger
         self.source_val_dataset = source_val_dataset
         self.global_to_source_lookup = global_to_source_lookup if global_to_source_lookup is not None else {i: i for i in range(6)}
+        self.use_lat_weighted_loss = use_lat_weighted_loss
+        self.source_val_gain_grid = source_val_gain_grid or [0.0, 0.25, 0.5, 0.75, 1.0]
+        self.source_regions = source_regions or []
+        self.checkpoint_every_n_epochs = checkpoint_every_n_epochs
+        self.lambda_amp = lambda_amp
+        self.selection_metric = selection_metric
+        self.source_val_residual_gain = source_val_residual_gain
+        self.cuda_sync_debug = cuda_sync_debug
+        self._source_region_global_indices = sorted(global_to_source_lookup.keys()) if global_to_source_lookup else []
 
         # AMP
         self._amp_scaler: Optional[GradScaler] = None
         if self.use_amp:
-            self._amp_scaler = GradScaler('cuda')
+            self._amp_scaler = GradScaler('cuda', init_scale=256.0)
 
         # Leakage guard
         protocol = ProtocolConfig()
         guard = LeakageGuard(protocol=protocol)
-        guard.check_normalization_scope([], scope_name="source_fit_only")
+        train_date_strs = [d["date_str"] for d in self.train_dataset._date_records] if hasattr(self.train_dataset, "_date_records") else []
+        guard.check_normalization_scope(train_date_strs, scope_name="source_fit_only")
 
         # Optimizer: model + prompt_encoder
         all_params = list(model.parameters()) + list(prompt_encoder.parameters())
@@ -224,18 +334,35 @@ class PromptConditionedTrainer:
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6,
         )
-        self.loss_fn = MaskedHuberLoss(delta=0.01)
+        # Loss function selection
+        if self.use_lat_weighted_loss:
+            self.loss_fn = WeightedMaskedHuberLoss(
+                delta=0.01,
+                lambda_amp=self.lambda_amp,
+            )
+        else:
+            self.loss_fn = MaskedHuberLoss(delta=0.01)
 
         # Normalization stats
         self._ch_mean: Optional[np.ndarray] = None
         self._ch_std: Optional[np.ndarray] = None
-        self._compute_normalization_stats()
+        if _resume_ch_mean is not None and _resume_ch_std is not None:
+            self._ch_mean = _resume_ch_mean
+            self._ch_std = _resume_ch_std
+            print(f"  [resume] Restored ch_mean from checkpoint")
+        else:
+            self._compute_normalization_stats()
 
         # Increment stats
         self._inc_mean: Optional[np.ndarray] = None
         self._inc_std: Optional[np.ndarray] = None
         if self.target_increment_normalization:
-            self._compute_increment_stats()
+            if _resume_inc_mean is not None and _resume_inc_std is not None:
+                self._inc_mean = _resume_inc_mean
+                self._inc_std = _resume_inc_std
+                print(f"  [resume] Restored inc_mean/inc_std from checkpoint")
+            else:
+                self._compute_increment_stats()
 
         # Zero-raw-init
         if self.zero_raw_increment_init:
@@ -256,14 +383,23 @@ class PromptConditionedTrainer:
         # State
         self.current_epoch = 0
         self.best_loss = float("inf")
+        self.best_safe_score = float("-inf")
+        self._skipped_steps = 0
         self.train_history: List[Dict[str, float]] = []
         self.val_history: List[Dict[str, float]] = []
+        self.prompt_quality_history: List[Dict[str, float]] = []
+
+        # Prompt quality tracker
+        num_src_regions = len(self.source_regions) if self.source_regions else prompt_encoder.num_regions
+        self._prompt_quality_tracker = PromptQualityTracker(num_regions=num_src_regions)
 
         # JSONL logger
         self._jsonl_logger = None
         if run_manager is not None:
             from hydroda.utils.logger import JSONLLogger
             self._jsonl_logger = JSONLLogger(run_manager.get_log_dir())
+            # Open console.log for tee output
+            run_manager.open_console_log()
 
     def _compute_normalization_stats(self) -> None:
         print(f"Computing normalization stats from training dataset (n={len(self.train_dataset)})...")
@@ -279,7 +415,16 @@ class PromptConditionedTrainer:
             return x
         mean_t = torch.from_numpy(self._ch_mean).to(x.device).view(1, 12, 1, 1)
         std_t = torch.from_numpy(self._ch_std).to(x.device).view(1, 12, 1, 1)
-        return (x - mean_t) / std_t
+        x_norm = (x - mean_t) / std_t
+        # NaN/Inf guard: if normalization produces invalid values, return raw input
+        nan_mask = torch.isnan(x_norm)
+        inf_mask = torch.isinf(x_norm)
+        if nan_mask.any() or inf_mask.any():
+            n_nan = nan_mask.sum().item()
+            n_inf = inf_mask.sum().item()
+            print(f"  WARNING: normalize produced {n_nan} NaN / {n_inf} Inf — returning raw input", flush=True)
+            return x
+        return x_norm
 
     def _compute_increment_stats(self) -> None:
         print(f"Computing increment stats from training dataset (n={len(self.train_dataset)})...")
@@ -310,15 +455,17 @@ class PromptConditionedTrainer:
             months = []
             for s in batch:
                 valid_mask = np.isfinite(s["forecast_surface"]) & np.isfinite(s["forecast_rootzone"])
-                global_rid = _sample_region_from_mask(s["region_mask_integer"], valid_mask)
-                # Guard: global_rid must be in source region set, not target
-                # Target region data should never appear in source_fit/val splits
+                global_rid = _sample_region_from_mask(
+                    s["region_mask_integer"], valid_mask,
+                    active_global_indices=set(self.global_to_source_lookup.keys()),
+                )
+                # Safety: global_rid must be in source region set
                 assert global_rid in self.global_to_source_lookup, \
                     f"collate_fn: global_rid={global_rid} not in lookup (target data in source split?)"
                 src_rid = self.global_to_source_lookup[global_rid]
                 region_ids.append(src_rid)
                 months.append(int(s.get("month", 6)))
-            return {
+            result = {
                 "x": x,
                 "increment_surface": increment_surface,
                 "increment_rootzone": increment_rootzone,
@@ -326,6 +473,19 @@ class PromptConditionedTrainer:
                 "region_ids": torch.tensor(region_ids, dtype=torch.long),
                 "months": torch.tensor(months, dtype=torch.long),
             }
+            # Add latitude_weight for lat-weighted loss
+            if "latitude_weight" in batch[0]:
+                latitude_weight = torch.from_numpy(
+                    np.stack([s["latitude_weight"] for s in batch], axis=0)
+                )
+                result["latitude_weight"] = latitude_weight
+            # Add forecast fields for gain calibration
+            for key in ["forecast_surface", "forecast_rootzone"]:
+                if key in batch[0]:
+                    result[key] = torch.from_numpy(
+                        np.stack([s[key] for s in batch], axis=0)
+                    )
+            return result
 
         pin_mem = self.device == "cuda"
         return DataLoader(
@@ -337,14 +497,108 @@ class PromptConditionedTrainer:
             collate_fn=collate_fn,
         )
 
+    def _get_increment_scale(self) -> Optional[torch.Tensor]:
+        """Return per-channel increment scale [2] from source_fit stats."""
+        if self._inc_std is not None:
+            return torch.from_numpy(self._inc_std.astype(np.float32))
+        return None
+
+    def _forward_and_loss(
+        self,
+        x_norm: torch.Tensor,
+        target: torch.Tensor,
+        loss_mask: torch.Tensor,
+        region_ids: torch.Tensor,
+        months: torch.Tensor,
+        latitude_weight: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Forward pass + loss for prompt-conditioned model.
+
+        Handles AMP consistently. Returns (pred, losses_dict).
+        """
+        if self.use_amp:
+            with autocast('cuda'):
+                z = self.prompt_encoder(x_norm, region_ids, months)
+                pred = self.model(x_norm, z)
+        else:
+            z = self.prompt_encoder(x_norm, region_ids, months)
+            pred = self.model(x_norm, z)
+
+        # Cast to fp32 for numerical stability in loss
+        pred = pred.float()
+
+        if self.use_lat_weighted_loss:
+            if latitude_weight is None:
+                raise ValueError(
+                    "use_lat_weighted_loss=True but latitude_weight not provided in batch. "
+                    "Ensure dataset returns latitude_weight."
+                )
+            inc_scale = self._get_increment_scale()
+            losses = self.loss_fn(pred, target, loss_mask, latitude_weight=latitude_weight, increment_scale=inc_scale)
+        else:
+            losses = self.loss_fn(pred, target, loss_mask)
+        return pred, losses
+
+    @staticmethod
+    def _make_source_val_metrics(gain_results: Dict[str, Any]) -> Dict[str, float]:
+        """Extract a flat metrics dict from gain calibration results."""
+        return {
+            "source_val_loss": gain_results["source_val_loss"],
+            "source_val_surface_loss": gain_results.get("source_val_surface_loss", float("nan")),
+            "source_val_rootzone_loss": gain_results.get("source_val_rootzone_loss", float("nan")),
+            "source_val_valid_px": gain_results.get("source_val_valid_px", 0),
+            "source_val_rmse_surface": gain_results["rmse_surface_model"],
+            "source_val_rmse_rootzone": gain_results["rmse_rootzone_model"],
+            "source_val_skill_surface": gain_results["skill_surface_with_alpha"],
+            "source_val_skill_rootzone": gain_results["skill_rootzone_with_alpha"],
+        }
+
     def _eval_source_val(self) -> Dict[str, float]:
+        """Run evaluation on source_val split with gain calibration.
+
+        Returns metrics dict with skill, rmse, best_alpha, etc.
+        """
+        gain_results = self._calibrate_source_val_residual_gain()
+        if not gain_results:
+            return {}
+        return {
+            "source_val_loss": gain_results["source_val_loss"],
+            "source_val_rmse_surface": gain_results["rmse_surface_model"],
+            "source_val_rmse_rootzone": gain_results["rmse_rootzone_model"],
+            "source_val_skill_surface": gain_results["skill_surface_with_alpha"],
+            "source_val_skill_rootzone": gain_results["skill_rootzone_with_alpha"],
+        }
+
+    def _calibrate_source_val_residual_gain(self) -> Dict[str, Any]:
+        """Calibrate residual gain alphas on source_val.
+
+        Uses region-aware 2D alpha grid search when source_val_residual_gain=True
+        and source_regions are available. Otherwise falls back to shared-alpha
+        calibration via calibrate_residual_gain().
+        """
         if self.source_val_dataset is None:
             return {}
+
         self.model.eval()
         self.prompt_encoder.eval()
         loader = self._build_dataloader(self.source_val_dataset)
+        alphas = self.source_val_gain_grid
+
+        # Per-region sample storage
+        samples_s_by_region: Dict[str, List] = {}
+        samples_r_by_region: Dict[str, List] = {}
+        for rname in self.source_regions:
+            samples_s_by_region[rname] = []
+            samples_r_by_region[rname] = []
+
         total_loss = 0.0
+        total_surface = 0.0
+        total_rootzone = 0.0
+        total_valid = 0
         n_batches = 0
+
+        # Reset prompt quality tracker
+        self._prompt_quality_tracker.reset()
 
         with torch.no_grad():
             for batch in loader:
@@ -354,6 +608,15 @@ class PromptConditionedTrainer:
                 loss_mask = batch["loss_mask"].to(self.device)
                 region_ids = batch["region_ids"].to(self.device)
                 months = batch["months"].to(self.device)
+                latitude_weight = batch.get("latitude_weight")
+                if latitude_weight is not None:
+                    latitude_weight = latitude_weight.to(self.device)
+                forecast_s = batch.get("forecast_surface")
+                forecast_r = batch.get("forecast_rootzone")
+                if forecast_s is not None:
+                    forecast_s = forecast_s.to(self.device)
+                if forecast_r is not None:
+                    forecast_r = forecast_r.to(self.device)
 
                 x_norm = self._normalize(x)
                 target = torch.stack([inc_surface, inc_rootzone], dim=1)
@@ -364,13 +627,111 @@ class PromptConditionedTrainer:
 
                 z = self.prompt_encoder(x_norm, region_ids, months)
                 pred = self.model(x_norm, z)
-                losses = self.loss_fn(pred, target, loss_mask)
+
+                # Track prompt embeddings for quality
+                self._prompt_quality_tracker.update(z, region_ids)
+
+                # Loss
+                if self.use_lat_weighted_loss:
+                    inc_scale = self._get_increment_scale()
+                    losses = self.loss_fn(pred, target, loss_mask, latitude_weight=latitude_weight, increment_scale=inc_scale)
+                else:
+                    losses = self.loss_fn(pred, target, loss_mask)
+
                 total_loss += float(losses["total_loss"].item())
+                total_surface += float(losses.get("surface_loss", 0.0))
+                total_rootzone += float(losses.get("rootzone_loss", 0.0))
+                total_valid += int(
+                    losses.get("valid_pixel_count", losses.get("valid_weight_sum", 0)).item()
+                )
                 n_batches += 1
+
+                # Denormalize pred for physical-space
+                pred_denorm_s = pred[:, 0].float()
+                pred_denorm_r = pred[:, 1].float()
+                if self.target_increment_normalization and self._inc_mean is not None:
+                    pred_denorm_s = pred_denorm_s * self._inc_std[0] + self._inc_mean[0]
+                    pred_denorm_r = pred_denorm_r * self._inc_std[1] + self._inc_mean[1]
+
+                # Accumulate per-sample arrays by region
+                for b in range(x.size(0)):
+                    mask_b = loss_mask[b]
+                    if mask_b.ndim == 3:
+                        mask_b = mask_b.squeeze(0)
+                    mask_np = mask_b.cpu().numpy().astype(np.float32)
+                    latw_np = (
+                        latitude_weight[b].cpu().numpy().astype(np.float32)
+                        if latitude_weight is not None
+                        else np.ones(mask_np.shape, dtype=np.float32)
+                    )
+
+                    pred_inc_s = pred_denorm_s[b].cpu().numpy().astype(np.float32)
+                    true_inc_s = inc_surface[b].cpu().numpy().astype(np.float32)
+                    fcst_s = (
+                        forecast_s[b].cpu().numpy().astype(np.float32)
+                        if forecast_s is not None
+                        else np.zeros_like(true_inc_s, dtype=np.float32)
+                    )
+
+                    pred_inc_r = pred_denorm_r[b].cpu().numpy().astype(np.float32)
+                    true_inc_r = inc_rootzone[b].cpu().numpy().astype(np.float32)
+                    fcst_r = (
+                        forecast_r[b].cpu().numpy().astype(np.float32)
+                        if forecast_r is not None
+                        else np.zeros_like(true_inc_r, dtype=np.float32)
+                    )
+
+                    # Map source region id to region name
+                    src_rid = int(region_ids[b].item())
+                    region_name = self.source_regions[src_rid] if src_rid < len(self.source_regions) else f"region_{src_rid}"
+
+                    if region_name in samples_s_by_region:
+                        samples_s_by_region[region_name].append((pred_inc_s, true_inc_s, fcst_s, mask_np, latw_np))
+                        samples_r_by_region[region_name].append((pred_inc_r, true_inc_r, fcst_r, mask_np, latw_np))
 
         self.model.train()
         self.prompt_encoder.train()
-        return {"source_val_loss": total_loss / max(n_batches, 1)}
+
+        # Compute prompt quality
+        prompt_quality = self._prompt_quality_tracker.compute_metrics()
+
+        # Check if any samples were accumulated
+        total_s = sum(len(v) for v in samples_s_by_region.values())
+        if total_s == 0:
+            return {}
+
+        # Choose calibration mode
+        if self.source_val_residual_gain and len(self.source_regions) >= 2:
+            # Region-aware 2D alpha grid
+            trace_path = self.checkpoint_dir / "alpha_selection_trace.csv"
+            gain_results = calibrate_residual_gain_region_aware(
+                samples_s_by_region=samples_s_by_region,
+                samples_r_by_region=samples_r_by_region,
+                alpha_grid=alphas,
+                prompt_quality_metrics=prompt_quality,
+                trace_path=trace_path,
+            )
+            gain_results["prompt_quality"] = prompt_quality
+            gain_results["source_val_loss"] = total_loss / max(n_batches, 1)
+            gain_results["source_val_surface_loss"] = total_surface / max(n_batches, 1)
+            gain_results["source_val_rootzone_loss"] = total_rootzone / max(n_batches, 1)
+            gain_results["source_val_valid_px"] = total_valid
+            return gain_results
+        else:
+            # Fallback: shared-alpha calibration
+            all_s = []
+            all_r = []
+            for region in samples_s_by_region:
+                all_s.extend(samples_s_by_region[region])
+                all_r.extend(samples_r_by_region[region])
+
+            gain_results = calibrate_residual_gain(all_s, all_r, alphas)
+            gain_results["prompt_quality"] = prompt_quality
+            gain_results["source_val_loss"] = total_loss / max(n_batches, 1)
+            gain_results["source_val_surface_loss"] = total_surface / max(n_batches, 1)
+            gain_results["source_val_rootzone_loss"] = total_rootzone / max(n_batches, 1)
+            gain_results["source_val_valid_px"] = total_valid
+            return gain_results
 
     def train(self, verbose: bool = True) -> List[Dict[str, float]]:
         dataloader = self._build_dataloader()
@@ -378,34 +739,69 @@ class PromptConditionedTrainer:
         self.prompt_encoder.train()
         global_step = 0
         train_start_time = time.time()
+        total_steps_per_epoch = len(dataloader)
 
-        # Open console.log for tee output
-        if self.run_manager is not None:
-            self.run_manager.open_console_log()
-            header_lines = [
-                "=" * 60,
-                "Phase 4B: Prompt-Conditioned Shared Backbone Training",
-                f"  target_region={self.run_manager.target_region}",
-                f"  Model params: {sum(p.numel() for p in self.model.parameters()):,}",
-                f"  Prompt encoder params: {sum(p.numel() for p in self.prompt_encoder.parameters()):,}",
-                f"  Max epochs: {self.max_epochs}",
-                f"  Batch size: {self.batch_size}",
-                f"  Accum steps: {self.accum_steps}",
-                f"  LR: {self.lr}",
-                f"  Width: {self.model_width}",
-                f"  Prompt dim: {self.prompt_dim}",
-                f"  AMP: {self.use_amp}",
-                f"  Target increment normalization: {self.target_increment_normalization}",
-                f"  Zero raw increment init: {self.zero_raw_increment_init}",
-                f"  Grad clip: {self.grad_clip}",
-                "=" * 60,
-            ]
-            for line in header_lines:
+        # Training start header
+        num_model_params = sum(p.numel() for p in self.model.parameters())
+        num_pe_params = sum(p.numel() for p in self.prompt_encoder.parameters())
+        header_lines = [
+            "=" * 60,
+            f"Training Start — Prompt-Conditioned Shared Backbone",
+            f"  Experiment:      {self.experiment_id}",
+            f"  Protocol:        {self.protocol_freeze_id}",
+            f"  Split manifest:  {self.split_manifest_path}",
+            f"  Device:          {self.device}",
+            f"  Model params:    {num_model_params:,}",
+            f"  Prompt enc params: {num_pe_params:,}",
+            f"  Total params:    {num_model_params + num_pe_params:,}",
+            f"  Model width:     {self.model_width}",
+            f"  Prompt dim:      {self.prompt_dim}",
+            f"  Loss fn:         {type(self.loss_fn).__name__}",
+            f"  Lat-weighted:    {self.use_lat_weighted_loss}",
+            f"  Batch size:      {self.batch_size}",
+            f"  Accum steps:     {self.accum_steps}",
+            f"  Max epochs:      {self.max_epochs}",
+            f"  Checkpoint every:{self.checkpoint_every_n_epochs} epochs",
+            f"  Selection metric:{self.selection_metric}",
+            f"  LR:              {self.lr}",
+            f"  Weight decay:    {self.weight_decay}",
+            f"  Grad clip:       {self.grad_clip}",
+            f"  AMP:             {self.use_amp}",
+            f"  Inc norm:        {self.target_increment_normalization}",
+            f"  Zero raw init:   {self.zero_raw_increment_init}",
+            f"  Lambda amp:      {self.lambda_amp}",
+            f"  Res gain:        {self.source_val_residual_gain}",
+            f"  Train samples:   {len(self.train_dataset)}",
+            f"  Source regions:  {self.source_regions}",
+            f"  Steps/epoch:     {total_steps_per_epoch}",
+        ]
+        if self.target_increment_normalization and self._inc_mean is not None:
+            header_lines.append(f"  inc_mean:        s={self._inc_mean[0]:.6f} r={self._inc_mean[1]:.6f}")
+            header_lines.append(f"  inc_std:         s={self._inc_std[0]:.6f} r={self._inc_std[1]:.6f}")
+        header_lines.append("=" * 60)
+        for line in header_lines:
+            if self.run_manager is not None:
                 self.run_manager.log_console(line)
+            elif verbose:
+                print(line, flush=True)
+
+        # GPU health check before training
+        if self.device == "cuda":
+            if not gpu_health_check(torch.device("cuda")):
+                raise RuntimeError(
+                    "GPU health check FAILED — GPU is unresponsive. "
+                    "The device may be in an error state. Try rebooting or using a different GPU."
+                )
 
         for epoch in range(self.current_epoch, self.max_epochs):
             epoch_losses = []
+            epoch_surface_losses = []
+            epoch_rootzone_losses = []
+            epoch_valid_counts = []
             epoch_start = time.time()
+
+            # Zero gradients at start of epoch (gradient accumulation fix)
+            self.optimizer.zero_grad()
 
             for batch_idx, batch in enumerate(dataloader):
                 x = batch["x"].to(self.device)
@@ -414,6 +810,9 @@ class PromptConditionedTrainer:
                 loss_mask = batch["loss_mask"].to(self.device)
                 region_ids = batch["region_ids"].to(self.device)
                 months = batch["months"].to(self.device)
+                latitude_weight = batch.get("latitude_weight")
+                if latitude_weight is not None:
+                    latitude_weight = latitude_weight.to(self.device)
 
                 x_norm = self._normalize(x)
 
@@ -435,23 +834,30 @@ class PromptConditionedTrainer:
                     inc_std_t = torch.from_numpy(self._inc_std).to(x.device).view(1, 2, 1, 1)
                     target = (target - inc_mean_t) / inc_std_t
 
+                # Forward + loss via unified helper
+                pred, losses = self._forward_and_loss(
+                    x_norm, target, loss_mask, region_ids, months,
+                    latitude_weight=latitude_weight,
+                )
+
+                # Optional CUDA sync for precise error attribution (debug only)
+                if self.cuda_sync_debug and self.device == "cuda":
+                    torch.cuda.synchronize()
+
+                # NaN/Inf guard on loss: skip batch if invalid
+                if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
+                    line = f"  WARNING: E{epoch} S{batch_idx}: loss is NaN/Inf — skipping batch"
+                    if self.run_manager is not None:
+                        self.run_manager.log_console(line)
+                    else:
+                        print(line, flush=True)
+                    continue
+
+                # Backward pass
                 if self.use_amp:
-                    with autocast('cuda'):
-                        z = self.prompt_encoder(x_norm, region_ids, months)
-                        pred = self.model(x_norm, z)
-                        losses = self.loss_fn(pred, target, loss_mask)
-
-                    # NaN/Inf guard on loss: skip batch if invalid
-                    if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
-                        line = f"  WARNING: E{epoch} S{batch_idx}: loss is NaN/Inf — skipping batch"
-                        if self.run_manager is not None:
-                            self.run_manager.log_console(line)
-                        else:
-                            print(line, flush=True)
-                        continue
-
                     self._amp_scaler.scale(losses["total_loss"]).backward()
                     if (batch_idx + 1) % self.accum_steps == 0:
+                        prev_scale = self._amp_scaler.get_scale()
                         if self.grad_clip is not None:
                             self._amp_scaler.unscale_(self.optimizer)
                             all_p = list(self.model.parameters()) + list(self.prompt_encoder.parameters())
@@ -459,20 +865,10 @@ class PromptConditionedTrainer:
                         self._amp_scaler.step(self.optimizer)
                         self._amp_scaler.update()
                         self.optimizer.zero_grad()
+                        # Track gradient overflow skips (scale reduction = Inf/NaN detected)
+                        if self._amp_scaler.get_scale() < prev_scale:
+                            self._skipped_steps += 1
                 else:
-                    z = self.prompt_encoder(x_norm, region_ids, months)
-                    pred = self.model(x_norm, z)
-                    losses = self.loss_fn(pred, target, loss_mask)
-
-                    # NaN/Inf guard on loss: skip batch if invalid
-                    if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
-                        line = f"  WARNING: E{epoch} S{batch_idx}: loss is NaN/Inf — skipping batch"
-                        if self.run_manager is not None:
-                            self.run_manager.log_console(line)
-                        else:
-                            print(line, flush=True)
-                        continue
-
                     losses["total_loss"].backward()
                     if (batch_idx + 1) % self.accum_steps == 0:
                         if self.grad_clip is not None:
@@ -482,76 +878,167 @@ class PromptConditionedTrainer:
                         self.optimizer.zero_grad()
 
                 epoch_losses.append(float(losses["total_loss"].item()))
+                epoch_surface_losses.append(float(losses["surface_loss"].item()))
+                epoch_rootzone_losses.append(float(losses["rootzone_loss"].item()))
+                valid_count = int(
+                    losses.get("valid_pixel_count", losses.get("valid_weight_sum", 0)).item()
+                )
+                epoch_valid_counts.append(valid_count)
 
                 # Per-step logging
                 if batch_idx % self.log_every_steps == 0:
+                    # Compute grad norm
                     grad_norm = 0.0
                     for p in list(self.model.parameters()) + list(self.prompt_encoder.parameters()):
                         if p.grad is not None:
                             grad_norm += p.grad.data.norm(2).item() ** 2
-                    grad_norm = grad_norm ** 0.5
+                    grad_norm = grad_norm ** 0.5 if grad_norm > 0 else 0.0
 
-                    valid_fraction = float(losses["valid_pixel_count"].item()) / max(loss_mask.numel(), 1)
+                    # Compute pred/target stats
+                    pred_s_mean = float(pred[:, 0].mean().item())
+                    pred_s_std = float(pred[:, 0].std().item())
+                    pred_r_mean = float(pred[:, 1].mean().item())
+                    pred_r_std = float(pred[:, 1].std().item())
+                    target_s_mean = float(target[:, 0].mean().item())
+                    target_s_std = float(target[:, 0].std().item())
+                    target_r_mean = float(target[:, 1].mean().item())
+                    target_r_std = float(target[:, 1].std().item())
+
+                    # GPU memory
+                    gpu_alloc = 0.0
+                    gpu_res = 0.0
+                    if self.device == "cuda":
+                        dev_idx = torch.cuda.current_device()
+                        gpu_alloc = torch.cuda.memory_allocated(dev_idx) / 1e9
+                        gpu_res = torch.cuda.memory_reserved(dev_idx) / 1e9
+
                     lr_curr = float(self.optimizer.param_groups[0]["lr"])
+                    valid_px = int(
+                        losses.get("valid_pixel_count", losses.get("valid_weight_sum", 0)).item()
+                    )
+                    total_px = loss_mask.numel()
+                    valid_fraction = valid_px / max(total_px, 1)
+                    amp_scale = self._amp_scaler.get_scale() if self.use_amp else 0.0
 
                     step_data = {
-                        "epoch": epoch, "step": batch_idx, "global_step": global_step,
+                        "epoch": epoch,
+                        "step": batch_idx,
+                        "global_step": global_step,
                         "lr": lr_curr,
                         "total_loss": float(losses["total_loss"].item()),
                         "surface_loss": float(losses["surface_loss"].item()),
                         "rootzone_loss": float(losses["rootzone_loss"].item()),
                         "valid_pixel_fraction": valid_fraction,
                         "grad_norm": round(grad_norm, 4),
+                        "pred_inc_surface_mean": round(pred_s_mean, 6),
+                        "pred_inc_surface_std": round(pred_s_std, 6),
+                        "pred_inc_rootzone_mean": round(pred_r_mean, 6),
+                        "pred_inc_rootzone_std": round(pred_r_std, 6),
+                        "true_inc_surface_mean": round(target_s_mean, 6),
+                        "true_inc_surface_std": round(target_s_std, 6),
+                        "true_inc_rootzone_mean": round(target_r_mean, 6),
+                        "true_inc_rootzone_std": round(target_r_std, 6),
+                        "gpu_allocated_gb": round(gpu_alloc, 2),
+                        "gpu_reserved_gb": round(gpu_res, 2),
+                        "amp_scale": amp_scale,
+                        "skipped_steps": self._skipped_steps,
                     }
+
+                    # JSONL step log
                     if self._jsonl_logger is not None:
                         self._jsonl_logger.log_step(step_data)
 
+                    # Console step log
                     if verbose:
                         elapsed = time.time() - train_start_time
                         batches_per_sec = (batch_idx + 1) / max(elapsed, 0.1)
                         line = (
                             f"  E{epoch:3d} S{batch_idx:5d} | "
-                            f"loss={losses['total_loss'].item():.4f} "
-                            f"surf={losses['surface_loss'].item():.4f} "
+                            f"loss={losses['total_loss'].item():.4f} surf={losses['surface_loss'].item():.4f} "
                             f"root={losses['rootzone_loss'].item():.4f} | "
                             f"valid={valid_fraction:.3f} g={grad_norm:.2e} | "
-                            f"{batches_per_sec:.1f}b/s | lr={lr_curr:.2e}"
+                            f"pred_s={pred_s_mean:.3f}/{pred_s_std:.3f} pred_r={pred_r_mean:.3f}/{pred_r_std:.3f} | "
+                            f"true_s={target_s_mean:.3f}/{target_s_std:.3f} true_r={target_r_mean:.3f}/{target_r_std:.3f} | "
+                            f"gpu={gpu_alloc:.1f}GB {batches_per_sec:.1f}b/s | lr={lr_curr:.2e} "
+                            f"amp_scale={amp_scale:.0f} skip={self._skipped_steps}"
                         )
                         if self.run_manager is not None:
                             self.run_manager.log_console(line)
                         else:
                             print(line, flush=True)
 
+                    # Wandb step log
                     if self.wandb_logger is not None and self.wandb_logger.enabled:
                         self.wandb_logger.log_step({
-                            "train/total_loss": step_data["total_loss"],
-                            "train/surface_loss": step_data["surface_loss"],
-                            "train/rootzone_loss": step_data["rootzone_loss"],
+                            "train/total_loss": float(losses["total_loss"].item()),
+                            "train/surface_loss": float(losses["surface_loss"].item()),
+                            "train/rootzone_loss": float(losses["rootzone_loss"].item()),
                             "train/lr": lr_curr,
                             "train/grad_norm": grad_norm,
                             "train/valid_pixel_fraction": valid_fraction,
+                            "train/pred_inc_surface_std": pred_s_std,
+                            "train/pred_inc_rootzone_std": pred_r_std,
+                            "train/gpu_memory_gb": gpu_alloc,
+                            "train/skipped_steps": self._skipped_steps,
                         })
 
                 global_step += 1
 
             avg_loss = float(np.mean(epoch_losses))
+            avg_surface = float(np.mean(epoch_surface_losses))
+            avg_rootzone = float(np.mean(epoch_rootzone_losses))
+            total_valid = int(np.sum(epoch_valid_counts))
             elapsed = time.time() - epoch_start
+
             self.scheduler.step(avg_loss)
 
-            # Source val eval
+            # Source val eval + gain calibration every eval_every_epochs
             source_val_metrics = {}
+            gain_results = {}
             if self.source_val_dataset is not None and epoch % self.eval_every_epochs == 0:
-                source_val_metrics = self._eval_source_val()
-                if verbose:
-                    line = f"  source_val loss={source_val_metrics.get('source_val_loss', float('nan')):.6f}"
-                    if self.run_manager is not None:
-                        self.run_manager.log_console(line)
-                    print(line, flush=True)
+                gain_results = self._calibrate_source_val_residual_gain()
+                if gain_results:
+                    source_val_metrics = self._make_source_val_metrics(gain_results)
+                    # Track prompt quality
+                    if "prompt_quality" in gain_results:
+                        pq = gain_results["prompt_quality"]
+                        pq["epoch"] = epoch
+                        self.prompt_quality_history.append(pq)
+                if verbose and gain_results:
+                    sv_loss = gain_results.get("source_val_loss", float("nan"))
+                    sv_rmse_s = gain_results.get("rmse_surface_model", float("nan"))
+                    sv_rmse_r = gain_results.get("rmse_rootzone_model", float("nan"))
+                    sv_skill_s = gain_results.get("skill_surface_with_alpha", float("nan"))
+                    sv_skill_r = gain_results.get("skill_rootzone_with_alpha", float("nan"))
+                    alpha_s = gain_results.get("best_alpha_surface", 1.0)
+                    alpha_r = gain_results.get("best_alpha_rootzone", 1.0)
+                    sel_score = gain_results.get("selection_score", float("-inf"))
+                    calib_mode = gain_results.get("calibration_mode", "shared")
+                    print(
+                        f"  source_val loss={sv_loss:.6f}"
+                        f"  rmse_s={sv_rmse_s:.6f} r={sv_rmse_r:.6f}"
+                        f"  skill_s={sv_skill_s:.4f} r={sv_skill_r:.4f}"
+                        f"  alpha_s={alpha_s:.3f} alpha_r={alpha_r:.3f}"
+                        f"  sel_score={sel_score:.4f} [{calib_mode}]",
+                        flush=True,
+                    )
+                if self._jsonl_logger is not None:
+                    log_data = {"epoch": epoch}
+                    log_data.update(source_val_metrics)
+                    if gain_results:
+                        log_data["selection_score"] = gain_results.get("selection_score", float("nan"))
+                        log_data["best_alpha_surface"] = gain_results.get("best_alpha_surface", 1.0)
+                        log_data["best_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
+                    self._jsonl_logger.log_eval(log_data)
 
-            # Best checkpoint
+            # Best checkpoint selection based on selection_metric
             is_best = False
             best_metric = avg_loss
-            if source_val_metrics and "source_val_loss" in source_val_metrics:
+            if gain_results and "selection_score" in gain_results:
+                if gain_results["selection_score"] > self.best_safe_score:
+                    is_best = True
+                    best_metric = gain_results["selection_score"]
+            elif source_val_metrics and "source_val_loss" in source_val_metrics:
                 sv_loss = source_val_metrics["source_val_loss"]
                 if sv_loss < self.best_loss:
                     is_best = True
@@ -561,34 +1048,122 @@ class PromptConditionedTrainer:
 
             if is_best:
                 self.best_loss = best_metric
-                self.save_checkpoint(self.checkpoint_dir / "best.pt", epoch, best_metric, "best")
+                ckpt_path = self.checkpoint_dir / "best.pt"
+                self.save_checkpoint(ckpt_path, epoch, best_metric, "best", gain_results=gain_results)
 
-            self.save_checkpoint(self.checkpoint_dir / "last.pt", epoch, avg_loss, "last")
+            # Save safe_score / transfer_safe_score checkpoint
+            if gain_results:
+                if gain_results["selection_score"] > self.best_safe_score:
+                    self.best_safe_score = gain_results["selection_score"]
+                    tag = "best_source_val_transfer_safe_score"
+                    self.save_checkpoint(
+                        self.checkpoint_dir / f"checkpoint_{tag}.pt",
+                        epoch, gain_results["selection_score"], tag,
+                        gain_results=gain_results,
+                    )
+
+            # Always save last.pt
+            self.save_checkpoint(
+                self.checkpoint_dir / "last.pt", epoch, avg_loss, "last",
+                gain_results=gain_results,
+            )
+
+            # Epoch checkpoints
+            self.save_checkpoint(
+                self.checkpoint_dir / "checkpoint_latest.pt", epoch, avg_loss, "latest",
+                gain_results=gain_results,
+            )
+            if (epoch + 1) % self.checkpoint_every_n_epochs == 0:
+                self.save_checkpoint(
+                    self.checkpoint_dir / f"checkpoint_epoch_{epoch:03d}.pt",
+                    epoch, avg_loss, f"epoch_{epoch:03d}",
+                    gain_results=gain_results,
+                )
 
             record = {
                 "epoch": epoch,
+                "surface_loss": avg_surface,
+                "rootzone_loss": avg_rootzone,
                 "total_loss": avg_loss,
+                "valid_pixel_count": total_valid,
                 "lr": float(self.optimizer.param_groups[0]["lr"]),
                 "elapsed_s": elapsed,
+                "skipped_steps": self._skipped_steps,
             }
             record.update(source_val_metrics)
+            if gain_results:
+                record["selection_score"] = gain_results.get("selection_score", float("nan"))
+                record["best_alpha_surface"] = gain_results.get("best_alpha_surface", 1.0)
+                record["best_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
             self.train_history.append(record)
             if source_val_metrics:
                 self.val_history.append({"epoch": epoch, **source_val_metrics})
             self.current_epoch = epoch + 1
 
+            # JSONL epoch log
             if self._jsonl_logger is not None:
                 self._jsonl_logger.log_epoch(record)
 
+            # Wandb epoch log
+            if self.wandb_logger is not None and self.wandb_logger.enabled:
+                wandb_data = {f"train/{k}": v for k, v in record.items()}
+                self.wandb_logger.log_epoch(wandb_data)
+
             if verbose:
-                sv_str = f" sv_loss={source_val_metrics.get('source_val_loss', float('nan')):.6f}" if source_val_metrics else ""
-                line = (
-                    f"Epoch {epoch:3d} | loss={avg_loss:.6f}{sv_str} | "
-                    f"lr={record['lr']:.2e} | {elapsed:.1f}s"
+                sv_str = ""
+                if source_val_metrics:
+                    sv_loss = source_val_metrics.get("source_val_loss", float("nan"))
+                    sv_rmse_s = source_val_metrics.get("source_val_rmse_surface", float("nan"))
+                    sv_rmse_r = source_val_metrics.get("source_val_rmse_rootzone", float("nan"))
+                    sv_skill_s = source_val_metrics.get("source_val_skill_surface", float("nan"))
+                    sv_skill_r = source_val_metrics.get("source_val_skill_rootzone", float("nan"))
+                    sv_str = (f"  sv_loss={sv_loss:.6f}"
+                              f"  sv_rmse_s={sv_rmse_s:.6f} r={sv_rmse_r:.6f}"
+                              f"  sv_skill_s={sv_skill_s:.4f} r={sv_skill_r:.4f}")
+                epoch_summary = (
+                    f"Epoch {epoch:3d} | "
+                    f"loss={avg_loss:.6f} | "
+                    f"surface={avg_surface:.6f} | "
+                    f"rootzone={avg_rootzone:.6f} | "
+                    f"valid_px={total_valid:9d} | "
+                    f"lr={record['lr']:.2e} | "
+                    f"{elapsed:.1f}s | skip={self._skipped_steps}"
+                    f"{sv_str}"
                 )
                 if self.run_manager is not None:
-                    self.run_manager.log_console(line)
+                    self.run_manager.log_console(epoch_summary)
+                else:
+                    print(epoch_summary, flush=True)
+
+                # Per-epoch divider every 5 epochs or at epoch 0
+                if epoch == 0 or (epoch + 1) % 5 == 0:
+                    divider = "  " + "-" * 40
+                    if self.run_manager is not None:
+                        self.run_manager.log_console(divider)
+                    else:
+                        print(divider, flush=True)
+
+        # --- Training end summary ---
+        total_elapsed = time.time() - train_start_time
+        end_lines = [
+            "=" * 60,
+            f"Training Complete",
+            f"  Total epochs:     {self.current_epoch}",
+            f"  Best loss:        {self.best_loss:.6f}",
+            f"  Best safe score:  {self.best_safe_score:.6f}",
+            f"  Skipped steps:    {self._skipped_steps}",
+            f"  Total time:       {total_elapsed:.1f}s ({total_elapsed/60:.1f}min)",
+            f"  Checkpoint dir:   {self.checkpoint_dir}",
+            "=" * 60,
+        ]
+        for line in end_lines:
+            if self.run_manager is not None:
+                self.run_manager.log_console(line)
+            elif verbose:
                 print(line, flush=True)
+
+        # Save CSV output files
+        self._save_output_csvs()
 
         # Close console.log if opened
         if self.run_manager is not None:
@@ -596,9 +1171,105 @@ class PromptConditionedTrainer:
 
         return self.train_history
 
-    def save_checkpoint(self, path: Path, epoch: int, loss: float, tag: str = "") -> None:
+    def _save_output_csvs(self) -> None:
+        """Save all CSV output files to checkpoint_dir."""
+        ckpt_dir = self.checkpoint_dir
+
+        # metrics_train.csv
+        if self.train_history:
+            train_path = ckpt_dir / "metrics_train.csv"
+            with open(train_path, "w", newline="") as f:
+                fieldnames = list(self.train_history[0].keys())
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self.train_history)
+
+        # metrics_source_val_by_epoch.csv
+        if self.val_history:
+            val_path = ckpt_dir / "metrics_source_val_by_epoch.csv"
+            with open(val_path, "w", newline="") as f:
+                fieldnames = list(self.val_history[0].keys())
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self.val_history)
+
+        # prompt_quality_by_epoch.csv
+        if self.prompt_quality_history:
+            pq_path = ckpt_dir / "prompt_quality_by_epoch.csv"
+            with open(pq_path, "w", newline="") as f:
+                fieldnames = list(self.prompt_quality_history[0].keys())
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self.prompt_quality_history)
+
+        # README_training_summary.md
+        self._save_readme()
+
+    def _save_readme(self) -> None:
+        """Save a human-readable README with training summary."""
+        num_model_params = sum(p.numel() for p in self.model.parameters())
+        num_pe_params = sum(p.numel() for p in self.prompt_encoder.parameters())
+        has_source_val = self.source_val_dataset is not None
+
+        lines = [
+            f"# Prompt-Conditioned Training Summary",
+            f"",
+            f"- **Experiment**: {self.experiment_id}",
+            f"- **Protocol**: {self.protocol_freeze_id}",
+            f"- **Split manifest**: {self.split_manifest_path}",
+            f"- **Model width**: {self.model_width}",
+            f"- **Prompt dim**: {self.prompt_dim}",
+            f"- **Model params**: {num_model_params:,}",
+            f"- **Prompt encoder params**: {num_pe_params:,}",
+            f"- **Total params**: {num_model_params + num_pe_params:,}",
+            f"- **Batch size**: {self.batch_size}",
+            f"- **Accum steps**: {self.accum_steps}",
+            f"- **Effective batch size**: {self.batch_size * self.accum_steps}",
+            f"- **Max epochs**: {self.max_epochs}",
+            f"- **LR**: {self.lr}",
+            f"- **Weight decay**: {self.weight_decay}",
+            f"- **Grad clip**: {self.grad_clip}",
+            f"- **AMP**: {self.use_amp}",
+            f"- **Loss fn**: {type(self.loss_fn).__name__}",
+            f"- **Lat-weighted**: {self.use_lat_weighted_loss}",
+            f"- **Lambda amp**: {self.lambda_amp}",
+            f"- **Inc normalization**: {self.target_increment_normalization}",
+            f"- **Zero raw init**: {self.zero_raw_increment_init}",
+            f"- **Selection metric**: {self.selection_metric}",
+            f"- **Residual gain**: {self.source_val_residual_gain}",
+            f"- **Source regions**: {self.source_regions}",
+            f"- **Train samples**: {len(self.train_dataset)}",
+            f"- **Source val available**: {has_source_val}",
+            f"- **Normalization source**: source_fit_only",
+            f"- **Early stopping source**: {'source_val_only' if has_source_val else 'train_loss_only'}",
+            f"- **Model selection source**: {'source_val_only' if has_source_val else 'best_train_loss'}",
+            f"- **Target query usage**: eval_only_no_early_stopping",
+            f"- **Leakage guard**: pass",
+            f"- **Best loss**: {self.best_loss:.6f}",
+            f"- **Best safe score**: {self.best_safe_score:.6f}",
+            f"- **Skipped steps**: {self._skipped_steps}",
+            f"- **Epochs completed**: {self.current_epoch}",
+            f"- **Git hash**: {get_git_hash()}",
+            f"- **Timestamp**: {get_timestamp()}",
+            f"",
+            f"## Output Files",
+            f"",
+            f"- `metrics_train.csv` — per-epoch training metrics",
+            f"- `metrics_source_val_by_epoch.csv` — per-epoch source_val metrics",
+            f"- `prompt_quality_by_epoch.csv` — per-epoch prompt quality metrics",
+            f"- `alpha_selection_trace.csv` — 2D alpha grid selection trace",
+            f"- `summary.json` — training summary",
+            f"- `checkpoint_latest.pt` — latest epoch checkpoint",
+            f"- `checkpoint_best_source_val_transfer_safe_score.pt` — best transfer-safe checkpoint",
+            f"",
+        ]
+        readme_path = self.checkpoint_dir / "README_training_summary.md"
+        with open(readme_path, "w") as f:
+            f.write("\n".join(lines))
+
+    def save_checkpoint(self, path: Path, epoch: int, loss: float, tag: str = "", gain_results: Optional[Dict[str, Any]] = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint = {
+        checkpoint: Dict[str, Any] = {
             "tag": tag,
             "epoch": epoch,
             "loss": loss,
@@ -619,20 +1290,39 @@ class PromptConditionedTrainer:
                 "weight_decay": self.weight_decay,
                 "max_epochs": self.max_epochs,
                 "batch_size": self.batch_size,
+                "accum_steps": self.accum_steps,
+                "effective_batch_size": self.batch_size * self.accum_steps,
                 "grad_clip": self.grad_clip,
                 "width": self.model_width,
                 "prompt_dim": self.prompt_dim,
                 "num_regions": self.prompt_encoder.num_regions,
+                "num_workers": self.num_workers,
                 "target_increment_normalization": self.target_increment_normalization,
                 "zero_raw_increment_init": self.zero_raw_increment_init,
                 "use_amp": self.use_amp,
+                "use_lat_weighted_loss": self.use_lat_weighted_loss,
                 "log_every_steps": self.log_every_steps,
+                "checkpoint_every_n_epochs": self.checkpoint_every_n_epochs,
+                "lambda_amp": self.lambda_amp,
+                "selection_metric": self.selection_metric,
+                "source_val_residual_gain": self.source_val_residual_gain,
                 "ch_mean": self._ch_mean.tolist() if self._ch_mean is not None else None,
                 "ch_std": self._ch_std.tolist() if self._ch_std is not None else None,
                 "inc_mean": self._inc_mean.tolist() if self._inc_mean is not None else None,
                 "inc_std": self._inc_std.tolist() if self._inc_std is not None else None,
+                "source_regions": self.source_regions,
+                "source_region_global_indices": self._source_region_global_indices,
             },
         }
+        # Attach gain calibration results
+        if gain_results:
+            checkpoint["residual_gain_alpha_surface"] = gain_results.get("best_alpha_surface", 1.0)
+            checkpoint["residual_gain_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
+            checkpoint["source_val_safe_metrics"] = gain_results
+            checkpoint["source_val_gain_grid"] = gain_results.get("alpha_grid", self.source_val_gain_grid)
+            checkpoint["selection_score"] = gain_results.get("selection_score", float("nan"))
+            checkpoint["min_skill"] = gain_results.get("min_skill", float("nan"))
+            checkpoint["mean_skill"] = gain_results.get("mean_skill", float("nan"))
         torch.save(checkpoint, path)
 
     def load_state(self, checkpoint: Dict[str, Any]) -> int:
@@ -642,8 +1332,11 @@ class PromptConditionedTrainer:
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.best_loss = float(checkpoint.get("best_loss", float("inf")))
+        self.best_safe_score = checkpoint.get("selection_score", float("-inf"))
+        self._skipped_steps = checkpoint.get("config", {}).get("skipped_steps", 0)
         self.train_history = checkpoint.get("train_history", [])
         self.val_history = checkpoint.get("val_history", [])
+        self.prompt_quality_history = checkpoint.get("prompt_quality_history", [])
         resumed_epoch = checkpoint["epoch"] + 1
         self.current_epoch = resumed_epoch
 
@@ -661,16 +1354,33 @@ class PromptConditionedTrainer:
 
     def save_summary_json(self, path: Optional[Path] = None) -> None:
         has_source_val = self.source_val_dataset is not None
-        summary = {
+        num_params = sum(p.numel() for p in self.model.parameters()) + sum(p.numel() for p in self.prompt_encoder.parameters())
+        summary: Dict[str, Any] = {
             "experiment_id": self.experiment_id,
             "protocol_freeze_id": self.protocol_freeze_id,
             "best_loss": self.best_loss,
+            "best_safe_score": self.best_safe_score,
             "final_epoch": self.current_epoch - 1,
+            "total_epochs_completed": self.current_epoch,
+            "model_width": self.model_width,
+            "prompt_dim": self.prompt_dim,
+            "trainable_parameters": num_params,
+            "batch_size": self.batch_size,
+            "accum_steps": self.accum_steps,
+            "effective_batch_size": self.batch_size * self.accum_steps,
+            "source_val_available": has_source_val,
+            "use_lat_weighted_loss": self.use_lat_weighted_loss,
+            "loss_function": type(self.loss_fn).__name__,
+            "lambda_amp": self.lambda_amp,
+            "selection_metric": self.selection_metric,
+            "source_val_residual_gain": self.source_val_residual_gain,
+            "source_regions": self.source_regions,
             "normalization_source": "source_fit_only",
             "early_stopping_source": "source_val_only" if has_source_val else "train_loss_only",
             "model_selection_source": "source_val_only" if has_source_val else "best_train_loss",
             "target_query_usage": "eval_only_no_early_stopping",
             "leakage_guard_status": "pass",
+            "skipped_steps": self._skipped_steps,
             "git_hash": get_git_hash(),
             "timestamp": get_timestamp(),
             "train_history": self.train_history,
@@ -711,10 +1421,25 @@ def parse_args():
     parser.add_argument("--log_every_steps", type=int, default=100)
     parser.add_argument("--eval_every_epochs", type=int, default=1)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--use_lat_weighted_loss", action="store_true", default=True,
+        help="Use WeightedMaskedHuberLoss with latitude weighting (default True)")
+    parser.add_argument("--no_lat_weighted_loss", action="store_false", dest="use_lat_weighted_loss",
+        help="Disable latitude-weighted loss (use plain MaskedHuberLoss)")
     parser.add_argument("--resume_from", type=str, default=None,
         help="Path to checkpoint.pt to resume from (last.pt or best.pt). "
              "When provided, training continues from the saved epoch and "
              "normalization stats are restored from the checkpoint.")
+    parser.add_argument("--checkpoint_every", type=int, default=5,
+        help="Save epoch checkpoint every N epochs (default 5)")
+    parser.add_argument("--selection_metric", type=str, default="source_val_transfer_safe_score",
+        choices=["source_val_transfer_safe_score", "source_val_loss", "train_loss"],
+        help="Metric for checkpoint selection (default source_val_transfer_safe_score)")
+    parser.add_argument("--lambda_amp", type=float, default=0.0,
+        help="Amplitude penalty weight for WeightedMaskedHuberLoss (default 0.0 = disabled)")
+    parser.add_argument("--no_source_val_residual_gain", action="store_true",
+        help="Disable residual gain calibration (use alpha=1.0 for both variables)")
+    parser.add_argument("--cuda_sync_debug", action="store_true",
+        help="Enable CUDA synchronize after each forward pass (debug only)")
     return parser.parse_args()
 
 
@@ -755,7 +1480,12 @@ def main():
         "target_increment_normalization": args.target_increment_normalization,
         "log_every_steps": args.log_every_steps,
         "eval_every_epochs": args.eval_every_epochs,
+        "use_lat_weighted_loss": args.use_lat_weighted_loss,
         "wandb_mode": args.wandb_mode,
+        "checkpoint_every": args.checkpoint_every,
+        "selection_metric": args.selection_metric,
+        "lambda_amp": args.lambda_amp,
+        "source_val_residual_gain": not args.no_source_val_residual_gain,
         "source_regions": [r for r in _ALL_US_REGIONS if r != args.target_region],
     }
 
@@ -907,6 +1637,13 @@ def main():
         wandb_logger=wandb_logger,
         source_val_dataset=source_val_dataset,
         global_to_source_lookup=global_to_source_idx,
+        use_lat_weighted_loss=args.use_lat_weighted_loss,
+        source_regions=source_regions,
+        checkpoint_every_n_epochs=args.checkpoint_every,
+        lambda_amp=args.lambda_amp,
+        selection_metric=args.selection_metric,
+        source_val_residual_gain=not args.no_source_val_residual_gain,
+        cuda_sync_debug=args.cuda_sync_debug,
     )
 
     # Resume: restore full training state after Trainer creation
@@ -931,6 +1668,8 @@ def main():
 
     print(f"\nTraining completed in {elapsed:.1f}s ({elapsed/60:.1f}min)")
     print(f"  best_loss={trainer.best_loss:.6f}")
+    print(f"  best_safe_score={trainer.best_safe_score:.6f}")
+    print(f"  skipped_steps={trainer._skipped_steps}")
     print(f"  run_dir={run_manager.get_run_dir()}")
     print(f"  summary={summary_path}")
     print(f"  best_checkpoint={run_manager.checkpoint_best_path()}")

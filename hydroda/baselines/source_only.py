@@ -41,6 +41,7 @@ class SourceOnlyBackbonePredictor:
         self,
         checkpoint_path: str,
         device: str = "cuda",
+        apply_residual_gain: bool = True,
     ) -> None:
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
@@ -51,12 +52,11 @@ class SourceOnlyBackbonePredictor:
             map_location=device,
             weights_only=False,
         )
-        config = checkpoint.get("config", {})
-        ch_mean = checkpoint.get("config", {}).get("ch_mean")
-        ch_std = checkpoint.get("config", {}).get("ch_std")
+        saved_config = checkpoint.get("config", {})
+        ch_mean = saved_config.get("ch_mean")
+        ch_std = saved_config.get("ch_std")
 
         # Init model — read width from checkpoint config
-        saved_config = checkpoint.get("config", {})
         width = saved_config.get("width", 32)
         self.model = SmallResUNet(in_channels=12, out_channels=2, width=width)
         self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -72,6 +72,11 @@ class SourceOnlyBackbonePredictor:
         self._inc_mean = np.array(inc_mean, dtype=np.float32) if inc_mean is not None else None
         self._inc_std = np.array(inc_std, dtype=np.float32) if inc_std is not None else None
         self._has_inc_norm = self._inc_mean is not None and self._inc_std is not None
+
+        # Residual gain alphas (from source_val calibration)
+        self.alpha_surface = float(checkpoint.get("residual_gain_alpha_surface", 1.0))
+        self.alpha_rootzone = float(checkpoint.get("residual_gain_alpha_rootzone", 1.0))
+        self.apply_residual_gain = apply_residual_gain
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Apply channel-wise normalization."""
@@ -117,12 +122,18 @@ class SourceOnlyBackbonePredictor:
             pred_inc_s = pred_inc_s * self._inc_std[0] + self._inc_mean[0]
             pred_inc_r = pred_inc_r * self._inc_std[1] + self._inc_mean[1]
 
-        pred_analysis_surface = (forecast_surface + pred_inc_s).astype(np.float32)
-        pred_analysis_rootzone = (forecast_rootzone + pred_inc_r).astype(np.float32)
+        if self.apply_residual_gain:
+            pred_analysis_surface = (forecast_surface + self.alpha_surface * pred_inc_s).astype(np.float32)
+            pred_analysis_rootzone = (forecast_rootzone + self.alpha_rootzone * pred_inc_r).astype(np.float32)
+        else:
+            pred_analysis_surface = (forecast_surface + pred_inc_s).astype(np.float32)
+            pred_analysis_rootzone = (forecast_rootzone + pred_inc_r).astype(np.float32)
 
         return {
             "pred_increment_surface": pred_inc_s,
             "pred_increment_rootzone": pred_inc_r,
             "pred_analysis_surface": pred_analysis_surface,
             "pred_analysis_rootzone": pred_analysis_rootzone,
+            "residual_gain_alpha_surface": self.alpha_surface,
+            "residual_gain_alpha_rootzone": self.alpha_rootzone,
         }

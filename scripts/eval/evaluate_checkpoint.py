@@ -203,6 +203,16 @@ def main():
     inc_rmse_rows = df[df["metric"] == "increment_rmse"]
     inc_corr_rows = df[df["metric"] == "increment_corr"]
 
+    # Extract global skill rows (single-row-per-variable, aggregate-then-sqrt)
+    global_skill_rows = df[df["metric"] == "analysis_skill_vs_forecast_global"]
+    global_latw_skill_rows = df[df["metric"] == "analysis_skill_vs_forecast_latw_global"]
+
+    def _get_global(df_sub, variable):
+        match = df_sub[df_sub["variable"] == variable]
+        if len(match) > 0:
+            return float(match["value"].iloc[0])
+        return float("nan")
+
     summary = {
         "method": predictor.method_name,
         "checkpoint": str(ckpt_path),
@@ -216,12 +226,16 @@ def main():
         "surface": {
             "skill_mean": float(skill_rows[skill_rows["variable"] == "surface"]["value"].mean()),
             "skill_std": float(skill_rows[skill_rows["variable"] == "surface"]["value"].std()),
+            "skill_global": _get_global(global_skill_rows, "surface"),
+            "skill_latw_global": _get_global(global_latw_skill_rows, "surface"),
             "rmse_mean": float(inc_rmse_rows[inc_rmse_rows["variable"] == "surface"]["value"].mean()),
             "corr_mean": float(inc_corr_rows[inc_corr_rows["variable"] == "surface"]["value"].mean()),
         },
         "rootzone": {
             "skill_mean": float(skill_rows[skill_rows["variable"] == "rootzone"]["value"].mean()),
             "skill_std": float(skill_rows[skill_rows["variable"] == "rootzone"]["value"].std()),
+            "skill_global": _get_global(global_skill_rows, "rootzone"),
+            "skill_latw_global": _get_global(global_latw_skill_rows, "rootzone"),
             "rmse_mean": float(inc_rmse_rows[inc_rmse_rows["variable"] == "rootzone"]["value"].mean()),
             "corr_mean": float(inc_corr_rows[inc_corr_rows["variable"] == "rootzone"]["value"].mean()),
         },
@@ -233,8 +247,12 @@ def main():
         json.dump(summary, f, indent=2)
 
     print(f"\n  Summary saved to {summary_path}")
-    print(f"\n  Surface  skill={summary['surface']['skill_mean']:.4f} \u00b1 {summary['surface']['skill_std']:.4f}")
-    print(f"  Rootzone skill={summary['rootzone']['skill_mean']:.4f} \u00b1 {summary['rootzone']['skill_std']:.4f}")
+    print(f"\n  Surface  skill (per-sample mean) ={summary['surface']['skill_mean']:.4f} \u00b1 {summary['surface']['skill_std']:.4f}")
+    print(f"  Surface  skill (global)         ={summary['surface']['skill_global']:.4f}")
+    print(f"  Surface  skill (latw global)    ={summary['surface']['skill_latw_global']:.4f}")
+    print(f"  Rootzone skill (per-sample mean) ={summary['rootzone']['skill_mean']:.4f} \u00b1 {summary['rootzone']['skill_std']:.4f}")
+    print(f"  Rootzone skill (global)         ={summary['rootzone']['skill_global']:.4f}")
+    print(f"  Rootzone skill (latw global)    ={summary['rootzone']['skill_latw_global']:.4f}")
     print(f"  Surface  inc_rmse={summary['surface']['rmse_mean']:.4f}")
     print(f"  Rootzone inc_rmse={summary['rootzone']['rmse_mean']:.4f}")
     print(f"  Surface  inc_corr={summary['surface']['corr_mean']:.4f}")

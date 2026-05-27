@@ -36,11 +36,18 @@ class PromptConditionedBackbonePredictor:
     Loads checkpoint, sets model and prompt encoder to eval mode, and predicts
     with region-conditioned prompt.
 
+    K=0 inference:
+        When target region is not in the source region set, uses the mean of all
+        source region embeddings as the target region embedding. This is correct
+        because the prompt encoder's num_regions only covers source regions,
+        so the target region index would otherwise alias a source region embedding.
+
     Args:
         checkpoint_path: path to trained .pt checkpoint
         device: device string (default "cuda")
         target_region: target region name (e.g. "US-R1")
         target_region_idx: override target region embedding index (default: from _REGION_TO_IDX)
+        apply_residual_gain: apply residual gain alpha from calibration (default True)
     """
 
     method_name = "prompt_conditioned_shared_backbone"
@@ -51,6 +58,7 @@ class PromptConditionedBackbonePredictor:
         device: str = "cuda",
         target_region: Optional[str] = None,
         target_region_idx: Optional[int] = None,
+        apply_residual_gain: bool = True,
     ) -> None:
         self.device = device
         self.checkpoint_path = Path(checkpoint_path)
@@ -93,6 +101,30 @@ class PromptConditionedBackbonePredictor:
             self.prompt_encoder.load_state_dict(checkpoint["prompt_encoder_state_dict"])
         self.prompt_encoder.to(device).eval()
 
+        # BUG FIX: K=0 inference — target region not in source region set.
+        # The prompt_encoder was trained with num_regions = len(source_regions).
+        # _REGION_TO_IDX maps global region names to indices 0..5, but the
+        # prompt encoder's embedding indices correspond only to source regions.
+        # We use source_region_global_indices from the checkpoint to determine
+        # if the target is unseen. If so, use the mean of all source embeddings
+        # as an "unknown target" embedding.
+        self._is_target_unseen = False
+        self._target_region_emb: Optional[torch.Tensor] = None
+        source_global_indices = saved_config.get("source_region_global_indices")
+        if source_global_indices is not None:
+            source_global_set = set(source_global_indices)
+            if self._target_region_idx not in source_global_set:
+                self._is_target_unseen = True
+                with torch.no_grad():
+                    all_emb = self.prompt_encoder.region_embed.weight.data.clone()  # [N, 16]
+                    self._target_region_emb = all_emb.mean(dim=0)  # [16]
+        elif self._target_region_idx >= num_regions:
+            # Fallback for old checkpoints without source_region_global_indices
+            self._is_target_unseen = True
+            with torch.no_grad():
+                all_emb = self.prompt_encoder.region_embed.weight.data.clone()
+                self._target_region_emb = all_emb.mean(dim=0)
+
         # Normalization params
         ch_mean = saved_config.get("ch_mean")
         ch_std = saved_config.get("ch_std")
@@ -106,13 +138,51 @@ class PromptConditionedBackbonePredictor:
         self._inc_std = np.array(inc_std, dtype=np.float32) if inc_std is not None else None
         self._has_inc_norm = self._inc_mean is not None and self._inc_std is not None
 
+        # Residual gain alphas (from source_val calibration)
+        self.alpha_surface = float(checkpoint.get("residual_gain_alpha_surface", 1.0))
+        self.alpha_rootzone = float(checkpoint.get("residual_gain_alpha_rootzone", 1.0))
+        self.apply_residual_gain = apply_residual_gain
+
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply channel-wise normalization."""
+        """Apply channel-wise normalization with NaN/Inf guard."""
         if self._ch_mean is None or self._ch_std is None:
             return x
         mean_t = torch.from_numpy(self._ch_mean).to(x.device).view(1, 12, 1, 1)
         std_t = torch.from_numpy(self._ch_std).to(x.device).view(1, 12, 1, 1)
-        return (x - mean_t) / std_t
+        x_norm = (x - mean_t) / std_t
+        if torch.isnan(x_norm).any() or torch.isinf(x_norm).any():
+            n_nan = torch.isnan(x_norm).sum().item()
+            n_inf = torch.isinf(x_norm).sum().item()
+            print(f"  WARNING: normalize produced {n_nan} NaN / {n_inf} Inf — returning raw input", flush=True)
+            return x
+        return x_norm
+
+    def _build_prompt(self, x_norm: torch.Tensor, region_idx: int, month_val: int) -> torch.Tensor:
+        """Build prompt vector z, handling unseen target region.
+
+        When the target region is unseen during training (K=0, not in source set),
+        uses pre-computed mean of source embeddings instead of aliasing a
+        wrong source region embedding.
+        """
+        region_ids = torch.tensor([region_idx], dtype=torch.long, device=x_norm.device)
+        month = torch.tensor([month_val], dtype=torch.long, device=x_norm.device)
+
+        if not self._is_target_unseen:
+            # Target is a source region: use standard prompt encoder forward
+            return self.prompt_encoder(x_norm, region_ids, month)
+
+        # Target region not in source set (K=0): manually assemble prompt
+        # using mean of source region embeddings
+        input_stats = self.prompt_encoder._compute_input_stats(x_norm)  # [1, C*2]
+        i_emb = self.prompt_encoder.input_proj(input_stats)  # [1, 16]
+        t_enc = self.prompt_encoder._temporal_encoding(month)  # [1, 2]
+        t_emb = self.prompt_encoder.temporal_proj(t_enc)  # [1, 8]
+
+        r_emb = self._target_region_emb.unsqueeze(0).to(x_norm.device)  # [1, 16]
+
+        combined = torch.cat([r_emb, i_emb, t_emb], dim=1)  # [1, 40]
+        z = self.prompt_encoder.mlp(combined)  # [1, hidden_dim]
+        return z
 
     def predict(self, sample: Dict[str, Any]) -> Dict[str, np.ndarray]:
         """Predict DA increments and analysis for a single sample with prompt conditioning.
@@ -134,16 +204,13 @@ class PromptConditionedBackbonePredictor:
 
         x_norm = self._normalize(x)
 
-        # Build prompt
+        # Build prompt — handles K=0 target region via _build_prompt
         region_id_str = sample.get("target_region_id", "")
         region_idx = _REGION_TO_IDX.get(region_id_str, self._target_region_idx)
-        region_ids = torch.tensor([region_idx], dtype=torch.long, device=self.device)
-
         month_val = int(sample.get("month", 6))
-        month = torch.tensor([month_val], dtype=torch.long, device=self.device)
 
         with torch.no_grad():
-            z = self.prompt_encoder(x_norm, region_ids, month)
+            z = self._build_prompt(x_norm, region_idx, month_val)
             pred = self.model(x_norm, z)  # [1, 2, H, W]
 
         pred_inc_s = pred[0, 0].cpu().numpy().astype(np.float32)
@@ -157,12 +224,22 @@ class PromptConditionedBackbonePredictor:
             pred_inc_s = pred_inc_s * self._inc_std[0] + self._inc_mean[0]
             pred_inc_r = pred_inc_r * self._inc_std[1] + self._inc_mean[1]
 
-        pred_analysis_surface = (forecast_surface + pred_inc_s).astype(np.float32)
-        pred_analysis_rootzone = (forecast_rootzone + pred_inc_r).astype(np.float32)
+        # Apply residual gain calibration if available
+        if self.apply_residual_gain:
+            alpha_s = self.alpha_surface
+            alpha_r = self.alpha_rootzone
+        else:
+            alpha_s = 1.0
+            alpha_r = 1.0
+
+        pred_analysis_surface = (forecast_surface + alpha_s * pred_inc_s).astype(np.float32)
+        pred_analysis_rootzone = (forecast_rootzone + alpha_r * pred_inc_r).astype(np.float32)
 
         return {
             "pred_increment_surface": pred_inc_s,
             "pred_increment_rootzone": pred_inc_r,
             "pred_analysis_surface": pred_analysis_surface,
             "pred_analysis_rootzone": pred_analysis_rootzone,
+            "residual_gain_alpha_surface": alpha_s,
+            "residual_gain_alpha_rootzone": alpha_r,
         }

@@ -38,11 +38,19 @@ class FakeDataset:
         inc_r = np.random.randn(self.H, self.W).astype(np.float32) * 0.01
         # loss_mask: all ones
         loss_mask = np.ones((1, self.H, self.W), dtype=np.float32)
+        # latitude_weight: uniform (all ones)
+        latitude_weight = np.ones((self.H, self.W), dtype=np.float32)
+        # forecast fields
+        forecast_surface = np.random.randn(self.H, self.W).astype(np.float32) * 0.05
+        forecast_rootzone = np.random.randn(self.H, self.W).astype(np.float32) * 0.05
         return {
             "x": x,
             "increment_surface": inc_s,
             "increment_rootzone": inc_r,
             "loss_mask": loss_mask,
+            "latitude_weight": latitude_weight,
+            "forecast_surface": forecast_surface,
+            "forecast_rootzone": forecast_rootzone,
         }
 
 
@@ -246,11 +254,201 @@ def test_checkpoint_every_5_epochs_smoke():
         epoch_files = list(ckpt_dir.glob("checkpoint_epoch_*.pt"))
         assert len(epoch_files) >= 1, f"Expected checkpoint_epoch_*.pt files, found {epoch_files}"
 
-        # Since source_val_dataset is provided, best_skill checkpoint should exist
-        skill_files = list(ckpt_dir.glob("checkpoint_best_source_val_*.pt"))
-        assert len(skill_files) >= 1, f"Expected best source_val checkpoint, found {skill_files}"
+        # Since source_val_dataset is provided, best source_val checkpoints should exist
+        safe_score_files = list(ckpt_dir.glob("checkpoint_best_source_val_*.pt"))
+        assert len(safe_score_files) >= 1, f"Expected best source_val checkpoint, found {safe_score_files}"
 
         print(f"  Checkpoint smoke test passed: {sorted([p.name for p in ckpt_dir.glob('*.pt')])}")
+
+
+def test_trainer_uses_weighted_loss_when_enabled():
+    """Verify Trainer uses WeightedMaskedHuberLoss when use_lat_weighted_loss=True."""
+    from hydroda.models.resunet import SmallResUNet
+    from hydroda.training.trainer import Trainer
+    from hydroda.training.losses import WeightedMaskedHuberLoss, MaskedHuberLoss
+
+    dataset = FakeDataset(n_samples=6, H=32, W=48)
+    source_val_dataset = FakeDataset(n_samples=3, H=32, W=48)
+
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+
+    # With lat-weighted loss
+    trainer_w = Trainer(
+        model=SmallResUNet(in_channels=12, out_channels=2, width=8),
+        train_dataset=dataset,
+        max_epochs=1,
+        batch_size=2,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir="/tmp/test_ckpt_w",
+        use_lat_weighted_loss=True,
+        source_val_dataset=source_val_dataset,
+    )
+    assert isinstance(trainer_w.loss_fn, WeightedMaskedHuberLoss), (
+        f"Expected WeightedMaskedHuberLoss, got {type(trainer_w.loss_fn)}"
+    )
+
+    # Without lat-weighted loss
+    trainer_nw = Trainer(
+        model=SmallResUNet(in_channels=12, out_channels=2, width=8),
+        train_dataset=dataset,
+        max_epochs=1,
+        batch_size=2,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir="/tmp/test_ckpt_nw",
+        use_lat_weighted_loss=False,
+        source_val_dataset=source_val_dataset,
+    )
+    assert isinstance(trainer_nw.loss_fn, MaskedHuberLoss), (
+        f"Expected MaskedHuberLoss, got {type(trainer_nw.loss_fn)}"
+    )
+    print(f"  test_trainer_uses_weighted_loss_when_enabled passed.")
+
+
+def test_collate_contains_latitude_weight():
+    """Verify collate_fn returns latitude_weight when dataset provides it."""
+    from hydroda.models.resunet import SmallResUNet
+    from hydroda.training.trainer import Trainer
+
+    dataset = FakeDataset(n_samples=4, H=32, W=48)
+    source_val_dataset = FakeDataset(n_samples=2, H=32, W=48)
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+
+    trainer = Trainer(
+        model=model,
+        train_dataset=dataset,
+        max_epochs=1,
+        batch_size=2,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir="/tmp/test_collate",
+        use_lat_weighted_loss=True,
+        source_val_dataset=source_val_dataset,
+    )
+
+    loader = trainer._build_dataloader(dataset)
+    batch = next(iter(loader))
+
+    assert "latitude_weight" in batch, f"collate_fn must return latitude_weight, got keys: {list(batch.keys())}"
+    assert batch["latitude_weight"].shape[0] == 2  # batch_size
+    assert "forecast_surface" in batch, "collate_fn must return forecast_surface"
+    assert "forecast_rootzone" in batch, "collate_fn must return forecast_rootzone"
+    print(f"  test_collate_contains_latitude_weight passed.")
+
+
+def test_source_val_gain_alpha_zero_recovers_forecast_only():
+    """Verify that alpha=0 gives forecast-only skill (~0) on source_val."""
+    import tempfile
+    from hydroda.models.resunet import SmallResUNet
+    from hydroda.training.trainer import Trainer
+
+    dataset = FakeDataset(n_samples=4, H=32, W=48)
+    source_val_dataset = FakeDataset(n_samples=3, H=32, W=48)
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trainer = Trainer(
+            model=model,
+            train_dataset=dataset,
+            max_epochs=1,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+            checkpoint_dir=tmpdir,
+            use_lat_weighted_loss=True,
+            source_val_dataset=source_val_dataset,
+            source_val_gain_grid=[0.0, 0.5, 1.0],
+        )
+
+        gain_results = trainer._calibrate_source_val_residual_gain()
+
+        assert gain_results, "gain_results should not be empty"
+        per_alpha = gain_results["per_alpha_results"]
+        alpha0 = per_alpha.get("0.0", {})
+        assert alpha0, "alpha=0.0 must be in per_alpha_results"
+
+        # At alpha=0, pred_analysis = forecast, so skill should be ~0
+        skill_s = alpha0.get("surface_skill", float("nan"))
+        skill_r = alpha0.get("rootzone_skill", float("nan"))
+        assert np.isfinite(skill_s), f"surface_skill at alpha=0 should be finite, got {skill_s}"
+        assert np.isfinite(skill_r), f"rootzone_skill at alpha=0 should be finite, got {skill_r}"
+        assert abs(skill_s) < 1e-5, f"surface_skill at alpha=0 should be ~0, got {skill_s}"
+        assert abs(skill_r) < 1e-5, f"rootzone_skill at alpha=0 should be ~0, got {skill_r}"
+        print(f"  test_source_val_gain_alpha_zero_recovers_forecast_only passed.")
+
+
+def test_source_only_predictor_applies_residual_gain():
+    """Verify SourceOnlyBackbonePredictor reads and applies residual gain alphas."""
+    from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
+    from hydroda.models.resunet import SmallResUNet
+    import tempfile
+    import os
+
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+
+    # Create checkpoint with non-default alpha values
+    ch_mean = np.ones(12, dtype=np.float32)
+    ch_std = np.ones(12, dtype=np.float32)
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "config": {
+            "width": 8,
+            "ch_mean": ch_mean.tolist(),
+            "ch_std": ch_std.tolist(),
+        },
+        "residual_gain_alpha_surface": 0.3,
+        "residual_gain_alpha_rootzone": 0.0,
+        "protocol_freeze_id": "test_v4",
+        "split_manifest_path": "test_manifest.json",
+        "git_hash": "test",
+    }
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp_path = f.name
+        torch.save(checkpoint, tmp_path)
+
+    try:
+        predictor = SourceOnlyBackbonePredictor(checkpoint_path=tmp_path, device="cpu")
+
+        assert predictor.alpha_surface == 0.3, f"Expected alpha_surface=0.3, got {predictor.alpha_surface}"
+        assert predictor.alpha_rootzone == 0.0, f"Expected alpha_rootzone=0.0, got {predictor.alpha_rootzone}"
+        assert predictor.apply_residual_gain is True
+
+        # Create fake sample
+        sample = {
+            "x": np.random.randn(12, 32, 48).astype(np.float32),
+            "forecast_surface": np.ones((32, 48), dtype=np.float32) * 0.3,
+            "forecast_rootzone": np.ones((32, 48), dtype=np.float32) * 0.3,
+        }
+
+        result = predictor.predict(sample)
+
+        # Check that alpha fields are in output
+        assert "residual_gain_alpha_surface" in result
+        assert "residual_gain_alpha_rootzone" in result
+        assert result["residual_gain_alpha_surface"] == 0.3
+        assert result["residual_gain_alpha_rootzone"] == 0.0
+
+        # Since alpha_rootzone=0, pred_analysis_rootzone should equal forecast_rootzone
+        np.testing.assert_allclose(
+            result["pred_analysis_rootzone"],
+            sample["forecast_rootzone"],
+            rtol=1e-5,
+            err_msg="With alpha_rootzone=0, pred_analysis_rootzone must equal forecast_rootzone"
+        )
+
+        # Test with apply_residual_gain=False
+        predictor_no_gain = SourceOnlyBackbonePredictor(
+            checkpoint_path=tmp_path, device="cpu", apply_residual_gain=False
+        )
+        result_ng = predictor_no_gain.predict(sample)
+        # Without gain, pred_analysis = forecast + pred_increment (alpha=1.0 implicit)
+        assert result_ng["residual_gain_alpha_surface"] == 0.3  # still reports alpha from ckpt
+
+        print(f"  test_source_only_predictor_applies_residual_gain passed.")
+    finally:
+        os.unlink(tmp_path)
 
 
 if __name__ == "__main__":
@@ -261,4 +459,8 @@ if __name__ == "__main__":
     test_tiny_overfit()
     test_source_only_predictor_output_contract()
     test_checkpoint_every_5_epochs_smoke()
+    test_trainer_uses_weighted_loss_when_enabled()
+    test_collate_contains_latitude_weight()
+    test_source_val_gain_alpha_zero_recovers_forecast_only()
+    test_source_only_predictor_applies_residual_gain()
     print("\nAll smoke tests passed.")
