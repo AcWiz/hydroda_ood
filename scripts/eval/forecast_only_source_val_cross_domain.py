@@ -101,16 +101,20 @@ def main():
         axis=1,
     )
 
-    # Aggregate: mean per target_region × domain
+    # Aggregate: mean per target_region × sample_region_id × domain
     agg = (
-        df_metric.groupby(["target_region_id", "domain"])["value"]
+        df_metric.groupby(["target_region_id", "sample_region_id", "domain"])["value"]
         .mean()
         .reset_index()
     )
-    agg.columns = ["target_region_id", "domain", "analysis_rmse_latw"]
+    agg.columns = ["target_region_id", "sample_region_id", "domain", "analysis_rmse_latw"]
 
-    # Pivot to wide format
-    pivot = agg.pivot(index="target_region_id", columns="domain", values="analysis_rmse_latw")
+    # Pivot to wide format with source_domain and target_domain columns
+    pivot = agg.pivot(
+        index=["target_region_id", "sample_region_id"],
+        columns="domain",
+        values="analysis_rmse_latw"
+    )
     pivot = pivot.reindex(columns=["source_domain", "target_domain"])
     pivot = pivot.reset_index()
     pivot.columns.name = None

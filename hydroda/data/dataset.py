@@ -120,8 +120,30 @@ class HydroDADataset(Dataset):
         region_ds = xr.open_dataset(region_masks_nc)
         try:
             self._region_mask_int = region_ds["region_mask_integer"].values.astype(np.int16)
+            # Latitude weight for cos(lat) area weighting (WeatherBench2 convention)
+            if "latitude" in region_ds:
+                self._latitude = region_ds["latitude"].values.astype(np.float32)
+            else:
+                self._latitude = None
         finally:
             region_ds.close()
+
+        # Fallback: load latitude from geolocation artifact if not in region masks
+        if self._latitude is None:
+            latlon_path = Path("artifacts/geolocation/US_latlon.nc")
+            if latlon_path.exists():
+                lat_ds = xr.open_dataset(latlon_path)
+                try:
+                    self._latitude = lat_ds["latitude"].values.astype(np.float32)
+                finally:
+                    lat_ds.close()
+
+        if self._latitude is not None:
+            lat_rad = np.deg2rad(self._latitude.astype(np.float64))
+            self._latitude_weight = np.cos(lat_rad).clip(min=0.0).astype(np.float32)
+        else:
+            # No latitude available — uniform weights
+            self._latitude_weight = np.ones(self._region_mask_int.shape, dtype=np.float32)
 
         rnum_list = [int(rid.split("-R")[1]) for rid in self._active_region_ids]
         self._active_region_mask = np.isin(self._region_mask_int, rnum_list).astype(np.float32)
@@ -154,6 +176,26 @@ class HydroDADataset(Dataset):
     def __len__(self) -> int:
         return len(self._time_indices)
 
+    def _resolve_sample_region_id(self, label_valid_mask: np.ndarray) -> str:
+        """Resolve the dominant region ID for a sample.
+
+        Finds which region has the most valid (finite, labeled) pixels
+        in this spatial sample by intersecting label_valid_mask with region_mask_integer.
+        Excludes region 0 (ocean/invalid) from dominance calculation.
+        """
+        valid_region_ids = self._region_mask_int[label_valid_mask > 0.5]
+        if len(valid_region_ids) == 0:
+            return self.target_region
+        unique, counts = np.unique(valid_region_ids, return_counts=True)
+        # Exclude region 0 (ocean/invalid) from dominance calculation
+        nonzero_mask = unique != 0
+        nonzero_unique = unique[nonzero_mask]
+        nonzero_counts = counts[nonzero_mask]
+        if len(nonzero_unique) == 0:
+            return self.target_region
+        dominant = int(nonzero_unique[np.argmax(nonzero_counts)])
+        return f"US-R{dominant}"
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Index {idx} out of range for dataset of size {len(self)}")
@@ -185,6 +227,9 @@ class HydroDADataset(Dataset):
         # region_mask: pixels in active region(s)
         region_mask = (self._active_region_mask > 0.5).astype(np.float32)
 
+        # Resolve sample_region_id: find the dominant region from valid labeled pixels
+        sample_region_id = self._resolve_sample_region_id(label_valid_mask)
+
         # loss_mask = metric_mask: training and evaluation use the same mask.
         # Channel 11 (base_valid_mask) is NOT required in training — SMAP coverage
         # gaps do not indicate missing input features and would cause a catastrophic
@@ -206,11 +251,13 @@ class HydroDADataset(Dataset):
             "increment_rootzone": increment_rootzone,
             "base_valid_mask": base_valid_mask,
             "label_valid_mask": label_valid_mask,
-            "region_mask_integer": self._region_mask_int.copy(),
-            "active_region_mask": self._active_region_mask.copy(),
+            "region_mask_integer": self._region_mask_int,
+            "active_region_mask": self._active_region_mask,
             "region_mask": region_mask,
             "loss_mask": loss_mask,
             "metric_mask": metric_mask,
+            "latitude": self._latitude,
+            "latitude_weight": self._latitude_weight,
             "date_str": date_str,
             "month": month,
             "season": season,
@@ -221,6 +268,7 @@ class HydroDADataset(Dataset):
             "split_role": self.split_type,
             "regime_id": self.regime_id,
             "split_id": split_id,
+            "sample_region_id": sample_region_id,
             "K": self.K,
             "seed": self.seed,
         }
