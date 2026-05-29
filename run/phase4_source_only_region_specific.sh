@@ -1,7 +1,7 @@
 #!/bin/bash
 # Phase 4: Region-Specific Source-Only Baseline
 # Trains one SmallResUNet per region (R1-R6), each trained ONLY on that region's
-# source_fit data (2015-2020). Auto-evaluates on source_val (2021) and
+# source_fit data (2015-2021). Auto-evaluates on source_val (2022) and
 # target_query (2023-2025) after training.
 #
 # Usage:

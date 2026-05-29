@@ -13,7 +13,7 @@ Computes detailed diagnostics to understand model behavior:
 Usage:
     PYTHONPATH=. python scripts/analysis/diagnose_source_only_checkpoint.py \\
         --checkpoint artifacts/checkpoints/phase4_source_only/US-R1/best.pt \\
-        --target_region US-R1 --K 0 --seed 0 \\
+        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
         --max_samples 200
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from hydroda.utils.device import resolve_device
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 
 
@@ -122,8 +122,8 @@ def diagnose_oracle_shrinkage(pred_inc, true_analysis, forecast, mask, variable)
     This makes α=0 (forecast-only) always have skill=0, and α=1 consistent with
     evaluate_checkpoint.py's analysis_skill_vs_forecast.
 
-    IMPORTANT: This function operates on target_query labels. The alpha that maximizes
-    skill on target_query (the "oracle best alpha") is a diagnostic only — it MUST NOT
+    IMPORTANT: This function operates on target_eval labels. The alpha that maximizes
+    skill on target_eval (the "oracle best alpha") is a diagnostic only — it MUST NOT
     be used for model selection, early stopping, threshold calibration, or any training
     decision. Alpha selection for the final model MUST use source_val only.
     """
@@ -172,14 +172,19 @@ def main():
     parser = argparse.ArgumentParser(description="Diagnostic analysis of source-only checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--target_region", type=str, required=True)
-    parser.add_argument("--K", type=int, default=0)
+    parser.add_argument("--adaptation_setting", type=str, default="target_full_train")
+    parser.add_argument("--K", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--split_type", type=str, default="target_query")
+    parser.add_argument("--split_type", type=str, default="target_eval")
     parser.add_argument("--max_samples", type=int, default=200)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--require_gpu", action="store_true",
         help="Exit with error if CUDA unavailable")
     args = parser.parse_args()
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
 
     # Resolve device
     device = resolve_device(args.device, require_gpu=args.require_gpu)
@@ -187,7 +192,7 @@ def main():
     print(f"=" * 60)
     print(f"Source-only Backbone Diagnostic")
     print(f"  checkpoint={args.checkpoint}")
-    print(f"  target_region={args.target_region}  K={args.K}  seed={args.seed}")
+    print(f"  target_region={args.target_region}  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  split_type={args.split_type}  max_samples={args.max_samples}")
     print(f"  device={device}")
     print(f"=" * 60)
@@ -202,6 +207,7 @@ def main():
         split_type=args.split_type,
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     n_samples = min(len(dataset), args.max_samples)

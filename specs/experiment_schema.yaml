@@ -9,14 +9,22 @@ required_fields:
   country_id: str
   target_region_id: str
   source_region_ids: list
-  K: int
+  adaptation_setting: str
   seed: int
   split_manifest_path: str
+  split_manifest_sha256: str
+  target_train_dates_hash: str
+  target_eval_dates_hash: str
   data_config_path: str
   region_config_path: str
   metric_config_path: str
   output_dir: str
   created_utc: str
+
+legacy_optional_fields:
+  K: int_or_null
+  support_seed: int_or_null
+  support_dates_hash: str
 
 allowed_benchmark_ids:
   - hydroda_ood_us_v1
@@ -40,7 +48,7 @@ required_outputs_by_phase:
     - tests/test_dataset_contract.py
   phase2:
     - artifacts/regions/{country}/region_quality.csv
-    - artifacts/splits/**/K{K}_seed{seed}.json
+    - artifacts/splits/**/{adaptation_setting}_seed{seed}.json
   phase3:
     - artifacts/metrics/{experiment_id}/metrics_long.csv
     - reports/experiments/{experiment_id}.md

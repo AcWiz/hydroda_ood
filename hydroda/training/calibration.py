@@ -4,7 +4,7 @@ Calibrates a per-variable alpha scaling factor on source_val
 to shrink or expand predicted increments before adding to forecast.
 
 No-leakage declaration:
-    - Alpha calibration uses source_val only (never target_query)
+    - Alpha calibration uses source_val only (never target_eval/query)
     - Selection metric: max(min_skill), tie-break max(mean_skill)
     - Alpha=0 is always a candidate
 """

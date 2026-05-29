@@ -28,9 +28,9 @@ import torch.nn as nn
 # ---------------------------------------------------------------------------
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 OUTPUT_BASE = Path("reports/source_only_debug")
 ARTIFACTS_BASE = Path("artifacts/source_only_debug")
 
@@ -77,7 +77,7 @@ def check1_dataset_audit(
     OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    splits_to_check = ["source_train", "source_val", "target_support", "target_query"]
+    splits_to_check = ["source_train", "source_val", "target_train", "target_eval"]
 
     for split_type in splits_to_check:
         print(f"\n  Check1: Loading {split_type}...")
@@ -87,8 +87,9 @@ def check1_dataset_audit(
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type=split_type,
-            K=0,
+            K=None,
             seed=0,
+            adaptation_setting="target_full_train",
             freeze_manifest=FREEZE_MANIFEST,
         )
 
@@ -330,7 +331,7 @@ def check2_zero_predictor_metrics(
     da_nc_path = data_path or f"{DATA_DIR}/DA.nc"
     OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
-    splits = ["source_train", "source_val", "target_query"]
+    splits = ["source_train", "source_val", "target_eval"]
     rows = []
 
     for split_type in splits:
@@ -341,8 +342,9 @@ def check2_zero_predictor_metrics(
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type=split_type,
-            K=0,
+            K=None,
             seed=0,
+            adaptation_setting="target_full_train",
             freeze_manifest=FREEZE_MANIFEST,
         )
 
@@ -449,7 +451,7 @@ def check3_perfect_predictor_metrics(
     da_nc_path = data_path or f"{DATA_DIR}/DA.nc"
     OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
-    splits = ["source_train", "source_val", "target_query"]
+    splits = ["source_train", "source_val", "target_eval"]
     rows = []
 
     for split_type in splits:
@@ -460,8 +462,9 @@ def check3_perfect_predictor_metrics(
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type=split_type,
-            K=0,
+            K=None,
             seed=0,
+            adaptation_setting="target_full_train",
             freeze_manifest=FREEZE_MANIFEST,
         )
 
@@ -644,7 +647,7 @@ def check5_prediction_distribution(
     print(f"\n  Check5: Loading checkpoint for prediction analysis: {checkpoint_path}")
     predictor = SourceOnlyBackbonePredictor(checkpoint_path=checkpoint_path, device=device)
 
-    splits = ["source_train", "source_val", "target_query"]
+    splits = ["source_train", "source_val", "target_eval"]
     rows = []
 
     for split_type in splits:
@@ -655,8 +658,9 @@ def check5_prediction_distribution(
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type=split_type,
-            K=0,
+            K=None,
             seed=0,
+            adaptation_setting="target_full_train",
             freeze_manifest=FREEZE_MANIFEST,
         )
 
@@ -985,8 +989,9 @@ def check7_tiny_overfit(
         splits_json=SPLITS_JSON,
         target_region="US-R1",
         split_type="source_train",
-        K=0,
+        K=None,
         seed=0,
+        adaptation_setting="target_full_train",
         freeze_manifest=FREEZE_MANIFEST,
     )
 

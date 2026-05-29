@@ -170,11 +170,12 @@ def test_year_month_aggregation_sums_to_total(full_audit_stats):
 
 
 def test_all_frozen_splits_verified(full_audit_stats, frozen_splits):
-    """All 240 frozen splits have verification results."""
+    """All frozen splits have verification results."""
     all_stats, time_coords = full_audit_stats
     labeled_cycles = accumulate_labeled_cycles(all_stats)
     split_results = verify_frozen_splits(frozen_splits, all_stats, labeled_cycles)
-    assert len(split_results) == 240, f"Expected 240 split results, got {len(split_results)}"
+    expected = len(frozen_splits.get("splits", []))
+    assert len(split_results) == expected, f"Expected {expected} split results, got {len(split_results)}"
 
 
 def test_support_dates_all_labeled(full_audit_stats, frozen_splits):
@@ -187,11 +188,12 @@ def test_support_dates_all_labeled(full_audit_stats, frozen_splits):
     support_not_all_labeled = sum(1 for r in split_results if not r.support_all_labeled)
 
     # Log the count for information
-    print(f"\nSupport not all labeled: {support_not_all_labeled}/240")
+    expected = len(split_results)
+    print(f"\nSupport not all labeled: {support_not_all_labeled}/{expected}")
 
     # We expect all support dates to be labeled (since they come from source_train period)
     # But let's report rather than fail
-    assert support_not_all_labeled <= 240, "Sanity check: count should be <= 240"
+    assert support_not_all_labeled <= expected, f"Sanity check: count should be <= {expected}"
 
 
 def test_query_dates_all_labeled(full_audit_stats, frozen_splits):
@@ -201,11 +203,12 @@ def test_query_dates_all_labeled(full_audit_stats, frozen_splits):
     split_results = verify_frozen_splits(frozen_splits, all_stats, labeled_cycles)
 
     query_not_all_labeled = sum(1 for r in split_results if not r.query_all_labeled)
-    print(f"\nQuery not all labeled: {query_not_all_labeled}/240")
+    expected = len(split_results)
+    print(f"\nQuery not all labeled: {query_not_all_labeled}/{expected}")
 
     # Query period is 2023-2025, some timestamps might be forecast-only
     # This test just verifies the computation works
-    assert query_not_all_labeled <= 240
+    assert query_not_all_labeled <= expected
 
 
 def test_increment_reconstruction_still_passes(full_audit_stats):

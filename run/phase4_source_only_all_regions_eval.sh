@@ -1,7 +1,7 @@
 #!/bin/bash
 # Per-region evaluation for a trained source-only all-regions checkpoint.
 #
-# Evaluates on both source_val (2021) and target_query (2023-2025) splits,
+# Evaluates on both source_val (2022) and target_query (2023-2025) splits,
 # producing per-region metrics_long.csv, metrics_by_region.csv, per_region_summary.json
 # under results/source_val/ and results/target_query/.
 #
@@ -25,9 +25,9 @@ echo "  checkpoint: ${CHECKPOINT}"
 echo "  K=${K}  seed=${SEED}"
 echo "============================================"
 
-# ---- source_val (2021) ----
+# ---- source_val (2022) ----
 echo ""
-echo ">>> [1/2] Evaluating on source_val (2021)..."
+echo ">>> [1/2] Evaluating on source_val (2022)..."
 PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
     --checkpoint "${CHECKPOINT}" \
     --split_type source_val \

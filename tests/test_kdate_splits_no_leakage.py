@@ -1,12 +1,8 @@
-"""No-Leakage Tests for K-Date Splits.
+"""No-leakage tests for target-full-train splits and legacy K-date ablations.
 
-Tests per kdate_protocol.yaml tests_required:
-- test_support_dates_in_support_year
-- test_query_dates_in_query_years
-- test_no_support_query_overlap
-- test_k_matches_number_of_support_dates
-- test_k0_has_no_support_dates
-- test_selection_flags_false_for_query_labels
+Main protocol entries use adaptation_setting=target_full_train with complete
+target_train_dates from 2015-2021 and target_eval_dates from 2023-2025. Legacy K-date
+entries may still appear only as secondary few-shot ablations.
 """
 
 from __future__ import annotations
@@ -16,8 +12,8 @@ import os
 
 import pytest
 
-# Path to the generated splits JSON
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+# Path to the generated target-full-train splits JSON.
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 
 
 @pytest.fixture
@@ -35,7 +31,7 @@ def splits_by_K(splits_data):
     """Group splits by K value."""
     result = {}
     for s in splits_data:
-        k = s["K"]
+        k = s.get("K", s.get("K_legacy"))
         if k not in result:
             result[k] = []
         result[k].append(s)
@@ -43,46 +39,50 @@ def splits_by_K(splits_data):
 
 
 class TestSupportDatesInSupportYear:
-    """Test that all target_support_dates fall within 2022."""
+    """Test that all target_train/adaptation dates fall within 2015-2021."""
 
-    def test_all_support_dates_in_2022(self, splits_data):
+    def test_all_support_dates_in_2015_to_2021(self, splits_data):
         for split in splits_data:
-            support_dates = split["target_support_dates"]
+            support_dates = split.get("target_train_dates", split.get("target_support_dates", []))
             for d in support_dates:
                 year = int(d["date_str"].split("-")[0])
-                assert year == 2022, (
-                    f"Split {split['target_region_id']} K={split['K']} seed={split['seed']}: "
-                    f"support date {d['date_str']} not in 2022"
+                assert 2015 <= year <= 2021, (
+                    f"Split {split['target_region_id']} setting={split.get('adaptation_setting')} seed={split['seed']}: "
+                    f"target_train date {d['date_str']} not in 2015-2021"
                 )
 
 
 class TestQueryDatesInQueryYears:
-    """Test that all target_query_dates fall within 2023-2025."""
+    """Test that all target_eval dates fall within 2023-2025."""
 
     def test_all_query_dates_in_2023_to_2025(self, splits_data):
         valid_years = {2023, 2024, 2025}
         for split in splits_data:
-            query_dates = split["target_query_dates"]
+            query_dates = split.get("target_eval_dates", split.get("target_query_dates", []))
             for d in query_dates:
                 year = int(d["date_str"].split("-")[0])
                 assert year in valid_years, (
-                    f"Split {split['target_region_id']} K={split['K']} seed={split['seed']}: "
-                    f"query date {d['date_str']} not in 2023-2025"
+                    f"Split {split['target_region_id']} setting={split.get('adaptation_setting')} seed={split['seed']}: "
+                    f"target_eval date {d['date_str']} not in 2023-2025"
                 )
 
 
 class TestNoSupportQueryOverlap:
-    """Test that support and query date sets do not overlap."""
+    """Test that target_train/adaptation and target_eval date sets do not overlap."""
 
     def test_no_overlap_between_support_and_query(self, splits_data):
         for split in splits_data:
-            support_dates = set(d["date_str"] for d in split["target_support_dates"])
-            query_dates = set(d["date_str"] for d in split["target_query_dates"])
+            support_dates = set(
+                d["date_str"] for d in split.get("target_train_dates", split.get("target_support_dates", []))
+            )
+            query_dates = set(
+                d["date_str"] for d in split.get("target_eval_dates", split.get("target_query_dates", []))
+            )
 
             overlap = support_dates & query_dates
             assert len(overlap) == 0, (
-                f"Split {split['target_region_id']} K={split['K']} seed={split['seed']}: "
-                f"support and query overlap at: {overlap}"
+                f"Split {split['target_region_id']} setting={split.get('adaptation_setting')} seed={split['seed']}: "
+                f"target_train and target_eval overlap at: {overlap}"
             )
 
 
@@ -96,8 +96,10 @@ class TestKMatchesNumberOfSupportDates:
 
     def test_k_equals_support_count_or_less(self, splits_data):
         for split in splits_data:
-            k = split["K"]
-            support_count = len(split["target_support_dates"])
+            k = split.get("K", split.get("K_legacy"))
+            if k is None:
+                continue
+            support_count = len(split.get("target_support_dates", []))
             # K is target, actual may be less if valid dates insufficient
             assert support_count <= k, (
                 f"Split {split['target_region_id']} K={k} seed={split['seed']}: "
@@ -112,9 +114,11 @@ class TestK0HasNoSupportDates:
         if 0 not in splits_by_K:
             pytest.skip("No K=0 splits found")
         for split in splits_by_K[0]:
-            assert len(split["target_support_dates"]) == 0, (
+            if split.get("adaptation_setting") == "target_full_train":
+                continue
+            assert len(split.get("target_support_dates", [])) == 0, (
                 f"Split {split['target_region_id']} K=0 seed={split['seed']}: "
-                f"expected 0 support dates, got {len(split['target_support_dates'])}"
+                f"expected 0 support dates, got {len(split.get('target_support_dates', []))}"
             )
 
 
@@ -124,17 +128,17 @@ class TestSelectionFlagsFalseForQueryLabels:
     def test_selection_flags_are_false(self, splits_data):
         for split in splits_data:
             assert split["selection_uses_analysis"] is False, (
-                f"Split {split['target_region_id']} K={split['K']} seed={split['seed']}: "
+                f"Split {split['target_region_id']} setting={split.get('adaptation_setting')} seed={split['seed']}: "
                 f"selection_uses_analysis should be False"
             )
             assert split["selection_uses_query_labels"] is False, (
-                f"Split {split['target_region_id']} K={split['K']} seed={split['seed']}: "
+                f"Split {split['target_region_id']} setting={split.get('adaptation_setting')} seed={split['seed']}: "
                 f"selection_uses_query_labels should be False"
             )
 
 
-class TestSourceFitIn2015To2020:
-    """Test that source_fit dates fall within 2015-04 to 2020-12."""
+class TestSourceFitIn2015To2021:
+    """Test that source_fit dates fall within 2015-04 to 2021-12."""
 
     def test_source_train_dates_in_range(self, splits_data):
         for split in splits_data:
@@ -143,14 +147,14 @@ class TestSourceFitIn2015To2020:
                 year = int(d["date_str"].split("-")[0])
                 month = int(d["date_str"].split("-")[1])
                 day = int(d["date_str"].split("-")[2])
-                # Must be 2015-04 or later, and before 2021
-                assert (year > 2015 and year < 2021) or (year == 2015 and month >= 4), (
+                # Must be 2015-04 or later, and before 2022
+                assert (year > 2015 and year < 2022) or (year == 2015 and month >= 4), (
                     f"Split {split['target_region_id']}: "
-                    f"source date {d['date_str']} outside 2015-04 to 2020-12"
+                    f"source date {d['date_str']} outside 2015-04 to 2021-12"
                 )
-                assert year <= 2020, (
+                assert year <= 2021, (
                     f"Split {split['target_region_id']}: "
-                    f"source date {d['date_str']} outside 2015-04 to 2020-12"
+                    f"source date {d['date_str']} outside 2015-04 to 2021-12"
                 )
 
 
@@ -187,13 +191,14 @@ class TestManifestRequiredFields:
         required_fields = [
             "benchmark_id",
             "protocol_version",
+            "adaptation_setting",
             "target_region_id",
             "source_region_ids",
-            "K",
             "seed",
             "source_train_dates",
-            "target_support_dates",
-            "target_query_dates",
+            "source_val_dates",
+            "target_train_dates",
+            "target_eval_dates",
             "selection_uses_analysis",
             "selection_uses_query_labels",
             "created_by",
@@ -202,6 +207,6 @@ class TestManifestRequiredFields:
         for split in splits_data:
             for field in required_fields:
                 assert field in split, (
-                    f"Split {split['target_region_id']} K={split['K']} seed={split['seed']}: "
+                    f"Split {split['target_region_id']} setting={split.get('adaptation_setting')} seed={split['seed']}: "
                     f"missing required field '{field}'"
                 )

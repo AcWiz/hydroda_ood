@@ -1,46 +1,60 @@
-# phase2_protocol_v4_final_update.md — 更新 Protocol V4-final ✅ 已完成
+# phase2_protocol_v4_final_update.md — Protocol V4.2 full-target-train update
 
 ## 目标
 
-将项目从旧时间协议更新为新冻结协议（迁移已于 2026-05-11 完成）。
+将项目从 V4.1 K-cycle few-shot 主协议迁移到 V4.2 target full-training-set
+adaptation 主协议。
 
 ## 新冻结协议
 
 ```text
-source_fit:     2015-2020
-source_val:     2021
-target_context: 2022
-target_query:   2023-2025
+source_fit:   2015-2021
+source_val:   2022
+target_train: 2015-2021
+target_eval:  2023-2025
 ```
 
-## 必改文件（全部已完成）
+主实验变量：
+
+```text
+adaptation_setting = target_full_train
+```
+
+`K=0/4/12` 不再是主实验变量，只能作为 `legacy_few_shot_ablation`。
+
+## 设计决定
+
+主协议不扩大 source fit。`source_fit=2015-2021` 保持训练用，`source_val=2022`
+保持 checkpoint / early stopping / hyperparameter selection gate。纳入 2021/2022
+的 source refit 只能作为 expanded-source secondary ablation。
+
+## 必改文件
 
 - `CLAUDE.md`
 - `完整研究计划方案.md`
 - `context/01_RESEARCH_CONTRACT.md`
 - `context/04_KDATE_SPLIT_PROTOCOL.md`
+- `context/12_PROTOCOL_V4_FINAL_UPDATE.md`
 - `context/00_EXECUTABLE_CONTEXT_MAP.md`
 - `specs/protocol_v4.yaml`
 - `specs/kdate_protocol.yaml`
+- `specs/baselines.yaml`
+- `specs/experiment_schema.yaml`
+- `specs/metrics.yaml`
 - `hydroda/data/protocol.py`
-- `scripts/build_kdate_splits.py`
+- `hydroda/data/leakage_guard.py`
 - `hydroda/splits/kdate.py`
-- 相关 tests：`test_protocol_leakage_guard.py`、`test_kdate_splits_no_leakage.py`、`test_target_query_evaluation_only.py`
+- `hydroda/splits/manifest.py`
+- `hydroda/data/dataset.py`
+- `hydroda/evaluation/harness.py`
+- 相关 tests：protocol/leakage/split/evaluation/baseline tests
 
 ## 验收标准
 
 1. `ProtocolConfig().role_for_date("2020-06-01") == "source_fit"`。
-2. `ProtocolConfig().role_for_date("2021-06-01") == "source_val"`。
-3. `ProtocolConfig().role_for_date("2022-06-01") == "target_context"`。
-4. `ProtocolConfig().role_for_date("2023-06-01") == "target_query"`。
-5. split builder 使用 2022 年作为 support/context year，2023-2025 作为 query years。
-6. target context labels 不能用于 checkpoint、early stopping、hyperparameter 或 model selection。
-7. target query labels 仍然只能用于最终 offline evaluation。
-
-## 建议测试
-
-```bash
-pytest tests/test_protocol_leakage_guard.py        tests/test_kdate_splits_no_leakage.py        tests/test_target_query_evaluation_only.py -q
-```
-
-如果没有真实数据或 split artifacts，数据依赖型测试可以 skip；`test_protocol_leakage_guard.py` 必须通过。
+2. `ProtocolConfig().role_for_date("2021-06-01") == "source_fit"`。
+3. `ProtocolConfig().role_for_date("2022-06-01") == "source_val"`。
+4. `ProtocolConfig().role_for_date("2023-06-01") == "target_eval"`。
+5. split builder 默认生成 `adaptation_setting=target_full_train`。
+6. target_eval labels 不能用于 training、prompt、normalization、early stopping、model selection 或 hyperparameter selection。
+7. metrics_long.csv 包含 `adaptation_setting`、`target_train_dates_hash`、`target_eval_dates_hash`、`split_manifest_sha256`。

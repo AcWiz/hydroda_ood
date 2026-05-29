@@ -10,6 +10,7 @@
 
 ```text
 CLAUDE.md
+docs/COAUTHOR_CONTEXT.md
 context/00_EXECUTABLE_CONTEXT_MAP.md
 context/01_RESEARCH_CONTRACT.md
 ```
@@ -82,7 +83,7 @@ specs/hydroda_dataset_contract.yaml
 
 ---
 
-### Phase 2: Region masks + K-date splits
+### Phase 2: Region masks + target-train splits
 
 读取：
 
@@ -92,13 +93,17 @@ context/03_REGION_PROTOCOL.md
 context/04_KDATE_SPLIT_PROTOCOL.md
 context/11_GEOLOCATION_RECOVERY_PROTOCOL.md
 specs/regions_v2.yaml
-specs/kdate_protocol.yaml
+specs/protocol_v4.yaml
+specs/kdate_protocol.yaml  # legacy few-shot ablation only
 specs/geolocation_sources.yaml
 artifacts/geolocation/US_latlon.nc
 checklists/no_leakage_checklist.md
 ```
 
-目标：生成 masks、quality report、support/query split manifest。
+目标：生成 masks、quality report、target_train/target_eval split manifest。
+主入口脚本应使用 `scripts/data/build_target_train_splits.py`；旧
+`scripts/data/build_kdate_splits.py` 仅作为 legacy alias / secondary
+few-shot ablation 入口。
 
 **Artifacts**（Phase 2A 完成后冻结）：
 
@@ -114,7 +119,7 @@ reports/regions/US_region_artifact_contract.md     # contract 文档
 Gate：
 
 ```text
-Temporal K-date splits: 可在 Phase 1 dataset 完成后先实现。
+Temporal target-train splits: 可在 Phase 1 dataset 完成后先实现。
 Scientific US-R1..US-R6 masks: UNLOCKED (US_latlon.nc recovered 2026-05-06)
 Grid-only masks: ALLOWED for development only
 ```
@@ -134,7 +139,7 @@ specs/metrics.yaml
 checklists/no_leakage_checklist.md
 ```
 
-目标：Forecast-only、source mean、target support mean、monthly support mean、ridge。
+目标：Forecast-only evaluation sanity；source/target-train heuristic baselines 仅作 internal sanity。
 
 ---
 
@@ -184,7 +189,7 @@ templates/experiment_card_template.md
 checklists/reproducibility_checklist.md
 ```
 
-目标：paper-ready tables、K-curves、event maps、risk notes。
+目标：paper-ready tables、target_full_train comparisons、legacy K-shot ablation curves、event maps、risk notes。
 
 ---
 
@@ -236,9 +241,8 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 
 **不要**将 data/artifact 文件放入 conda environment。
 
-## Protocol V4-final update
+## Protocol V4.3 historical-target-adaptation update
 
-- `context/12_PROTOCOL_V4_FINAL_UPDATE.md`：冻结新时间协议 `source_fit=2015-2020`、`source_val=2021`、`target_context=2022`、`target_query=2023-2025`。
-- `specs/protocol_v4.yaml`：机器可读的 Protocol V4-final single source of truth。
-- `specs/kdate_protocol.yaml`：K-cycle support-year 与 query-year 的机器可读约束。
-
+- `context/12_PROTOCOL_V4_FINAL_UPDATE.md`：冻结新时间协议 `source_fit=2015-2021`、`source_val=2022`、`target_train=2015-2021`、`target_eval=2023-2025`。
+- `specs/protocol_v4.yaml`：机器可读的 Protocol V4.3 historical-target-adaptation single source of truth。
+- `specs/kdate_protocol.yaml`：legacy K-shot ablation 约束；不再是主协议。

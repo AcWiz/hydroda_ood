@@ -1,9 +1,9 @@
 """Trainer for source-only backbone in HydroDA-OOD / HyperDA V4.
 
 No-leakage declaration:
-    - Training uses source_fit split only (2015-2020, US-R1..R6 excluding target)
+    - Training uses source_fit split only (2015-2021, US-R1..R6 excluding target)
     - Normalization stats computed from source_fit only (LeakageGuard check)
-    - No target_query labels used in training / normalization / early_stopping
+    - No target_eval/query labels used in training / normalization / early_stopping
     - No target prompt used
 """
 from __future__ import annotations
@@ -24,6 +24,7 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 
 from hydroda.data.dataset import HydroDADataset
+from hydroda.data.file_hash import compute_sha256
 from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
 from hydroda.training.calibration import calibrate_residual_gain
@@ -142,7 +143,7 @@ class Trainer:
         device: str = "cuda",
         checkpoint_dir: str = "artifacts/checkpoints/phase4_source_only",
         experiment_id: str = "phase4_source_only",
-        protocol_freeze_id: str = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12",
+        protocol_freeze_id: str = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025",
         split_manifest_path: str = "artifacts/protocol/US_region_split_freeze_manifest.json",
         grad_clip: Optional[float] = None,
         model_width: int = 32,
@@ -178,6 +179,10 @@ class Trainer:
         self.experiment_id = experiment_id
         self.protocol_freeze_id = protocol_freeze_id
         self.split_manifest_path = split_manifest_path
+        self.split_manifest_sha256 = ""
+        split_manifest_file = Path(split_manifest_path)
+        if split_manifest_file.exists():
+            self.split_manifest_sha256 = compute_sha256(split_manifest_file)
         self.grad_clip = grad_clip
         self.model_width = model_width
         self.target_increment_normalization = target_increment_normalization
@@ -976,6 +981,7 @@ class Trainer:
             "experiment_id": self.experiment_id,
             "protocol_freeze_id": self.protocol_freeze_id,
             "split_manifest_path": self.split_manifest_path,
+            "split_manifest_sha256": self.split_manifest_sha256,
             "git_hash": get_git_hash(),
             "timestamp": get_timestamp(),
             "model_state_dict": self.model.state_dict(),
@@ -1024,6 +1030,8 @@ class Trainer:
         summary = {
             "experiment_id": self.experiment_id,
             "protocol_freeze_id": self.protocol_freeze_id,
+            "split_manifest_path": self.split_manifest_path,
+            "split_manifest_sha256": self.split_manifest_sha256,
             "best_loss": self.best_loss,
             "final_epoch": self.current_epoch - 1,
             "total_epochs_completed": self.current_epoch,
@@ -1036,7 +1044,9 @@ class Trainer:
             "normalization_source": "source_fit_only",
             "early_stopping_source": "source_val_only" if has_source_val else "train_loss_only",
             "model_selection_source": "source_val_only" if has_source_val else "best_train_loss",
-            "target_query_usage": "eval_only_no_early_stopping",
+            "target_adaptation_source": "target_full_train_2022_for_target_specific_operator_only",
+            "target_eval_usage": "eval_only_no_early_stopping",
+            "target_query_usage": "eval_only_no_early_stopping",  # deprecated alias
             "leakage_guard_status": "pass",
             "git_hash": get_git_hash(),
             "timestamp": get_timestamp(),

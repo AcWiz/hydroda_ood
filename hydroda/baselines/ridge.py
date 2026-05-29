@@ -1,9 +1,9 @@
 """Ridge regression baseline with three feature sets.
 
 No-leakage declaration:
-    - Fit on target_support only
-    - Predict on target_query
-    - No target_query labels used in fitting
+    - Fit on target_train only (legacy target_support alias is accepted)
+    - Predict on target_eval/query
+    - No target_eval/query labels used in fitting
     - metric_mask applied before computing targets
 """
 
@@ -16,6 +16,9 @@ import numpy as np
 import xarray as xr
 from sklearn.linear_model import Ridge
 from typing import Dict, Any, Optional, List
+
+from hydroda.data.leakage_guard import LeakageGuard
+from hydroda.data.protocol import ProtocolConfig
 
 
 # Feature set definitions
@@ -135,13 +138,13 @@ def _build_latlon_grids(region_masks_nc: str) -> tuple:
 class RidgeBaseline:
     """Ridge regression baseline with configurable feature sets.
 
-    Fit on target_support samples, predict on target_query samples.
+    Fit on target_train samples, predict on target_eval/query samples.
 
     Args:
         feature_set: "core" | "input_full" | "input_geo_full"
         alpha: Ridge regularization strength (default 1.0)
 
-    No-leakage: trained only on target_support, evaluated on target_query.
+    No-leakage: trained only on target_train, evaluated on target_eval/query.
     """
 
     def __init__(self, feature_set: str = "input_full", alpha: float = 1.0):
@@ -162,9 +165,17 @@ class RidgeBaseline:
         Uses metric_mask to select valid pixels before computing targets.
 
         Args:
-            samples: List of sample dicts from target_support split.
+            samples: List of sample dicts from target_train split or legacy target_support split.
         """
         import xarray as xr
+
+        dates = [s.get("date_str", "") for s in samples if s.get("date_str")]
+        if dates:
+            LeakageGuard(ProtocolConfig()).check_target_adaptation_scope(
+                dates,
+                purpose="ridge_target_train_fit",
+                labels_allowed=True,
+            )
 
         # Load geolocation grids if needed
         if "lat_grid" in self.feature_names or "lon_grid" in self.feature_names:

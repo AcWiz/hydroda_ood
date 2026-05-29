@@ -8,9 +8,9 @@ def test_protocol_roles():
     p = ProtocolConfig()
     assert p.role_for_date("2019-06-01") == "source_fit"
     assert p.role_for_date("2020-06-01") == "source_fit"
-    assert p.role_for_date("2021-06-01") == "source_val"
-    assert p.role_for_date("2022-06-01") == "target_context"
-    assert p.role_for_date("2023-06-01") == "target_query"
+    assert p.role_for_date("2021-06-01") == "source_fit"
+    assert p.role_for_date("2022-06-01") == "source_val"
+    assert p.role_for_date("2023-06-01") == "target_eval"
 
 
 def test_guard_rejects_query_labels_for_normalization():
@@ -19,6 +19,6 @@ def test_guard_rejects_query_labels_for_normalization():
         guard.check_normalization_scope(["2023-01-01"], scope_name="source_fit_only")
 
 
-def test_guard_accepts_support_dates_in_2022():
+def test_guard_accepts_historical_target_adaptation_dates():
     guard = LeakageGuard(ProtocolConfig())
-    guard.check_support_dates(["2022-03-01", "2022-09-01"])
+    guard.check_support_dates(["2016-03-01", "2021-09-01"])

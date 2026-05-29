@@ -1,8 +1,8 @@
-# Phase 6/7/8 — HyperDA、K-cycle Calibration 与论文产物
+# Phase 6/7/8 — HyperDA full-target-train adaptation 与论文产物
 
 ## 目标
 
-实现 HyperDA-Zero、HyperDA-Calib、HyperDA-Refine，并与 adapter / LoRA 在 K=4/K=12 下公平比较。随后生成 US-only development report 和最终 LOCO paper artifacts。
+实现 HyperDA full-target-train generation/refinement，并与 adapter / LoRA 在完整 2015-2021 target_train 下公平比较。旧 HyperDA-Zero/Calib/Refine K=0/4/12 只作为 secondary ablation。随后生成 US-only development report 和最终 LOCO paper artifacts。
 
 ## 需要实现
 
@@ -25,32 +25,19 @@ scripts/make_paper_figures.py
 ## HyperDA variants
 
 ```text
-HyperDA-Zero:
-  prompt = target 2022 input-side prompt
-  labels = none
+HyperDA-FullTargetTrain:
+  prompt = target 2022 input-side prompt + full target_train labeled summaries
+  labels = all available 2015-2021 target_train cycles
 
-HyperDA-Calib:
-  prompt = target 2022 input-side prompt + K labeled calibration summaries
-  K ∈ {4, 12}
-
-HyperDA-Refine:
+HyperDA-Refine-FullTargetTrain:
   initialize ζ_R = H_ψ(P_R)
   freeze θ0 and H_ψ
-  update only ζ_R for 10-50 steps on K calibration cycles
+  update only ζ_R for pre-registered steps on full target_train cycles
 ```
 
 ## 主比较
 
-K=0：
-
-```text
-Forecast-only
-Source-only backbone
-Prompt-conditioned shared backbone
-HyperDA-Zero
-```
-
-K=4/K=12：
+target_full_train：
 
 ```text
 Forecast-only
@@ -58,8 +45,8 @@ Source-only backbone
 Adapter tuning
 LoRA tuning
 Prompt-conditioned shared + calibration prompt
-HyperDA-Calib
-HyperDA-Refine
+HyperDA-FullTargetTrain
+HyperDA-Refine-FullTargetTrain
 ```
 
 ## 报告要求
@@ -73,15 +60,16 @@ High-update Skill
 trainable parameter count
 adaptation steps
 wall-clock time
-support seed mean ± std / CI
+target_train dates hash / target_eval dates hash / split manifest hash
+seed mean ± std / CI
 ```
 
 ## 验收标准
 
 ```text
-1. HyperDA-Zero 不使用 target labels。
-2. HyperDA-Calib 只使用 2022 K-cycle support summaries。
+1. HyperDA full-target-train 只使用 2015-2021 target_train labels 进行 target-specific operator 构造。
+2. 2023-2025 target_eval labels 只用于最终评估。
 3. HyperDA-Refine 只更新 ζ_R，不更新 θ0 或 Hψ。
-4. adapter / LoRA 使用相同 support dates、steps、seed、normalization。
+4. adapter / LoRA 使用相同 target_train dates、steps、seed、normalization。
 5. 所有表格能从 metrics_long.csv 自动生成。
 ```

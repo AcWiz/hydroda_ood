@@ -2,9 +2,9 @@
 
 Creates a 4-panel figure showing:
 1. US 6-region geographic distribution with cartopy map projection
-2. Temporal split timeline (source_train / target_support / target_query)
+2. Temporal split timeline (source_train / target_train / target_eval)
 3. LORO cross-validation structure
-4. K-date support sampling strategy
+4. Legacy K-date support sampling strategy (secondary ablation)
 
 Nature Style Guidelines:
 - Color palette: Deep blue (#2c3e50), Light blue (#3498db), Red (#c0392b),
@@ -181,15 +181,15 @@ def plot_temporal_timeline(ax, splits_json):
 
     first = data["splits"][0]
     source_start, source_end = first["source_train_period"].split(" to ")
-    support_start, support_end = first["target_support_period"].split(" to ")
-    query_start, query_end = first["target_query_period"].split(" to ")
+    support_start, support_end = first.get("target_train_period", first["target_support_period"]).split(" to ")
+    query_start, query_end = first.get("target_eval_period", first["target_query_period"]).split(" to ")
 
     # Timeline configuration
     ax.set_xlim(2014.5, 2026)
     ax.set_ylim(0, 1)
     ax.set_xticks(range(2015, 2026))
 
-    # Source train period (2015-2020)
+    # Source train period (2015-2021)
     ax.axvspan(2015, 2020.5, ymin=0.35, ymax=0.65, color=NATURE_COLORS["deep_blue"], alpha=0.6)
     ax.text(2017.5, 0.7, "Source Training", ha="center", va="center", fontsize=8,
             color=NATURE_COLORS["deep_blue"], fontweight="bold")
@@ -306,7 +306,7 @@ def plot_loro_structure(ax, splits_json):
 
 
 def plot_kdate_sampling(ax):
-    """Panel D: K-date support sampling strategy (Nature style)."""
+    """Panel D: legacy K-date support sampling strategy (Nature style)."""
     months = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
     x = np.arange(len(months))
 
@@ -379,8 +379,8 @@ def main():
     )
     parser.add_argument(
         "--splits-json",
-        default="artifacts/splits/US_loro_kdate_splits.json",
-        help="Path to US_loro_kdate_splits.json",
+        default="artifacts/splits/US_loro_target_train_splits.json",
+        help="Path to US_loro_target_train_splits.json",
     )
     parser.add_argument(
         "--out-png",

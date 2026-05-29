@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import tempfile
 import os
+import sys
+import json
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -21,6 +23,7 @@ import torch
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
 from hydroda.models.prompt_encoder import RegionPromptEncoder
 from hydroda.training.losses import WeightedMaskedHuberLoss
+from scripts.train import train_prompt_conditioned_shared as train_pc
 from scripts.train.train_prompt_conditioned_shared import PromptQualityTracker, PromptConditionedTrainer
 
 
@@ -109,6 +112,110 @@ def test_epoch_checkpoint_saving():
         assert (ckpt_dir / "README_training_summary.md").exists(), "README_training_summary.md should exist"
 
         print(f"  test_epoch_checkpoint_saving passed: {sorted([p.name for p in ckpt_dir.glob('*.pt')])}")
+
+
+def test_parse_args_target_full_train_clears_legacy_k(monkeypatch):
+    """target_full_train should not carry a legacy K-shot value."""
+    monkeypatch.setattr(sys, "argv", [
+        "train_prompt_conditioned_shared.py",
+        "--target_region", "US-R1",
+        "--adaptation_setting", "target_full_train",
+        "--K", "0",
+    ])
+
+    args = train_pc.parse_args()
+
+    assert args.adaptation_setting == "target_full_train"
+    assert args.K is None
+
+
+def test_selection_metric_modes_choose_expected_values():
+    """Checkpoint selection should respect the requested selection_metric."""
+    trainer = PromptConditionedTrainer.__new__(PromptConditionedTrainer)
+
+    trainer.selection_metric = "source_val_transfer_safe_score"
+    value, maximize = trainer._selection_value(
+        train_loss=0.7,
+        source_val_metrics={"source_val_loss": 0.3},
+        gain_results={"selection_score": 0.42},
+    )
+    assert value == 0.42
+    assert maximize is True
+
+    trainer.selection_metric = "source_val_loss"
+    value, maximize = trainer._selection_value(
+        train_loss=0.7,
+        source_val_metrics={"source_val_loss": 0.3},
+        gain_results={"selection_score": 0.42},
+    )
+    assert value == 0.3
+    assert maximize is False
+
+    trainer.selection_metric = "train_loss"
+    value, maximize = trainer._selection_value(
+        train_loss=0.7,
+        source_val_metrics={"source_val_loss": 0.3},
+        gain_results={"selection_score": 0.42},
+    )
+    assert value == 0.7
+    assert maximize is False
+
+
+def test_summary_and_checkpoint_record_best_selection_value_for_safe_score():
+    """Safe-score selection should not leave the primary best metric as inf."""
+    train_dataset = FakePromptDataset(n_samples=4, H=32, W=48)
+
+    model = FiLMConditionalResUNet(in_channels=12, out_channels=2, width=8, prompt_dim=16)
+    prompt_encoder = RegionPromptEncoder(num_regions=2, input_channels=12, hidden_dim=16)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trainer = PromptConditionedTrainer(
+            model=model,
+            prompt_encoder=prompt_encoder,
+            train_dataset=train_dataset,
+            max_epochs=1,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+            checkpoint_dir=tmpdir,
+            source_regions=["US-R1", "US-R2"],
+            global_to_source_lookup={0: 0, 1: 1},
+            selection_metric="source_val_transfer_safe_score",
+        )
+        trainer.best_loss = float("inf")
+        trainer.best_safe_score = 0.42
+        trainer.best_selection_metric = "source_val_transfer_safe_score"
+        trainer.best_selection_value = 0.42
+
+        summary_path = Path(tmpdir) / "summary.json"
+        trainer.save_summary_json(summary_path)
+        summary = json.loads(summary_path.read_text())
+
+        assert summary["best_selection_metric"] == "source_val_transfer_safe_score"
+        assert summary["best_selection_value"] == 0.42
+        assert np.isfinite(summary["best_selection_value"])
+        assert summary["target_eval_usage"] == "eval_only_no_early_stopping"
+        assert summary["target_query_usage"] == "eval_only_no_early_stopping"
+
+        trainer._save_readme()
+        readme = (Path(tmpdir) / "README_training_summary.md").read_text()
+        assert "- **Target eval usage**: eval_only_no_early_stopping" in readme
+        assert "- **Target query usage**" not in readme
+        assert "- **Best selection metric**: source_val_transfer_safe_score" in readme
+        assert "- **Best selection value**: 0.420000" in readme
+
+        trainer.save_checkpoint(
+            Path(tmpdir) / "test.pt",
+            epoch=0,
+            loss=0.42,
+            tag="best",
+            gain_results={"selection_score": 0.42},
+            selection_value=0.42,
+        )
+        ckpt = torch.load(Path(tmpdir) / "test.pt", map_location="cpu", weights_only=False)
+
+        assert ckpt["best_selection_metric"] == "source_val_transfer_safe_score"
+        assert ckpt["best_selection_value"] == 0.42
 
 
 def test_transfer_safe_score_uses_source_val_only():
@@ -273,6 +380,9 @@ def test_checkpoint_contains_model_and_prompt_encoder_state_dicts():
         assert "config" in ckpt
         assert ckpt["config"]["source_regions"] == ["US-R1", "US-R2"]
         assert ckpt["config"]["checkpoint_every_n_epochs"] == 5  # default
+        assert ckpt["config"]["adaptation_setting"] == "target_full_train"
+        assert ckpt["config"]["K"] is None
+        assert ckpt["config"]["protocol_freeze_id"] == train_pc.PROTOCOL_FREEZE_ID
 
         print(f"  test_checkpoint_contains_model_and_prompt_encoder_state_dicts passed.")
 

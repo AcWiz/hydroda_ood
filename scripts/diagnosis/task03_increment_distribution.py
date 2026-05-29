@@ -2,7 +2,7 @@
 """Task 3: Statistics of true/pred rootzone increment distributions.
 
 Loads the source-only nonorm checkpoint, samples from source_train, source_val,
-and target_query splits, and computes distribution statistics for both surface
+and target_eval splits, and computes distribution statistics for both surface
 and rootzone true and predicted increments.
 
 Output: CSV and markdown report.
@@ -27,7 +27,7 @@ ARTIFACTS_DIR = REPO_ROOT / "artifacts" / "source_only_rootzone_diagnosis"
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = str(REPO_ROOT / "artifacts" / "regions" / "US_region_masks.nc")
-SPLITS_JSON = str(REPO_ROOT / "artifacts" / "splits" / "US_loro_kdate_splits.json")
+SPLITS_JSON = str(REPO_ROOT / "artifacts" / "splits" / "US_loro_target_train_splits.json")
 FREEZE_MANIFEST = str(REPO_ROOT / "artifacts" / "protocol" / "US_region_split_freeze_manifest.json")
 
 CHECKPOINT = str(REPO_ROOT / "artifacts" / "runs" / "phase4_source_only"
@@ -156,7 +156,7 @@ def main():
     split_configs = [
         ("source_train", N_SOURCE_TRAIN),
         ("source_val", -1),  # all
-        ("target_query", N_TARGET_QUERY),
+        ("target_eval", N_TARGET_QUERY),
     ]
 
     for split_type, n_samples in split_configs:
@@ -176,7 +176,7 @@ def main():
 
     # Add ratios: pred/true comparisons
     ratio_rows = []
-    for split_type in ["source_train", "source_val", "target_query"]:
+    for split_type in ["source_train", "source_val", "target_eval"]:
         for var in ["surface", "rootzone"]:
             true_row = df[df["label"] == f"{split_type}_true_{var}"]
             pred_row = df[df["label"] == f"{split_type}_pred_{var}"]
@@ -253,7 +253,7 @@ def main():
     ])
 
     # Rootzone true increment scale vs surface
-    for split_type in ["source_train", "source_val", "target_query"]:
+    for split_type in ["source_train", "source_val", "target_eval"]:
         true_s = df[df["label"] == f"{split_type}_true_surface"].iloc[0]
         true_r = df[df["label"] == f"{split_type}_true_rootzone"].iloc[0]
         scale_ratio = true_s["std"] / true_r["std"] if true_r["std"] > 0 else np.nan

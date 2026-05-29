@@ -8,13 +8,13 @@ and rootzone skill denominator sensitivity analysis.
 Usage:
     PYTHONPATH=. python scripts/report/rootzone_diagnosis.py \\
         --checkpoint artifacts/checkpoints/phase4_source_only/best.pt \\
-        --target_region US-R1 --K 0 --seed 0 \\
+        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
         --output reports/rootzone_diagnosis_US-R1.md
 
 No-leakage declaration:
     - All model selection / checkpoint choice uses source_val.
-    - target_query is evaluated ONLY for final reporting (explicitly marked).
-    - No target_query labels used for early stopping, model selection,
+    - target_eval is evaluated ONLY for final reporting (explicitly marked).
+    - No target_eval labels used for early stopping, model selection,
       normalization, or threshold tuning.
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ from hydroda.metrics.skill import (
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 
 
@@ -330,9 +330,10 @@ def _increment_distribution_section(dataset_name: str, metrics: dict) -> str:
 def generate_report(
     checkpoint_path: str,
     target_region: str,
-    K: int,
+    K: int | None,
     seed: int,
     output_path: str,
+    adaptation_setting: str = "target_full_train",
     device: str = "cuda",
 ) -> str:
     """Generate rootzone diagnosis markdown report."""
@@ -350,22 +351,24 @@ def generate_report(
         target_region=target_region,
         split_type="source_val",
         K=K, seed=seed,
+        adaptation_setting=adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     print(f"  source_val samples: {len(source_val_ds)}")
 
-    # Load target_query dataset (eval only, explicitly marked)
-    print(f"Loading target_query dataset (evaluation only)...")
-    target_query_ds = HydroDADataset(
+    # Load target_eval dataset (eval only, explicitly marked)
+    print(f"Loading target_eval dataset (evaluation only)...")
+    target_eval_ds = HydroDADataset(
         da_nc_path=DA_NC,
         region_masks_nc=REGION_MASKS_NC,
         splits_json=SPLITS_JSON,
         target_region=target_region,
-        split_type="target_query",
+        split_type="target_eval",
         K=K, seed=seed,
+        adaptation_setting=adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
-    print(f"  target_query samples: {len(target_query_ds)}")
+    print(f"  target_eval samples: {len(target_eval_ds)}")
 
     lines = []
     lines.append(f"# Rootzone Diagnosis Report")
@@ -375,7 +378,7 @@ def generate_report(
     lines.append(f"- **K**: {K}, **seed**: {seed}")
     lines.append(f"- **Generated**: {datetime.now().isoformat()}")
     lines.append("")
-    lines.append("> **No-leakage declaration**: target_query is used ONLY for final evaluation.")
+    lines.append("> **No-leakage declaration**: target_eval is used ONLY for final evaluation.")
     lines.append("> Model selection, early stopping, and checkpoint choice are based on source_val only.")
     lines.append("")
 
@@ -438,8 +441,8 @@ def generate_report(
     lines.append("## Target Query Evaluation (FINAL EVALUATION ONLY — not used for selection)")
     lines.append("")
 
-    tq_surface = _model_metrics(target_query_ds, predictor, "surface")
-    tq_rootzone = _model_metrics(target_query_ds, predictor, "rootzone")
+    tq_surface = _model_metrics(target_eval_ds, predictor, "surface")
+    tq_rootzone = _model_metrics(target_eval_ds, predictor, "rootzone")
 
     lines.append("| Variable | Model RMSE (latw) | Forecast RMSE (latw) | Skill (latw) |")
     lines.append("|----------|-------------------|----------------------|--------------|")
@@ -447,13 +450,13 @@ def generate_report(
     lines.append(f"| Rootzone | {tq_rootzone['rmse_model']:.6f} | {tq_rootzone['rmse_forecast']:.6f} | {tq_rootzone['skill']:.4f} |")
     lines.append("")
 
-    lines.append(_increment_distribution_section("target_query (surface)", tq_surface))
-    lines.append(_increment_distribution_section("target_query (rootzone)", tq_rootzone))
+    lines.append(_increment_distribution_section("target_eval (surface)", tq_surface))
+    lines.append(_increment_distribution_section("target_eval (rootzone)", tq_rootzone))
 
     # Worse-than-forecast analysis
     lines.append("### Samples Where Model Degrades Forecast")
     lines.append("")
-    worse = _count_worse_than_forecast(target_query_ds, predictor)
+    worse = _count_worse_than_forecast(target_eval_ds, predictor)
     lines.append(f"- Surface: {worse['surface_worse_than_forecast']}/{worse['n_total']} ({worse['surface_worse_fraction']:.1%})")
     lines.append(f"- Rootzone: {worse['rootzone_worse_than_forecast']}/{worse['n_total']} ({worse['rootzone_worse_fraction']:.1%})")
     lines.append("")
@@ -474,7 +477,7 @@ def generate_report(
 
     # Cleanup
     source_val_ds.close()
-    target_query_ds.close()
+    target_eval_ds.close()
 
     report_text = "\n".join(lines)
 
@@ -492,12 +495,20 @@ def main():
     parser = argparse.ArgumentParser(description="Generate rootzone diagnosis report")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint (.pt)")
     parser.add_argument("--target_region", type=str, default="US-R1")
-    parser.add_argument("--K", type=int, default=0)
+    parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
+        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+    parser.add_argument("--K", type=int, default=None,
+        help="Legacy few-shot K value. Ignored for target_full_train.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=str, default=None,
         help="Output markdown path (default: reports/rootzone_diagnosis_{target_region}.md)")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
+
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
 
     output = args.output or f"reports/rootzone_diagnosis_{args.target_region}.md"
 
@@ -507,6 +518,7 @@ def main():
         K=args.K,
         seed=args.seed,
         output_path=output,
+        adaptation_setting=args.adaptation_setting,
         device=args.device,
     )
     print(report)

@@ -2,19 +2,19 @@
 
 ## 1. Baseline-first 原则
 
-在 Forecast-only、mean increment、monthly mean、ridge 没跑通前，不要实现复杂模型。
+在 Forecast-only、source-only、prompt-conditioned shared、adapter/LoRA 没跑通前，不要声称 HyperDA 有主表优势。mean increment、monthly mean、ridge 保留为 internal sanity。
 
 顶会审稿人会先问：
 
 ```text
 这个任务是否比简单 bias correction 难？
-K-date support mean 是否已经足够？
+完整 target_train mean 是否已经足够？
 Ridge 是否能吃掉大部分收益？
 ```
 
 ---
 
-## 2. Phase 3 必须实现的简单 baseline
+## 2. Phase 3/4 baseline ladder
 
 ### forecast
 
@@ -27,13 +27,13 @@ pred_analysis = forecast
 
 用 source fit regions 的平均 increment。
 
-### target_support_mean_increment
+### target_train_mean_increment
 
-K>0 时，用 target support dates 的平均 increment。
+Internal sanity only。用完整 2015-2021 target_train dates 的平均 increment。
 
-### target_monthly_support_increment
+### target_monthly_train_increment
 
-K=12/24 时，用 target support dates 的 monthly increment mean。
+Internal sanity only。用完整 2015-2021 target_train dates 的 monthly increment mean。
 
 ### ridge
 
@@ -74,16 +74,17 @@ Sformer 只能接入我们的 dataset/split/metric，不能沿用合作方 split
 
 ---
 
-## 4. Phase 5 HyRAO
+## 4. Phase 5 HyperDA target adaptation
 
-HyRAO 定义：
+HyperDA 定义：
 
 ```text
-z_r = g_phi(d_r)
-pred_increment = f_theta(x, z_r)
+ζ_R = H_ψ(P_R)
+pred_increment = f_{θ0, ζ_R}(x_R)
 ```
 
-其中 `d_r` 是 input-only region descriptor，包括：
+其中 `P_R` 是 target prompt，可包含 input-side descriptor 和 target_train
+adaptation summaries，包括：
 
 ```text
 forecast climatology
@@ -94,16 +95,16 @@ time coverage statistics
 optional static covariates
 ```
 
-K=0：
+主协议：
 
 ```text
-只用 input-only descriptor 初始化或调制模型。
+使用完整 target_train=2015-2021 构造 target-specific operator / prompt / adapter。
 ```
 
-K>0：
+Legacy few-shot ablation：
 
 ```text
-使用 target support labels 适配 z_r 和少量 region-specific modules。
+K=0/4/12 只作为 secondary ablation，不进入主表。
 ```
 
 ---

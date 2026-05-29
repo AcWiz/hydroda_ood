@@ -37,19 +37,30 @@ CN + AU -> US
 时间协议：
 
 ```text
-source_fit:      2015-2020
-source_val:      2021
-target_context:  2022
-target_query:    2023-2025
+source_fit:      2015-2021
+source_val:      2022
+target_train:    2015-2021
+target_val:      2022
+target_eval:     2023-2025
 ```
 
-K-cycle calibration：
+主协议：
 
 ```text
-K ∈ {0, 4, 12}
+adaptation_setting = target_full_train
 ```
 
+目标域不再只给 K 个 support cycles。HyperDA / adapter / LoRA / prompt 相关方法
+在 source/HyperDA 训练完成后，可以使用 held-out target domain 的完整 2015-2021
+historical target training period 构造 target-specific operator / prompt / adapter / generated
+parameters。2023-2025 target_eval labels 只用于最终离线评估。
+
+旧 K-cycle calibration (`K ∈ {0,4,12}`) 仅作为 secondary few-shot ablation。
 K 表示 labeled target DA analysis cycles，不是 patches/pixels/mini-batches。
+
+主协议 source 覆盖范围保持 `source_fit=2015-2021`、`source_val=2022`。
+2022 继续用于 source-domain checkpoint / early stopping / hyperparameter selection；
+更长 source fit 只能作为 expanded-source secondary ablation。
 
 ## 4. 方法契约
 
@@ -87,8 +98,8 @@ HyperDA-Refine
 
 ```text
 source_mean_increment
-target_support_mean_increment
-monthly_mean_increment
+target_train_mean_increment
+target_monthly_train_increment
 ridge_calibration
 nearest-source specialist
 prompt-weighted specialist
@@ -98,6 +109,6 @@ linear prompt-to-parameter
 
 ## 6. 零泄漏契约
 
-禁止 target query labels 参与 prompt、normalization、support selection、early stopping、model selection、threshold calibration 或 prompt feature tuning。
+禁止 target_eval/query labels 参与 prompt、normalization、target adaptation sample selection、training、early stopping、model selection、threshold calibration 或 prompt feature tuning。
 
 所有涉及时间、region、split、metric 的代码必须通过 `ProtocolConfig` / `LeakageGuard` 或等价机制进行检查。

@@ -2,6 +2,10 @@
 figures/
 artifacts/metrics/
 artifacts/experiments/
+artifacts/runs/
+artifacts/checkpoints/
+artifacts/results/
+artifacts/logs/
 
 # Python
 __pycache__/
@@ -25,9 +29,12 @@ reports/splits/
 
 # Large JSON splits file
 artifacts/splits/US_loro_kdate_splits.json
+artifacts/splits/*.json
+!artifacts/splits/*summary*.json
 
 # Logs
 *.log
+wandb/
 
 # OS
 .DS_Store
@@ -38,3 +45,7 @@ scripts/audit_*.py
 scripts/summarize_*.py
 scripts/plot_*.py
 scripts/visualize_*.py
+
+# Generated metric tables can be very large; keep summaries/reports instead.
+reports/**/metrics_long*.csv
+reports/**/forecast_only_source_val_cross_domain.csv

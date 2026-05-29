@@ -19,13 +19,13 @@
 
 - [ ] US-R1..US-R6 masks 生成。
 - [ ] region quality report 生成。
-- [ ] K-date split manifests 生成。
+- [ ] target_train/target_eval split manifests 生成。
 - [ ] no-leakage split tests 通过。
 
 ## Phase 3 -> Phase 4
 
 - [ ] Forecast baseline 通过 sanity checks。
-- [ ] source mean / target mean / monthly / ridge 已跑通。
+- [ ] source mean / target-train mean / monthly / ridge internal sanity 已跑通。
 - [ ] metrics_long.csv 生成。
 - [ ] simple baseline table 可生成。
 

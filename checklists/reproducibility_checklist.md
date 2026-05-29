@@ -9,4 +9,4 @@
 - [ ] metrics 使用 long-form CSV。
 - [ ] tables 可由脚本重新生成。
 - [ ] failed runs 被显式记录。
-- [ ] 随机 support seeds 固定且可复现。
+- [ ] run seeds 固定且可复现；legacy K-shot ablation 的 support seeds 单独记录。

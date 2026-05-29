@@ -37,7 +37,7 @@ _BASE_VALID_MASK_IDX = 11
 # Data paths
 DA_NC_PATH = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 LABEL_AVAIL_JSON = "artifacts/audits/label_availability_US.json"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 LATLON_NC = "artifacts/geolocation/US_latlon.nc"
 REGIONS_YAML = "specs/regions_v2.yaml"
 OUTPUT_JSON = "artifacts/audits/label_threshold_sensitivity_US.json"
@@ -229,20 +229,20 @@ def compute_sensitivity_tables(
     """
     sensitivity: Dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int))))
 
-    # For each split, classify each query cycle under each threshold combination
+    # For each split, classify each target_eval cycle under each threshold combination.
     for split in splits_data["splits"]:
         target_region_id = split["target_region_id"]
-        K = split["K"]
         seed = split["seed"]
-        split_id = f"{target_region_id}-K{K}-S{seed}"
+        setting = split.get("adaptation_setting", "legacy_few_shot")
+        split_id = f"{target_region_id}-{setting}-S{seed}"
 
-        query_tis = [d["time_index"] for d in split.get("target_query_dates", [])]
-        support_tis = [d["time_index"] for d in split.get("target_support_dates", [])]
+        query_tis = [d["time_index"] for d in split.get("target_eval_dates", split.get("target_query_dates", []))]
+        support_tis = [d["time_index"] for d in split.get("target_train_dates", split.get("target_support_dates", []))]
         source_tis = [d["time_index"] for d in split.get("source_train_dates", [])]
 
         for min_vp in MIN_VALID_PIXELS_VALUES:
             for cov_th in BASE_VALID_MASK_COVERAGE_THRESHOLDS:
-                for role, tis in [("source_train", source_tis), ("target_support", support_tis), ("target_query", query_tis)]:
+                for role, tis in [("source_train", source_tis), ("target_train", support_tis), ("target_eval", query_tis)]:
                     count = 0
                     for ti in tis:
                         if ti not in per_region_stats:
@@ -268,11 +268,11 @@ def compute_split_query_stats(
 
     for split in splits_data["splits"]:
         target_region_id = split["target_region_id"]
-        K = split["K"]
+        K = split.get("K", split.get("K_legacy"))
         seed = split["seed"]
         split_id = f"{target_region_id}-K{K}-S{seed}"
 
-        query_tis = [d["time_index"] for d in split.get("target_query_dates", [])]
+        query_tis = [d["time_index"] for d in split.get("target_eval_dates", split.get("target_query_dates", []))]
 
         valid_pixel_counts = []
         n_with_analysis_label = 0
@@ -397,7 +397,7 @@ def generate_json_report(
                         region_id: table[role][region_id]
                         for region_id in US_REGION_IDS
                     }
-                    for role in ["source_train", "target_support", "target_query"]
+                    for role in ["source_train", "target_train", "target_eval"]
                 }
             }
 
@@ -486,17 +486,17 @@ def generate_markdown_report(
     if key in report["sensitivity_tables"]:
         st = report["sensitivity_tables"][key]["counts"]
         lines.append("")
-        lines.append("| Region | source_train | target_support | target_query |")
+        lines.append("| Region | source_train | target_train | target_eval |")
         lines.append("|--------|-------------|----------------|--------------|")
         for region_id in US_REGION_IDS:
             src = st.get("source_train", {}).get(region_id, 0)
-            sup = st.get("target_support", {}).get(region_id, 0)
-            qry = st.get("target_query", {}).get(region_id, 0)
+            sup = st.get("target_train", {}).get(region_id, 0)
+            qry = st.get("target_eval", {}).get(region_id, 0)
             lines.append(f"| {region_id} | {src:,} | {sup:,} | {qry:,} |")
         lines.append("")
 
-    # Show sensitivity across min_valid_pixels for target_query
-    lines.append("### Sensitivity: target_query cycles by min_valid_pixels (coverage_threshold=0)")
+    # Show sensitivity across min_valid_pixels for target_eval.
+    lines.append("### Sensitivity: target_eval cycles by min_valid_pixels (coverage_threshold=0)")
     lines.append("")
     lines.append("| Region | K | S0 | S1 | S2 | S3 | S4 | S5 | S6 | S7 | S8 | S9 |")
     lines.append("|--------|---|----|----|----|----|----|----|----|----|----|----|")

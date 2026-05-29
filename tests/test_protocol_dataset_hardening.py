@@ -34,7 +34,7 @@ from hydroda.splits.manifest import create_split_manifest, validate_no_leakage
 from hydroda.evaluation.harness import evaluate_split
 
 # ── Paths for data-dependent tests ──
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 MAIN_CONFIG = "configs/model_resunet_main.yaml"
 SMOKE_CONFIG = "configs/model_resunet_smoke.yaml"
 
@@ -47,26 +47,34 @@ class TestProtocolV4DateRanges:
     def test_source_fit_range(self):
         p = ProtocolConfig()
         assert str(p.source_fit.start) == "2015-01-01"
-        assert str(p.source_fit.end) == "2020-12-31"
+        assert str(p.source_fit.end) == "2021-12-31"
         assert p.source_fit.contains("2018-06-15")
-        assert not p.source_fit.contains("2021-01-01")
+        assert p.source_fit.contains("2021-01-01")
+        assert not p.source_fit.contains("2022-01-01")
         assert not p.source_fit.contains("2014-12-31")
 
     def test_source_val_range(self):
         p = ProtocolConfig()
-        assert str(p.source_val.start) == "2021-01-01"
-        assert str(p.source_val.end) == "2021-12-31"
-        assert p.source_val.contains("2021-06-15")
-        assert not p.source_val.contains("2020-12-31")
-        assert not p.source_val.contains("2022-01-01")
+        assert str(p.source_val.start) == "2022-01-01"
+        assert str(p.source_val.end) == "2022-12-31"
+        assert p.source_val.contains("2022-06-15")
+        assert not p.source_val.contains("2021-12-31")
+        assert not p.source_val.contains("2023-01-01")
 
     def test_target_context_range(self):
         p = ProtocolConfig()
-        assert str(p.target_context.start) == "2022-01-01"
-        assert str(p.target_context.end) == "2022-12-31"
+        assert str(p.target_context.start) == "2015-01-01"
+        assert str(p.target_context.end) == "2021-12-31"
+        assert str(p.target_train.start) == "2015-01-01"
+        assert str(p.target_train.end) == "2021-12-31"
+        assert str(p.target_val.start) == "2022-01-01"
+        assert str(p.target_val.end) == "2022-12-31"
 
     def test_target_query_range(self):
         p = ProtocolConfig()
+        assert str(p.target_eval.start) == "2023-01-01"
+        assert str(p.target_eval.end) == "2025-12-31"
+        assert p.target_eval.contains("2023-06-15")
         assert str(p.target_query.start) == "2023-01-01"
         assert str(p.target_query.end) == "2025-12-31"
         assert p.target_query.contains("2023-06-15")
@@ -77,20 +85,21 @@ class TestProtocolV4DateRanges:
     def test_role_for_date(self):
         p = ProtocolConfig()
         assert p.role_for_date("2019-06-01") == "source_fit"
-        assert p.role_for_date("2021-03-15") == "source_val"
-        assert p.role_for_date("2022-07-01") == "target_context"
-        assert p.role_for_date("2024-12-01") == "target_query"
+        assert p.role_for_date("2021-03-15") == "source_fit"
+        assert p.role_for_date("2022-07-01") == "source_val"
+        assert p.role_for_date("2024-12-01") == "target_eval"
         assert p.role_for_date("2014-01-01") == "outside_protocol"
 
-    def test_K_values(self):
+    def test_adaptation_setting_replaces_main_K_values(self):
         p = ProtocolConfig()
-        p.assert_supported_K(0)
-        p.assert_supported_K(4)
-        p.assert_supported_K(12)
+        p.assert_supported_adaptation_setting("target_full_train")
+        p.assert_legacy_few_shot_K(0)
+        p.assert_legacy_few_shot_K(4)
+        p.assert_legacy_few_shot_K(12)
         with pytest.raises(ValueError):
-            p.assert_supported_K(1)
+            p.assert_supported_K(4)
         with pytest.raises(ValueError):
-            p.assert_supported_K(24)
+            p.assert_legacy_few_shot_K(24)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -108,7 +117,7 @@ class TestSplitManifestSourceValDates:
                 {"time_index": 0, "date_str": "2019-01-15", "datetime_str": "2019-01-15T00:00:00Z"},
             ],
             source_val_dates=[
-                {"time_index": 100, "date_str": "2021-03-15", "datetime_str": "2021-03-15T00:00:00Z"},
+                {"time_index": 100, "date_str": "2022-03-15", "datetime_str": "2022-03-15T00:00:00Z"},
             ],
             support_dates=[],
             query_dates=[
@@ -117,7 +126,7 @@ class TestSplitManifestSourceValDates:
         )
         assert "source_val_dates" in manifest
         assert len(manifest["source_val_dates"]) == 1
-        assert manifest["source_val_dates"][0]["date_str"] == "2021-03-15"
+        assert manifest["source_val_dates"][0]["date_str"] == "2022-03-15"
         assert manifest["source_val_cycle_count"] == 1
 
     def test_create_manifest_defaults_to_empty_val_dates(self):
@@ -156,13 +165,13 @@ class TestSplitManifestSourceValDates:
             )
 
     @pytest.mark.skipif(not os.path.exists(SPLITS_JSON), reason="No splits JSON available")
-    def test_source_val_dates_are_2021(self):
+    def test_source_val_dates_are_2022(self):
         with open(SPLITS_JSON) as f:
             data = json.load(f)
         for split in data["splits"]:
             for d in split.get("source_val_dates", []):
-                assert d["date_str"].startswith("2021"), (
-                    f"source_val date {d['date_str']} is not in 2021 for "
+                assert d["date_str"].startswith("2022"), (
+                    f"source_val date {d['date_str']} is not in 2022 for "
                     f"{split['target_region_id']}-K{split['K']}-S{split['seed']}"
                 )
 
@@ -289,15 +298,15 @@ class TestNormalizationUsesActiveSourceRegionOnly:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Test 6: Target query not used for normalization
+# Test 6: Target eval not used for normalization
 # ═══════════════════════════════════════════════════════════════════
 
-class TestTargetQueryNotUsedForNormalization:
-    def test_role_for_query_date_is_target_query(self):
+class TestTargetEvalNotUsedForNormalization:
+    def test_role_for_eval_date_is_target_eval(self):
         p = ProtocolConfig()
-        assert p.role_for_date("2023-06-15") == "target_query"
-        assert p.role_for_date("2024-12-01") == "target_query"
-        assert p.role_for_date("2025-01-01") == "target_query"
+        assert p.role_for_date("2023-06-15") == "target_eval"
+        assert p.role_for_date("2024-12-01") == "target_eval"
+        assert p.role_for_date("2025-01-01") == "target_eval"
 
     def test_normalization_scope_rejects_query(self):
         guard = LeakageGuard(ProtocolConfig())
@@ -308,7 +317,7 @@ class TestTargetQueryNotUsedForNormalization:
     def test_source_val_not_allowed_for_normalization(self):
         guard = LeakageGuard(ProtocolConfig())
         with pytest.raises(ValueError):
-            guard.check_normalization_scope(["2021-06-15"], scope_name="source_fit_only")
+            guard.check_normalization_scope(["2022-06-15"], scope_name="source_fit_only")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -431,6 +440,7 @@ class TestEvaluateCheckpointMaxSamples:
                     "increment_surface": np.zeros((4, 4), dtype=np.float32),
                     "increment_rootzone": np.zeros((4, 4), dtype=np.float32),
                     "metric_mask": np.ones((4, 4), dtype=np.float32),
+                    "latitude_weight": np.ones((4, 4), dtype=np.float32),
                     "date_str": f"2023-01-{idx+1:02d}" if idx < 31 else "2023-02-01",
                     "time_index": idx,
                     "month": 1,
@@ -464,7 +474,7 @@ class TestEvaluateCheckpointMaxSamples:
         assert len(rows_limited) < len(rows_all)
 
         # Check unique query_dates: at most 10
-        dates = set(r["query_date"] for r in rows_limited)
+        dates = {r["query_date"] for r in rows_limited if r["query_date"] != "global"}
         assert len(dates) <= 10
 
     def test_max_samples_none_evaluates_all(self):
@@ -494,6 +504,7 @@ class TestEvaluateCheckpointMaxSamples:
                     "increment_surface": np.zeros((2, 2), dtype=np.float32),
                     "increment_rootzone": np.zeros((2, 2), dtype=np.float32),
                     "metric_mask": np.ones((2, 2), dtype=np.float32),
+                    "latitude_weight": np.ones((2, 2), dtype=np.float32),
                     "date_str": f"2023-01-0{idx+1}",
                     "time_index": idx,
                     "month": 1,

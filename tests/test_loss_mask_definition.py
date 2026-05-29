@@ -1,4 +1,4 @@
-"""Test loss_mask definition: active_region_mask AND base_valid_mask AND finite conditions."""
+"""Test loss_mask definition: active_region_mask AND finite label conditions."""
 
 import numpy as np
 import pytest
@@ -12,7 +12,7 @@ MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 
 
 class TestLossMaskDefinition:
-    """Verify loss_mask = active_region_mask AND base_valid_mask AND finite conditions."""
+    """Verify loss_mask = active_region_mask AND label_valid_mask."""
 
     @pytest.fixture
     def ds(self):
@@ -41,12 +41,15 @@ class TestLossMaskDefinition:
         # Where active_region_mask is 0, loss_mask should also be 0
         assert (lm[active == 0] == 0).all()
 
-    def test_loss_mask_zeros_where_base_valid_mask_zero(self, ds):
+    def test_loss_mask_does_not_depend_on_base_valid_mask(self, ds):
         sample = ds[0]
         bvm = sample["base_valid_mask"]
         lm = sample["loss_mask"]
-        # Where base_valid_mask is 0, loss_mask should also be 0
-        assert (lm[bvm == 0] == 0).all()
+        expected = np.logical_and(sample["active_region_mask"] > 0.5, sample["label_valid_mask"] > 0.5).astype(np.float32)
+        np.testing.assert_array_equal(lm, expected)
+
+        # Channel 11 is a diagnostic coverage mask, not a loss/metric gate.
+        assert np.any((bvm == 0) & (lm == 1))
 
     def test_loss_mask_zeros_where_forecast_surface_nonfinite(self, ds):
         sample = ds[0]

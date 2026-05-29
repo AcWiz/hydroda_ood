@@ -2,15 +2,15 @@
 """Train region-specific source-only SmallResUNet backbone.
 
 Each region (R1-R6) gets its own model trained ONLY on that region's source_fit
-data (2015-2020). After training, auto-evaluates on source_val (2021) and
-target_query (2023-2025) for that specific region.
+data (2015-2021). After training, auto-evaluates on source_val (2022) and
+target_eval (2023-2025) for that specific region.
 
 This is NOT a LORO (leave-one-region-out) model — the model sees only the
 target region's own data, providing a region-specific baseline.
 
 Usage:
     PYTHONPATH=. python scripts/train/train_source_only_region_specific.py \\
-        --target_region US-R1 --K 0 --seed 0 \\
+        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
         --max_epochs 30 --batch_size 2 --lr 1e-3 \\
         --device cuda --amp \\
         --config configs/model_resunet_main.yaml
@@ -18,9 +18,9 @@ Usage:
 No-leakage declaration:
     - Only source_fit split used for training
     - Normalization stats from source_fit only
-    - No target_query labels used in training/normalization/early_stopping
+    - No target_eval/target_query labels used in training/normalization/early_stopping
     - No target prompt used
-    - Post-training evaluation uses target_query labels only for metric computation
+    - Post-training evaluation uses target_eval/target_query labels only for metric computation
 """
 from __future__ import annotations
 
@@ -47,9 +47,9 @@ from hydroda.utils.runtime import gather_runtime_info
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 PHASE = "phase4_source_only_region_specific"
 
 # Use US-R1 for split manifest lookup (has the most date coverage).
@@ -62,8 +62,10 @@ def parse_args():
     # Data
     parser.add_argument("--target_region", type=str, required=True,
         help="Target region, e.g. US-R1")
+    parser.add_argument("--adaptation_setting", type=str, default=None,
+        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
     parser.add_argument("--K", type=int, default=None,
-        help="K value for split (default from YAML or 0)")
+        help="Legacy few-shot K value. Ignored for target_full_train.")
     parser.add_argument("--seed", type=int, default=None,
         help="Seed for split (default from YAML or 0)")
     # Model
@@ -140,7 +142,7 @@ def parse_args():
         help="Amplitude penalty weight (0=disabled, default: 0.0)")
     # Post-training evaluation
     parser.add_argument("--skip_post_train_eval", action="store_true",
-        help="Skip post-training evaluation on source_val and target_query")
+        help="Skip post-training evaluation on source_val and target_eval")
 
     # First pass: check if --config is provided
     preliminary_args, _ = parser.parse_known_args()
@@ -163,6 +165,7 @@ def parse_args():
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "num_workers": "num_workers",
+        "adaptation_setting": "adaptation_setting",
         "K": "K",
         "seed": "seed",
         "zero_raw_increment_init": "zero_raw_increment_init",
@@ -173,8 +176,8 @@ def parse_args():
             parser.set_defaults(**{arg_key: yaml_defaults[yaml_key]})
 
     # Set hard-coded fallback defaults for required params not in YAML
-    if parser.get_default("K") is None:
-        parser.set_defaults(K=0)
+    if parser.get_default("adaptation_setting") is None:
+        parser.set_defaults(adaptation_setting="target_full_train")
     if parser.get_default("seed") is None:
         parser.set_defaults(seed=0)
     if parser.get_default("width") is None:
@@ -193,6 +196,11 @@ def parse_args():
         parser.set_defaults(num_workers=0)
 
     args = parser.parse_args()
+
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
 
     # Map --target_normalization_mode to underlying flags
     if args.target_normalization_mode is not None:
@@ -221,9 +229,10 @@ def _run_post_train_evaluation(
     region_id: str,
     device: str,
     run_manager: RunManager,
-    K: int,
+    K: int | None,
     seed: int,
     split_type: str,
+    adaptation_setting: str,
 ) -> None:
     """Evaluate best checkpoint on a specific split for a specific region.
 
@@ -232,9 +241,9 @@ def _run_post_train_evaluation(
         region_id: The region to evaluate (e.g. US-R1).
         device: Torch device string.
         run_manager: RunManager for output paths.
-        K: K value for split lookup.
+        K: Legacy K value for split lookup.
         seed: Seed for split lookup.
-        split_type: "source_val" or "target_query".
+        split_type: "source_val" or "target_eval"/"target_query".
     """
     print(f"\n{'=' * 60}")
     print(f"Post-training evaluation: {split_type} for {region_id}")
@@ -255,7 +264,7 @@ def _run_post_train_evaluation(
 
     # For source_val: use _SPLIT_LOOKUP_REGION for split manifest lookup,
     # then restrict pixels to the specific region.
-    # For target_query: use region_id directly as the target region.
+    # For target_eval/target_query: use region_id directly as the target region.
     if split_type == "source_val":
         target_region_for_lookup = _SPLIT_LOOKUP_REGION
     else:
@@ -269,6 +278,7 @@ def _run_post_train_evaluation(
         split_type=split_type,
         K=K,
         seed=seed,
+        adaptation_setting=adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     dataset.set_active_region(region_id)
@@ -325,7 +335,7 @@ def main():
     print("=" * 60)
     print("Phase 4: Region-Specific Source-Only Baseline")
     print(f"  training ONLY on {region_id} data")
-    print(f"  K={args.K}  seed={args.seed}")
+    print(f"  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
     print(f"  device={device}  width={args.width}  amp={args.amp}")
     print("=" * 60)
@@ -339,6 +349,7 @@ def main():
     # Build config for RunManager
     run_config = {
         "target_region": region_id,
+        "adaptation_setting": args.adaptation_setting,
         "K": args.K,
         "seed": args.seed,
         "width": args.width,
@@ -427,7 +438,7 @@ def main():
         print(f"  checkpoint epoch={ckpt['epoch']}  best_loss={ckpt.get('best_loss', 'N/A')}")
         print(f"  resuming from epoch {resumed_epoch} ({resumed_epoch} already completed)")
 
-    # Create source_fit dataset (2015-2020, restricted to the specific region)
+    # Create source_fit dataset (2015-2021, restricted to the specific region)
     print(f"\nLoading source_fit dataset...")
     train_dataset = HydroDADataset(
         da_nc_path=DA_NC,
@@ -437,6 +448,7 @@ def main():
         split_type="source_fit",
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     train_dataset.set_active_region(region_id)
@@ -448,14 +460,14 @@ def main():
         dates = [d.get("date_str", "") for d in train_dataset._date_records]
         years = sorted(set(d[:4] for d in dates if len(d) >= 4))
         print(f"  source_fit years: {years}")
-        post_2020 = [y for y in years if int(y) > 2020]
-        if post_2020:
+        post_2021 = [y for y in years if int(y) > 2021]
+        if post_2021:
             raise RuntimeError(
-                f"LEAKAGE: source_fit contains post-2020 dates: {post_2020}. "
-                f"All source_fit dates must be 2015-2020."
+                f"LEAKAGE: source_fit contains post-2021 dates: {post_2021}. "
+                f"All source_fit dates must be 2015-2021."
             )
 
-    # Create source_val dataset (2021, restricted to the specific region)
+    # Create source_val dataset (2022, restricted to the specific region)
     print(f"\nLoading source_val dataset...")
     source_val_dataset = HydroDADataset(
         da_nc_path=DA_NC,
@@ -465,6 +477,7 @@ def main():
         split_type="source_val",
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     source_val_dataset.set_active_region(region_id)
@@ -475,11 +488,11 @@ def main():
         dates = [d.get("date_str", "") for d in source_val_dataset._date_records]
         years = sorted(set(d[:4] for d in dates if len(d) >= 4))
         print(f"  source_val years: {years}")
-        non_2021 = [y for y in years if int(y) != 2021]
-        if non_2021:
+        non_2022 = [y for y in years if int(y) != 2022]
+        if non_2022:
             raise RuntimeError(
-                f"LEAKAGE: source_val contains non-2021 dates: {non_2021}. "
-                f"All source_val dates must be 2021."
+                f"LEAKAGE: source_val contains non-2022 dates: {non_2022}. "
+                f"All source_val dates must be 2022."
             )
 
     if len(source_val_dataset) == 0:
@@ -615,7 +628,7 @@ def main():
         # Use safe_score checkpoint if available, otherwise best.pt
         eval_checkpoint = safe_ckpt if safe_ckpt.exists() else best_ckpt
 
-        # Evaluate on source_val (2021)
+        # Evaluate on source_val (2022)
         _run_post_train_evaluation(
             checkpoint_path=eval_checkpoint,
             region_id=region_id,
@@ -624,9 +637,10 @@ def main():
             K=args.K,
             seed=args.seed,
             split_type="source_val",
+            adaptation_setting=args.adaptation_setting,
         )
 
-        # Evaluate on target_query (2023-2025)
+        # Evaluate on target_eval (2023-2025; target_query remains an alias).
         _run_post_train_evaluation(
             checkpoint_path=eval_checkpoint,
             region_id=region_id,
@@ -634,7 +648,8 @@ def main():
             run_manager=run_manager,
             K=args.K,
             seed=args.seed,
-            split_type="target_query",
+            split_type="target_eval",
+            adaptation_setting=args.adaptation_setting,
         )
     else:
         print(f"\n  Skipping post-training evaluation (--skip_post_train_eval)")

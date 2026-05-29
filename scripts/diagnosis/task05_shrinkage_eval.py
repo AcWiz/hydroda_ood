@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Task 5: Conservative shrinkage evaluation.
 
-Loads the source-only nonorm checkpoint, evaluates on source_val and target_query
+Loads the source-only nonorm checkpoint, evaluates on source_val and target_eval
 with alpha ∈ {0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0}.
 
 alpha=0.0 = zero-increment = forecast-only baseline.
@@ -26,7 +26,7 @@ ARTIFACTS_DIR = REPO_ROOT / "artifacts" / "source_only_rootzone_diagnosis"
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = str(REPO_ROOT / "artifacts" / "regions" / "US_region_masks.nc")
-SPLITS_JSON = str(REPO_ROOT / "artifacts" / "splits" / "US_loro_kdate_splits.json")
+SPLITS_JSON = str(REPO_ROOT / "artifacts" / "splits" / "US_loro_target_train_splits.json")
 FREEZE_MANIFEST = str(REPO_ROOT / "artifacts" / "protocol" / "US_region_split_freeze_manifest.json")
 
 CHECKPOINT = str(REPO_ROOT / "artifacts" / "runs" / "phase4_source_only"
@@ -158,7 +158,7 @@ def main():
     predictor = SourceOnlyBackbonePredictor(checkpoint_path=CHECKPOINT, device=DEVICE)
 
     all_dfs = []
-    for split_type in ["source_val", "target_query"]:
+    for split_type in ["source_val", "target_eval"]:
         print(f"\n--- {split_type} ---")
         dataset = HydroDADataset(
             da_nc_path=DA_NC,
@@ -234,7 +234,7 @@ def main():
         "|------:|-------------:|------------:|------------:|--------------:|-------------:|-------------:|",
     ])
 
-    tq = combined[combined["split"] == "target_query"]
+    tq = combined[combined["split"] == "target_eval"]
     for alpha in ALPHAS:
         s_row = tq[(tq["variable"] == "surface") & (tq["alpha"] == alpha)]
         r_row = tq[(tq["variable"] == "rootzone") & (tq["alpha"] == alpha)]
@@ -255,7 +255,7 @@ def main():
         "| Split       | Variable  | Best Alpha | Best Skill |",
         "|:------------|:----------|----------:|----------:|",
     ])
-    for split_name in ["source_val", "target_query"]:
+    for split_name in ["source_val", "target_eval"]:
         for var in ["surface", "rootzone"]:
             sub = combined[(combined["split"] == split_name) & (combined["variable"] == var)]
             best_idx = sub["skill_mean"].idxmax()

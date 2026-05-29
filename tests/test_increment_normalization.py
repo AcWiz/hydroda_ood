@@ -56,6 +56,7 @@ def test_increment_stats_match_source_distribution():
         target_increment_normalization=True,
         max_epochs=1,
         batch_size=4,
+        device="cpu",
     )
 
     # Trainer should have computed increment stats
@@ -82,6 +83,7 @@ def test_increment_stats_not_used_when_disabled():
         target_increment_normalization=False,
         max_epochs=1,
         batch_size=4,
+        device="cpu",
     )
 
     assert trainer._inc_mean is None, "inc_mean should be None when normalization disabled"
@@ -101,6 +103,7 @@ def test_increment_normalization_in_checkpoint():
         max_epochs=1,
         batch_size=4,
         checkpoint_dir="/tmp/test_ckpt_incr",
+        device="cpu",
     )
 
     # Save checkpoint
@@ -143,6 +146,7 @@ def test_checkpoint_round_trip_zero_raw_init():
         max_epochs=1,
         batch_size=4,
         checkpoint_dir="/tmp/test_ckpt_zri",
+        device="cpu",
     )
 
     # Verify zero_raw_increment_init is set

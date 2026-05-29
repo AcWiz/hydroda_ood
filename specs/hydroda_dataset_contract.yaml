@@ -113,9 +113,9 @@ mask_semantics:
       - region_mask
       - static_land_mask
       - loss_mask
-    phase1_usage:
-      - loss_mask (initial, via base_valid_mask)
-      - metric_mask (initial, via base_valid_mask)
+    current_usage:
+      - diagnostic coverage field only
+      - not used as a loss_mask or metric_mask gate
     blocking_for_phase1: "Cannot definitively assign obs/region/loss semantics; base_valid_mask is interim name"
 
 # =============================================================================
@@ -153,9 +153,12 @@ normalization:
   default_input_stats_source: source_train_only
   default_increment_stats_source: source_train_only
   forbidden_stats_sources:
-    - target_query_labels
-    - target_query_analysis
-    - target_query_increment
+    - target_eval_labels
+    - target_eval_analysis
+    - target_eval_increment
+    - target_query_labels  # deprecated alias
+    - target_query_analysis  # deprecated alias
+    - target_query_increment  # deprecated alias
     - analysis_increments
     - model_errors
 

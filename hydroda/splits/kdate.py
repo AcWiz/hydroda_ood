@@ -1,7 +1,10 @@
-"""K-Date Selection Utilities for Leave-One-Region-Out Splits.
+"""Target-train and legacy K-date selection utilities for Leave-One-Region-Out splits.
 
 No-leakage declaration:
-    Support dates are selected ONLY via:
+    Main target-train dates are selected by the frozen target training period
+    (2022) and data availability, not by model outcomes.
+
+    Legacy few-shot support dates are selected ONLY via:
     - Calendar constraints (quarter/month/half-month rules)
     - Time availability in 2022
     - base_valid_mask coverage threshold
@@ -68,8 +71,29 @@ def select_support_dates_k0(
     available_dates: List[Tuple[int, datetime]],
     seed: int,
 ) -> List[Tuple[int, datetime]]:
-    """K=0: Zero support dates. No adaptation from target support."""
+    """Legacy K=0: zero support dates. No target-train labels."""
     return []
+
+
+def select_target_full_train_dates(
+    available_dates: List[Tuple[int, datetime]],
+    valid_mask: np.ndarray | None = None,
+) -> List[Tuple[int, datetime]]:
+    """Full target-train adaptation: use all target training dates.
+
+    Args:
+        available_dates: List of (time_index, datetime) candidates from the
+            target training period.
+        valid_mask: Optional boolean mask. If provided, false entries are
+            excluded by data-availability rules only; no label values or query
+            statistics are consulted.
+
+    Returns:
+        All selected (time_index, datetime) tuples in chronological order.
+    """
+    if valid_mask is None:
+        return list(available_dates)
+    return [(idx, dt) for (idx, dt), is_valid in zip(available_dates, valid_mask) if is_valid]
 
 
 def select_support_dates_k4(
@@ -77,7 +101,7 @@ def select_support_dates_k4(
     valid_mask: np.ndarray,
     seed: int,
 ) -> List[Tuple[int, datetime]]:
-    """K=4: Select one valid date per quarter (one per season)."""
+    """Legacy K=4: select one valid date per quarter (one per season)."""
     rng = np.random.RandomState(seed)
     selected = []
     for q in [1, 2, 3, 4]:
@@ -98,7 +122,7 @@ def select_support_dates_k12(
     valid_mask: np.ndarray,
     seed: int,
 ) -> List[Tuple[int, datetime]]:
-    """K=12: Select one valid date per month."""
+    """Legacy K=12: select one valid date per month."""
     rng = np.random.RandomState(seed)
     selected = []
     for m in range(1, 13):
@@ -118,7 +142,7 @@ def select_support_dates_k24(
     valid_mask: np.ndarray,
     seed: int,
 ) -> List[Tuple[int, datetime]]:
-    """K=24: Select one valid date per half-month."""
+    """Legacy K=24: select one valid date per half-month."""
     rng = np.random.RandomState(seed)
     selected = []
     for m in range(1, 13):
@@ -155,7 +179,7 @@ def get_support_dates_for_K(
     Args:
         available_dates: List of (time_index, datetime) in support year
         valid_mask: Boolean array of which dates are valid
-        K: Number of support dates for main experiments (0, 4, or 12)
+        K: Number of support dates for legacy few-shot ablations (0, 4, 12, or 24)
         seed: Random seed
 
     Returns:

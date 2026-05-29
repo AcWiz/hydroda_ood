@@ -28,25 +28,34 @@ prompt:
   forbidden_features:
     - continent_embedding_for_main
     - regime_id_for_main
-    - target_query_statistics
-    - target_query_labels
+    - target_eval_statistics
+    - target_eval_labels
+    - target_query_statistics  # deprecated alias
+    - target_query_labels  # deprecated alias
 
 variants:
-  HyperDA_Zero:
-    labels: none
-    prompt: target_2022_input_side_spatial_temporal_prompt
-  HyperDA_Calib:
-    labels: K_labeled_2022_calibration_cycles
-    K: [4, 12]
-    prompt: input_side_prompt_plus_calibration_summary_tokens
-  HyperDA_Refine:
-    initialization: HyperDA_generated_zeta
+  HyperDA_FullTargetTrain:
+    labels: all_labeled_target_train_cycles_2015_2021
+    prompt: target_2015_2021_input_side_spatial_temporal_prompt_plus_full_train_summary_tokens
+    generated_parameters: target_specific_lightweight_operator
+  HyperDA_Refine_FullTargetTrain:
+    initialization: HyperDA_generated_zeta_from_full_target_train_prompt
     frozen:
       - theta0
       - H_psi
     trainable:
       - zeta_R_only
-    steps: [10, 50]
+    adaptation_data: full_target_train_2015_2021
+    steps: fixed_pre_registered
+  legacy_HyperDA_Zero:
+    status: secondary_few_shot_ablation
+    labels: none
+    prompt: target_input_side_spatial_temporal_prompt
+  legacy_HyperDA_Calib:
+    status: secondary_few_shot_ablation
+    labels: K_labeled_target_train_calibration_cycles
+    K: [4, 12]
+    prompt: input_side_prompt_plus_calibration_summary_tokens
 
 loss:
   DA_loss: masked_balanced_Huber

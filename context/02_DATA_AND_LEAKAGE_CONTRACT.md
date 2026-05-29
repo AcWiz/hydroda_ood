@@ -61,7 +61,9 @@ forecast/raw analysis 必须保留 raw physical units。
 increment_raw = analysis_raw - forecast_raw。
 ```
 
-如果模型使用 normalized target，应额外保存 target stats，并保证 stats 只来自 source fit 或 allowed support。
+如果模型使用 normalized target，应额外保存 target stats。主协议 global normalization
+只能来自 source fit；target_train labels 可用于 target-specific adaptation loss，
+但不能隐式改变全局 normalization，除非注册为单独方法变体。
 
 ---
 
@@ -104,12 +106,14 @@ input_stats      来自 source fit only
 increment_stats  来自 source fit only
 ```
 
-K>0 adaptation 可以使用 target support labels 计算 adaptation loss，但不要用 support stats 改变全局 normalization，除非该行为被明确记录为一个方法变体。
+target_full_train adaptation 可以使用 2015-2021 target_train labels 计算 adaptation
+loss、prompt summary 或 generated-parameter calibration，但不要用 target_train
+stats 改变全局 normalization，除非该行为被明确记录为一个方法变体。
 
 禁止：
 
 ```text
-使用 target query years 计算任何 normalization statistics
+使用 target_eval/query years 计算任何 normalization statistics
 ```
 
 ---

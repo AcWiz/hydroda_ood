@@ -4,7 +4,7 @@ No-leakage declaration:
     - Uses trained SmallResUNet checkpoint (source_train only, no target labels)
     - No target prompt used in prediction
     - prediction uses only input features and learned weights
-    - metric computation uses target_query labels post-prediction only
+    - metric computation uses target_eval/query labels post-prediction only
 """
 from __future__ import annotations
 

@@ -8,7 +8,12 @@ and calls a Python training/evaluation entry point under `scripts/train/` or `sc
 | Script | Description | Python Entry | Phase |
 |--------|-------------|-------------|-------|
 | `phase4_source_only.sh` | Train source-only backbone on a US region | `scripts/train/train_source_only_backbone.py` | 4 |
-| `phase5_prompt.sh` | Train prompt-conditioned shared backbone | `scripts/train/train_prompt_conditioned_shared.py` | 5 |
+| `phase4_source_only_all_regions.sh` | Train source-only backbone on all US regions | `scripts/train/train_source_only_all_regions.py` | 4 |
+| `phase4_source_only_all_regions_eval.sh` | Evaluate all-region source-only checkpoint by region | `scripts/eval/eval_source_only_all_regions.py` | 4 |
+| `phase4_source_only_region_specific.sh` | Train a region-specific source-only backbone | `scripts/train/train_source_only_region_specific.py` | 4 |
+| `phase4_source_only_inference.sh` | Evaluate a source-only checkpoint | `scripts/eval/evaluate_checkpoint.py` | 4 |
+| `phase4_prompt_conditioned.sh` | Train prompt-conditioned shared backbone | `scripts/train/train_prompt_conditioned_shared.py` | 4 |
+| `phase4_prompt_conditioned_inference.sh` | Evaluate prompt-conditioned checkpoint | `scripts/eval/evaluate_checkpoint.py` | 4 |
 
 ## Usage
 

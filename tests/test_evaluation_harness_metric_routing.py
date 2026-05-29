@@ -14,6 +14,7 @@ class TinyDataset:
             "increment_surface": np.ones((2, 2), dtype=np.float32),
             "increment_rootzone": np.ones((2, 2), dtype=np.float32) * 2,
             "metric_mask": np.ones((2, 2), dtype=np.float32),
+            "latitude_weight": np.ones((2, 2), dtype=np.float32),
             "date_str": "2022-01-01",
             "month": 1,
             "season": "DJF",

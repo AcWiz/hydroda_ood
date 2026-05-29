@@ -335,29 +335,34 @@ def verify_frozen_splits(
     all_stats: List[TimestampStats],
     labeled_cycles: Set[int],
 ) -> List[SplitVerificationResult]:
-    """Verify all 240 frozen splits against label availability.
+    """Verify frozen target-full-train or legacy K-date splits against label availability.
 
     Args:
-        splits_data: Loaded JSON from US_loro_kdate_splits.json
+        splits_data: Loaded split JSON.
         all_stats: List of TimestampStats for all timestamps
         labeled_cycles: Set of labeled time indices
 
     Returns:
-        List of SplitVerificationResult for all 240 splits
+        List of SplitVerificationResult for all splits.
     """
     # Build time_index -> stats lookup
     stats_map = {s.time_index: s for s in all_stats}
 
     results = []
     for split in splits_data["splits"]:
-        split_id = (
-            f"{split['target_region_id']}-K{split['K']}-S{split['seed']}"
-        )
+        setting = split.get("adaptation_setting", "legacy_few_shot")
+        split_id = f"{split['target_region_id']}-{setting}-S{split['seed']}"
 
-        # Support dates
-        support_tis = [d["time_index"] for d in split.get("target_support_dates", [])]
-        # Query dates
-        query_tis = [d["time_index"] for d in split.get("target_query_dates", [])]
+        # Target train/adaptation dates (legacy target_support_dates fallback).
+        support_tis = [
+            d["time_index"]
+            for d in split.get("target_train_dates", split.get("target_support_dates", []))
+        ]
+        # Target evaluation dates (legacy target_query_dates fallback).
+        query_tis = [
+            d["time_index"]
+            for d in split.get("target_eval_dates", split.get("target_query_dates", []))
+        ]
 
         # Count support stats
         support_labeled = sum(1 for ti in support_tis if ti in labeled_cycles)
@@ -390,7 +395,7 @@ def verify_frozen_splits(
         results.append(SplitVerificationResult(
             split_id=split_id,
             target_region_id=split["target_region_id"],
-            K=split["K"],
+            K=split.get("K", split.get("K_legacy")),
             seed=split["seed"],
             support_total=len(support_tis),
             support_labeled_count=support_labeled,

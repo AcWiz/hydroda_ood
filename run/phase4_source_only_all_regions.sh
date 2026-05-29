@@ -1,6 +1,6 @@
 #!/bin/bash
 # Phase 4 extension: Source-only all-regions baseline
-# Trains on ALL US-R1..R6 (2015-2020), reports per-region source_val (2021)
+# Trains on ALL US-R1..R6 (2015-2021), reports per-region source_val (2022)
 #
 # Usage:
 #   bash run/phase4_source_only_all_regions.sh          # default: K=0 seed=0

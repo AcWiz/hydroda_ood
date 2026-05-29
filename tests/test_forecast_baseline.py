@@ -168,6 +168,7 @@ class TestMetricsSkill:
                     "increment_surface": np.ones((4, 4), dtype=np.float32) * 0.05,
                     "increment_rootzone": np.ones((4, 4), dtype=np.float32) * 0.05,
                     "metric_mask": np.ones((4, 4), dtype=np.float32),
+                    "latitude_weight": np.ones((4, 4), dtype=np.float32),
                     "country_id": "US",
                     "target_region_id": "US-R1",
                     "active_region_ids": ["US-R2", "US-R3"],

@@ -1,8 +1,8 @@
 """Tests for RidgeBaseline with three feature sets.
 
 No-leakage declaration:
-    - Fit on target_support only
-    - No target_query labels used in fitting
+    - Fit on target_train only
+    - No target_eval/query labels used in fitting
     - metric_mask applied before computing targets
 """
 
@@ -60,7 +60,7 @@ class TestFeatureSets:
 class TestRidgeBaseline:
     """Tests for RidgeBaseline."""
 
-    def _make_sample(self, inc_s, inc_r, month_str="2021-06-15"):
+    def _make_sample(self, inc_s, inc_r, month_str="2022-06-15"):
         """Create a synthetic sample dict."""
         H, W = inc_s.shape
         x = np.zeros((12, H, W), dtype=np.float32)
@@ -90,7 +90,7 @@ class TestRidgeBaseline:
         for frac in [0.8, 1.0, 1.2]:
             inc_s = np.ones((8, 10)) * frac * 0.1
             inc_r = np.ones((8, 10)) * frac * 0.05
-            samples.append(self._make_sample(inc_s, inc_r, "2021-06-15"))
+            samples.append(self._make_sample(inc_s, inc_r, "2022-06-15"))
 
         baseline.fit(samples)
         assert baseline._fitted is True
@@ -99,7 +99,7 @@ class TestRidgeBaseline:
         query = self._make_sample(
             np.ones((8, 10)) * 0.1,
             np.ones((8, 10)) * 0.05,
-            "2021-06-15",
+            "2023-06-15",
         )
         pred = baseline.predict(query)
 
@@ -116,13 +116,13 @@ class TestRidgeBaseline:
         for frac in [0.8, 1.0, 1.2]:
             inc_s = np.ones((8, 10)) * frac * 0.1
             inc_r = np.ones((8, 10)) * frac * 0.05
-            samples.append(self._make_sample(inc_s, inc_r, "2021-06-15"))
+            samples.append(self._make_sample(inc_s, inc_r, "2022-06-15"))
 
         baseline.fit(samples)
         query = self._make_sample(
             np.ones((8, 10)) * 0.1,
             np.ones((8, 10)) * 0.05,
-            "2021-06-15",
+            "2023-06-15",
         )
         pred = baseline.predict(query)
         assert pred["pred_increment_surface"].shape == (8, 10)
@@ -135,13 +135,13 @@ class TestRidgeBaseline:
         for frac in [0.8, 1.0, 1.2]:
             inc_s = np.ones((8, 10)) * frac * 0.1
             inc_r = np.ones((8, 10)) * frac * 0.05
-            samples.append(self._make_sample(inc_s, inc_r, "2021-06-15"))
+            samples.append(self._make_sample(inc_s, inc_r, "2022-06-15"))
 
         baseline.fit(samples)
         query = self._make_sample(
             np.ones((8, 10)) * 0.1,
             np.ones((8, 10)) * 0.05,
-            "2021-06-15",
+            "2023-06-15",
         )
         pred = baseline.predict(query)
         assert pred["pred_increment_surface"].shape == (8, 10)
@@ -158,7 +158,7 @@ class TestRidgeBaseline:
             "x": np.zeros((12, 8, 10), dtype=np.float32),
             "forecast_surface": np.ones((8, 10)),
             "forecast_rootzone": np.ones((8, 10)),
-            "date_str": "2021-06-15",
+            "date_str": "2023-06-15",
         }
         with pytest.raises(RuntimeError, match="Must call fit"):
             baseline.predict(sample)
@@ -201,7 +201,7 @@ class TestRidgeBaseline:
                 "increment_surface": inc_s,
                 "increment_rootzone": inc_r,
                 "metric_mask": np.ones((8, 10)),
-                "date_str": "2021-06-15",
+                "date_str": "2022-06-15",
             })
 
         baseline_a01.fit(samples)
@@ -234,7 +234,7 @@ class TestRidgeBaseline:
             "increment_surface": np.ones((H, W)) * 0.1,
             "increment_rootzone": np.ones((H, W)) * 0.05,
             "metric_mask": np.ones((H, W)),
-            "date_str": "2021-06-15",
+            "date_str": "2022-06-15",
         }
 
         baseline.fit([sample])
@@ -277,7 +277,7 @@ class TestRidgeBaselineIntegration:
                 "increment_surface": inc_s,
                 "increment_rootzone": inc_r,
                 "metric_mask": np.ones((10, 12)),
-                "date_str": "2021-06-15",
+                "date_str": "2022-06-15",
             })
 
         baseline.fit(samples)
@@ -285,7 +285,7 @@ class TestRidgeBaselineIntegration:
             "x": np.zeros((12, 10, 12), dtype=np.float32),
             "forecast_surface": np.ones((10, 12)) * 0.5,
             "forecast_rootzone": np.ones((10, 12)) * 0.4,
-            "date_str": "2021-06-15",
+            "date_str": "2023-06-15",
         }
         pred = baseline.predict(query)
 

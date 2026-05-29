@@ -50,8 +50,8 @@ Forecast-only
 
 ```text
 source_mean_increment
-target_support_mean_increment
-monthly_mean_increment
+target_train_mean_increment
+target_monthly_train_increment
 ridge_calibration
 ```
 

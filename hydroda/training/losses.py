@@ -2,7 +2,7 @@
 
 No-leakage declaration:
     - All losses operate only on loss_mask pixels from source_train split
-    - No target_query labels used in loss computation
+    - No target_eval/query labels used in loss computation
     - No normalization inside loss functions
 """
 import warnings

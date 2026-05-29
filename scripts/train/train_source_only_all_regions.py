@@ -2,13 +2,13 @@
 """Train source-only SmallResUNet backbone on ALL 6 US regions (R1-R6).
 
 Unlike train_source_only_backbone.py (which trains per-region LORO models),
-this script trains a single model on all 6 US regions (2015-2020) and reports
-per-region source_val (2021) results. This serves as a comparison point for
+this script trains a single model on all 6 US regions (2015-2021) and reports
+per-region source_val (2022) results. This serves as a comparison point for
 the LORO models — it shows how much the held-out region exclusion matters.
 
 Usage:
     PYTHONPATH=. python scripts/train/train_source_only_all_regions.py \\
-        --K 0 --seed 0 \\
+        --adaptation_setting target_full_train --seed 0 \\
         --max_epochs 50 --batch_size 4 --lr 3e-4 \\
         --device cuda --amp \\
         --config configs/model_resunet_main.yaml
@@ -16,8 +16,8 @@ Usage:
 No-leakage declaration:
     - Only source_train split used for training
     - Normalization stats from source_train only
-    - No target_query labels used in training/normalization/early_stopping
-    - No target prompt used
+    - No target_eval/target_query labels used in training/normalization/early_stopping
+    - No target prompt or target adaptation labels used by this source-only model
 """
 from __future__ import annotations
 
@@ -44,9 +44,9 @@ from hydroda.utils.runtime import gather_runtime_info
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 PHASE = "phase4_source_only_all_regions"
 
 # Use US-R1 for split manifest lookup (has the most date coverage).
@@ -57,7 +57,10 @@ _SPLIT_LOOKUP_REGION = "US-R1"
 def parse_args():
     parser = argparse.ArgumentParser(description="Train source-only backbone on all 6 US regions")
     # Data
-    parser.add_argument("--K", type=int, default=None, help="K value for split (default from YAML or 0)")
+    parser.add_argument("--adaptation_setting", type=str, default=None,
+        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+    parser.add_argument("--K", type=int, default=None,
+        help="Legacy few-shot K value. Ignored for target_full_train.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for split (default from YAML or 0)")
     # Model
     parser.add_argument("--width", type=int, default=None,
@@ -156,6 +159,7 @@ def parse_args():
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "num_workers": "num_workers",
+        "adaptation_setting": "adaptation_setting",
         "K": "K",
         "seed": "seed",
         "zero_raw_increment_init": "zero_raw_increment_init",
@@ -166,8 +170,8 @@ def parse_args():
             parser.set_defaults(**{arg_key: yaml_defaults[yaml_key]})
 
     # Set hard-coded fallback defaults for required params not in YAML
-    if parser.get_default("K") is None:
-        parser.set_defaults(K=0)
+    if parser.get_default("adaptation_setting") is None:
+        parser.set_defaults(adaptation_setting="target_full_train")
     if parser.get_default("seed") is None:
         parser.set_defaults(seed=0)
     if parser.get_default("width") is None:
@@ -186,6 +190,11 @@ def parse_args():
         parser.set_defaults(num_workers=0)
 
     args = parser.parse_args()
+
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
 
     # Map --target_normalization_mode to underlying flags
     if args.target_normalization_mode is not None:
@@ -213,8 +222,9 @@ def _run_per_region_evaluation(
     checkpoint_path: Path,
     device: str,
     run_manager: RunManager,
-    K: int,
+    K: int | None,
     seed: int,
+    adaptation_setting: str,
 ) -> None:
     """Post-training: evaluate best checkpoint per-region on source_val.
 
@@ -253,6 +263,7 @@ def _run_per_region_evaluation(
             split_type="source_val",
             K=K,
             seed=seed,
+            adaptation_setting=adaptation_setting,
             freeze_manifest=FREEZE_MANIFEST,
         )
         dataset.set_active_region(region_id)
@@ -308,7 +319,7 @@ def main():
     print("=" * 60)
     print("Phase 4: Source-only All-Regions Baseline")
     print(f"  training on ALL 6 US regions (R1-R6)")
-    print(f"  K={args.K}  seed={args.seed}")
+    print(f"  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
     print(f"  device={device}  width={args.width}  amp={args.amp}")
     print("=" * 60)
@@ -322,6 +333,7 @@ def main():
     # Build config for RunManager
     run_config = {
         "target_region": "US-ALL",
+        "adaptation_setting": args.adaptation_setting,
         "K": args.K,
         "seed": args.seed,
         "width": args.width,
@@ -411,7 +423,7 @@ def main():
         print(f"  checkpoint epoch={ckpt['epoch']}  best_loss={ckpt.get('best_loss', 'N/A')}")
         print(f"  resuming from epoch {resumed_epoch} ({resumed_epoch} already completed)")
 
-    # Create source_fit dataset (2015-2020, all 6 regions via override)
+    # Create source_fit dataset (2015-2021, all 6 regions via override)
     print(f"\nLoading source_fit dataset...")
     train_dataset = HydroDADataset(
         da_nc_path=DA_NC,
@@ -421,6 +433,7 @@ def main():
         split_type="source_fit",
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     train_dataset.set_active_all_regions()
@@ -432,14 +445,14 @@ def main():
         dates = [d.get("date_str", "") for d in train_dataset._date_records]
         years = sorted(set(d[:4] for d in dates if len(d) >= 4))
         print(f"  source_fit years: {years}")
-        post_2020 = [y for y in years if int(y) > 2020]
-        if post_2020:
+        post_2021 = [y for y in years if int(y) > 2021]
+        if post_2021:
             raise RuntimeError(
-                f"LEAKAGE: source_fit contains post-2020 dates: {post_2020}. "
-                f"All source_fit dates must be 2015-2020."
+                f"LEAKAGE: source_fit contains post-2021 dates: {post_2021}. "
+                f"All source_fit dates must be 2015-2021."
             )
 
-    # Create source_val dataset (2021, all 6 regions via override)
+    # Create source_val dataset (2022, all 6 regions via override)
     print(f"\nLoading source_val dataset...")
     source_val_dataset = HydroDADataset(
         da_nc_path=DA_NC,
@@ -449,6 +462,7 @@ def main():
         split_type="source_val",
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     source_val_dataset.set_active_all_regions()
@@ -459,11 +473,11 @@ def main():
         dates = [d.get("date_str", "") for d in source_val_dataset._date_records]
         years = sorted(set(d[:4] for d in dates if len(d) >= 4))
         print(f"  source_val years: {years}")
-        non_2021 = [y for y in years if int(y) != 2021]
-        if non_2021:
+        non_2022 = [y for y in years if int(y) != 2022]
+        if non_2022:
             raise RuntimeError(
-                f"LEAKAGE: source_val contains non-2021 dates: {non_2021}. "
-                f"All source_val dates must be 2021."
+                f"LEAKAGE: source_val contains non-2022 dates: {non_2022}. "
+                f"All source_val dates must be 2022."
             )
 
     if len(source_val_dataset) == 0:
@@ -604,6 +618,7 @@ def main():
             run_manager=run_manager,
             K=args.K,
             seed=args.seed,
+            adaptation_setting=args.adaptation_setting,
         )
     else:
         print(f"\n  Skipping per-region evaluation (--skip_per_region_eval)")

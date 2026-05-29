@@ -64,7 +64,7 @@ reports/
 
 ## 2. Configuration-driven rule
 
-任何 country、region、K、seed、time range、variable mapping、metric 都必须配置驱动。
+任何 country、region、adaptation_setting、legacy K、seed、time range、variable mapping、metric 都必须配置驱动。
 
 禁止：
 
@@ -76,7 +76,7 @@ if year == 2021: ...  # 除非来自 protocol config
 允许：
 
 ```python
-cfg.protocol.target_support.start
+cfg.protocol.target_train.start
 cfg.regions[region_id].bbox
 ```
 
@@ -88,8 +88,8 @@ cfg.regions[region_id].bbox
 artifacts/audits/netcdf_audit_{country}.json
 reports/audits/netcdf_audit_{country}.md
 artifacts/regions/{country}/region_quality.csv
-artifacts/splits/{benchmark_id}/{country}/{region}/K{K}_seed{seed}.json
-artifacts/predictions/{experiment_id}/{country}/{region}/K{K}_seed{seed}.zarr
+artifacts/splits/{benchmark_id}/{country}/{region}/{adaptation_setting}_seed{seed}.json
+artifacts/predictions/{experiment_id}/{country}/{region}/{adaptation_setting}_seed{seed}.zarr
 artifacts/metrics/{experiment_id}/metrics_long.csv
 reports/experiments/{experiment_id}.md
 ```

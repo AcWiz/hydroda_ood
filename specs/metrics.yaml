@@ -29,13 +29,14 @@ secondary_metrics:
     selection: top_20_percent_by_abs_true_increment_after_prediction
   - id: adaptation_gain
     higher_is_better: true
-    reference: source_only_K0
+    reference: source_only_same_target_eval
   - id: CE12
     higher_is_better: true
-    description: calibration efficiency from K=0 to K=12
+    description: legacy few-shot calibration efficiency from K=0 to K=12; not a main protocol metric
   - id: AUC_K
     higher_is_better: true
-    K_values: [0, 4, 12, 24]
+    status: legacy_few_shot_ablation_only
+    K_values: [0, 4, 12]
 
 aggregation:
   main: region_balanced
@@ -45,7 +46,7 @@ aggregation:
     - country
     - region
     - regime
-    - K
+    - adaptation_setting
     - seed
     - variable
     - metric
@@ -61,3 +62,14 @@ sanity_tests:
   - perfect_prediction_has_skill_one
   - forecast_prediction_has_skill_zero
   - metric_ignores_loss_mask_false_pixels
+
+required_protocol_metadata:
+  - protocol_freeze_id
+  - adaptation_setting
+  - target_train_dates_hash
+  - target_eval_dates_hash
+  - split_manifest_sha256
+legacy_optional_metadata:
+  - K
+  - K_legacy
+  - support_dates_hash

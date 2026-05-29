@@ -1,10 +1,10 @@
 """Monthly mean increment baseline — grouped by calendar month.
 
 No-leakage declaration:
-    - Fit on target_support only
-    - Uses calendar month (not target_query labels)
+    - Fit on target_train only (legacy target_support alias is accepted)
+    - Uses calendar month (not target_eval/query labels)
     - 12 month buckets, each with a mean increment
-    - No target_query labels used
+    - No target_eval/query labels used
 """
 
 from __future__ import annotations
@@ -12,15 +12,19 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, Any, Optional
 
+from hydroda.data.leakage_guard import LeakageGuard
+from hydroda.data.protocol import ProtocolConfig
+
 
 class TargetMonthlySupportIncrementBaseline:
     """Monthly grouped mean increment baseline.
 
     Computes mean increment separately for each calendar month (1-12)
-    using target_support data. Predicts using the monthly mean for
-    each target_query sample's month.
+    using the full target_train period. Predicts using the monthly mean for
+    each target_eval/query sample's month.
 
-    Only applicable for K >= 12 (K=4 has insufficient support dates per month).
+    The class name is retained for legacy K-shot scripts; main protocol usage
+    should treat this as target-train monthly mean.
     """
 
     def __init__(self):
@@ -29,12 +33,19 @@ class TargetMonthlySupportIncrementBaseline:
         self._fitted = False
 
     def fit(self, samples: list) -> "TargetMonthlySupportIncrementBaseline":
-        """Compute per-month mean increment from target_support samples.
+        """Compute per-month mean increment from target_train samples.
 
         Args:
-            samples: List of sample dicts from target_support split.
+            samples: List of sample dicts from target_train split or legacy target_support split.
                 Each must contain: increment_surface, increment_rootzone, metric_mask, month.
         """
+        dates = [s.get("date_str", "") for s in samples if s.get("date_str")]
+        if dates:
+            LeakageGuard(ProtocolConfig()).check_target_adaptation_scope(
+                dates,
+                purpose="target_monthly_train_increment_fit",
+                labels_allowed=True,
+            )
         # Accumulate per-month: 12 buckets
         month_accum_s: Dict[int, list] = {m: [] for m in range(1, 13)}
         month_accum_r: Dict[int, list] = {m: [] for m in range(1, 13)}
@@ -110,3 +121,6 @@ class TargetMonthlySupportIncrementBaseline:
             "pred_analysis_surface": (forecast_surface + pred_inc_s).astype(np.float32),
             "pred_analysis_rootzone": (forecast_rootzone + pred_inc_r).astype(np.float32),
         }
+
+
+TargetMonthlyTrainIncrementBaseline = TargetMonthlySupportIncrementBaseline

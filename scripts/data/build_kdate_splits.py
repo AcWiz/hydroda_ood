@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Build US Leave-One-Region-Out K-Date Splits.
+"""Build US Leave-One-Region-Out historical target-adaptation splits.
+
+This file is retained as a backward-compatible entrypoint. New main-protocol
+workflows should call `scripts/data/build_target_train_splits.py`.
 
 Usage:
-    python scripts/data/build_kdate_splits.py \
+    python scripts/data/build_target_train_splits.py \
         --da-nc /fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc \
         --region-masks artifacts/regions/US_region_masks.nc \
-        --out-json artifacts/splits/US_loro_kdate_splits.json \
-        --out-md reports/splits/US_loro_kdate_split_summary.md
+        --out-json artifacts/splits/US_loro_target_train_splits.json \
+        --out-md reports/splits/US_loro_target_train_split_summary.md
 
 No-leakage declaration:
-    Support dates are selected ONLY via:
+    Main target adaptation uses the full historical target training period:
+    - Source fit / target train-adaptation: 2015-2021
+    - Source validation / target validation: 2022
+    - Target eval/query: 2023-2025
+
+    Legacy few-shot support dates, if requested, are selected ONLY via:
     - Calendar constraints (quarter/month/half-month rules)
     - Time availability in 2022
     - base_valid_mask coverage threshold (via input channel 11)
@@ -38,6 +46,7 @@ import xarray as xr
 from hydroda.splits.kdate import (
     dates_to_serializable,
     get_support_dates_for_K,
+    select_target_full_train_dates,
 )
 from hydroda.splits.manifest import (
     create_split_manifest,
@@ -46,13 +55,25 @@ from hydroda.splits.manifest import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Build US LORO K-date splits")
+    parser = argparse.ArgumentParser(description="Build US LORO historical target-adaptation splits")
     parser.add_argument("--da-nc", required=True, help="Path to DA.nc SMAP data")
     parser.add_argument("--region-masks", required=True, help="Path to US_region_masks.nc")
     parser.add_argument("--out-json", required=True, help="Output JSON path")
     parser.add_argument("--out-md", required=True, help="Output markdown path")
+    parser.add_argument(
+        "--adaptation-settings",
+        nargs="+",
+        default=["target_full_train"],
+        choices=["target_full_train"],
+        help="Main adaptation settings to generate (default: target_full_train)",
+    )
+    parser.add_argument(
+        "--include-legacy-few-shot",
+        action="store_true",
+        help="Also generate legacy few-shot K-date ablation splits.",
+    )
     parser.add_argument("--k-values", nargs="+", default=[0, 4, 12], type=int)
-    parser.add_argument("--seeds", nargs="+", default=[0, 1, 2], type=int)
+    parser.add_argument("--seeds", nargs="+", default=[0], type=int)
     parser.add_argument("--min-coverage", default=0.5, type=float)
     return parser.parse_args()
 
@@ -74,15 +95,15 @@ def main():
 
     # Pre-index by year range to avoid scanning all cycles
     years = np.array([datetime.fromtimestamp(t).year for t in time_vals])
-    source_mask = (years >= 2015) & (years <= 2020)
-    val_mask = years == 2021
-    support_mask = years == 2022
+    source_mask = (years >= 2015) & (years <= 2021)
+    val_mask = years == 2022
+    target_train_mask = (years >= 2015) & (years <= 2021)
     query_mask = (years >= 2023) & (years <= 2025)
 
-    print(f"  Source train (2015-2020): {source_mask.sum()} cycles")
-    print(f"  Source val (2021): {val_mask.sum()} cycles")
-    print(f"  Target context/support (2022): {support_mask.sum()} cycles")
-    print(f"  Target query (2023-2025): {query_mask.sum()} cycles")
+    print(f"  Source train (2015-2021): {source_mask.sum()} cycles")
+    print(f"  Source val (2022): {val_mask.sum()} cycles")
+    print(f"  Target train/adaptation (2015-2021): {target_train_mask.sum()} cycles")
+    print(f"  Target eval/query (2023-2025): {query_mask.sum()} cycles")
 
     # Load region masks
     print(f"Loading region masks: {args.region_masks}")
@@ -90,7 +111,8 @@ def main():
     region_ids = rm["region_id"].values.tolist()
     print(f"  Regions: {region_ids}")
 
-    # Pre-load base_valid_mask (channel 11) into memory
+    # Source date availability is filtered by base_valid_mask. Legacy K-shot
+    # support sampling also uses this tensor for coverage thresholds.
     print("Pre-loading base_valid_mask (channel 11)...")
     base_valid = ds["input"][:, 11, :, :].values.astype(np.float32)  # (T, H, W)
     print(f"  base_valid shape: {base_valid.shape}")
@@ -115,7 +137,7 @@ def main():
     ]
     print(f"  Total source train cycles (all regions): {len(source_dates_all)}")
 
-    # Pre-compute source_val_dates ONCE outside region loop (2021 only).
+    # Pre-compute source_val_dates ONCE outside region loop (2022 only).
     print("Pre-computing source_val_dates for all source regions...")
     all_val_indices = np.where(val_mask)[0]
     val_dates_all = [
@@ -131,8 +153,8 @@ def main():
         region_size = region_sizes[region_idx]
         dates = []
         for idx in np.where(target_mask)[0]:
-            bv = base_valid[idx]
             if require_valid:
+                bv = base_valid[idx]
                 if region_size == 0 or np.isfinite(bv).sum() == 0:
                     continue
                 valid = (region_mask_3d & (bv > 0)).sum()
@@ -158,7 +180,10 @@ def main():
     k_values = args.k_values
     seeds = args.seeds
 
-    print(f"\nBuilding splits: K={k_values}, seeds={seeds}")
+    print(
+        f"\nBuilding splits: adaptation_settings={args.adaptation_settings}, "
+        f"legacy_few_shot={args.include_legacy_few_shot}, K={k_values}, seeds={seeds}"
+    )
 
     for target_idx, target_region in enumerate(region_ids):
         print(f"\n=== {target_region} ===")
@@ -182,7 +207,7 @@ def main():
                     source_dates.append((idx, dt))
         print(f"  Source train cycles: {len(source_dates)}")
 
-        # Get source val dates from pre-computed val_dates_all (2021 only)
+        # Get source val dates from pre-computed val_dates_all (2022 only)
         val_dates = []
         for src_idx in source_region_indices:
             region_mask_3d = region_onehot[src_idx]
@@ -194,41 +219,68 @@ def main():
                 valid = (region_mask_3d & (bv > 0)).sum()
                 if valid > 0:
                     val_dates.append((idx, dt))
-        print(f"  Source val cycles (2021): {len(val_dates)}")
+        print(f"  Source val cycles (2022): {len(val_dates)}")
 
-        # Get available support dates in 2022
-        support_available = get_target_dates(target_idx, support_mask, require_valid=False)
-        print(f"  Available support dates in 2022: {len(support_available)}")
+        # Get available target-train dates in 2015-2021
+        target_train_available = get_target_dates(target_idx, target_train_mask, require_valid=False)
+        print(f"  Available target-train dates in 2015-2021: {len(target_train_available)}")
 
-        # Compute validity mask
-        valid_mask = compute_valid_support_mask(target_idx, support_available)
-        n_valid = valid_mask.sum()
-        print(f"  Valid support dates (coverage >= {args.min_coverage}): {n_valid}")
+        valid_mask = None
+        if args.include_legacy_few_shot:
+            valid_mask = compute_valid_support_mask(target_idx, target_train_available)
+            n_valid = valid_mask.sum()
+            print(f"  Valid target-train dates by coverage >= {args.min_coverage}: {n_valid}")
 
         # Get target query dates
         query_dates = get_target_dates(target_idx, query_mask, require_valid=False)
         print(f"  Target query cycles: {len(query_dates)}")
 
-        # Generate splits
-        for K in k_values:
+        # Generate main full-target-train splits. Seeds are retained as run seeds.
+        if "target_full_train" in args.adaptation_settings:
+            target_train_selected = select_target_full_train_dates(target_train_available)
             for seed in seeds:
-                support_selected = get_support_dates_for_K(
-                    support_available, valid_mask, K, seed
-                )
-
                 manifest = create_split_manifest(
                     target_region=target_region,
                     source_regions=source_region_ids,
-                    K=K,
+                    K=None,
                     seed=seed,
                     source_train_dates=dates_to_serializable(source_dates),
                     source_val_dates=dates_to_serializable(val_dates),
-                    support_dates=dates_to_serializable(support_selected),
+                    target_train_dates=dates_to_serializable(target_train_selected),
                     query_dates=dates_to_serializable(query_dates),
+                    adaptation_setting="target_full_train",
                 )
 
                 splits.append(manifest)
-                print(f"  K={K}, seed={seed}: {len(support_selected)} support, {len(query_dates)} query")
+                print(
+                    f"  target_full_train, seed={seed}: "
+                    f"{len(target_train_selected)} target_train, {len(query_dates)} eval"
+                )
+
+        # Generate legacy few-shot ablation splits only when requested.
+        if args.include_legacy_few_shot:
+            for K in k_values:
+                for seed in seeds:
+                    support_selected = get_support_dates_for_K(
+                        target_train_available, valid_mask, K, seed
+                    )
+
+                    manifest = create_split_manifest(
+                        target_region=target_region,
+                        source_regions=source_region_ids,
+                        K=K,
+                        seed=seed,
+                        source_train_dates=dates_to_serializable(source_dates),
+                        source_val_dates=dates_to_serializable(val_dates),
+                        support_dates=dates_to_serializable(support_selected),
+                        target_train_dates=dates_to_serializable(support_selected),
+                        query_dates=dates_to_serializable(query_dates),
+                        adaptation_setting=f"legacy_few_shot_k{K}",
+                        protocol_version="legacy_kdate_protocol_v2",
+                    )
+
+                    splits.append(manifest)
+                    print(f"  legacy K={K}, seed={seed}: {len(support_selected)} support, {len(query_dates)} query")
 
     print(f"\nTotal splits: {len(splits)}")
 

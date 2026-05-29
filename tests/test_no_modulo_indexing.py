@@ -42,12 +42,8 @@ class TestNoModuloIndexing:
         assert sample is not None
 
     def test_negative_index_raises(self, ds):
-        # The dataset uses a Python list for indexing which natively supports negative indexing.
-        # The contract only requires that idx >= len raises IndexError (no modulo wrap).
-        # Negative indices are valid Python behavior and wrap to end-of-list.
-        # This test verifies negative indexing works (not an error).
-        sample = ds[-1]
-        assert sample is not None
+        with pytest.raises(IndexError):
+            _ = ds[-1]
 
     def test_len_nonzero(self, ds):
         assert len(ds) > 0

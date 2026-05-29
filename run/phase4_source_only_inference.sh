@@ -6,7 +6,7 @@
 #   bash run/phase4_source_only_inference.sh /path/to/checkpoint.pt
 #
 # Evaluates the source-only backbone on:
-#   - source_val: 2021 held-out source regions R2-R6 (in-domain baseline, NOT target)
+#   - source_val:   2022 held-out source regions R2-R6 (in-domain baseline, NOT target)
 #   - target_query: 2023-2025 US-R1 target pixels (OOD signal)
 
 set -euo pipefail

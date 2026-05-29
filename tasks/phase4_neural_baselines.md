@@ -58,14 +58,14 @@ large transformer backbone
 
 ```text
 source_only_backbone:
-  train: source regions / continents, 2015-2020
+  train: source regions / continents, 2015-2021
   target: no prompt, no target labels
 
 prompt_conditioned_shared:
-  train: source regions / continents, 2015-2020
+  train: source regions / continents, 2015-2021
   input: x + region prompt token/feature map
-  target K=0: target 2022 input-side prompt only
-  target K>0: input-side prompt + calibration summary prompt
+  target_full_train: target 2022 input-side prompt + full target_train adaptation summary
+  legacy K-shot: K=0/4/12 only as secondary ablation
 ```
 
 ## 禁止

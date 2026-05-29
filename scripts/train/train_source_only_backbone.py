@@ -3,7 +3,7 @@
 
 Usage:
     PYTHONPATH=. python scripts/train/train_source_only_backbone.py \\
-        --target_region US-R1 --K 0 --seed 0 \\
+        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
         --max_epochs 30 --batch_size 4 --lr 1e-3 \\
         --device cuda --amp \\
         --wandb_mode disabled \\
@@ -12,8 +12,8 @@ Usage:
 No-leakage declaration:
     - Only source_train split used for training
     - Normalization stats from source_train only
-    - No target_query labels used in training/normalization/early_stopping
-    - No target prompt used
+    - No target_eval/target_query labels used in training/normalization/early_stopping
+    - No target prompt or target adaptation labels used by this source-only model
 """
 from __future__ import annotations
 
@@ -37,10 +37,10 @@ from hydroda.utils.runtime import gather_runtime_info
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 CHECKPOINT_DIR = "artifacts/checkpoints/phase4_source_only"
-PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 PHASE = "phase4_source_only"
 
 
@@ -48,7 +48,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train source-only backbone with experiment tracking")
     # Data
     parser.add_argument("--target_region", type=str, required=True, help="Target region, e.g. US-R1")
-    parser.add_argument("--K", type=int, default=None, help="K value for split (default from YAML or 0)")
+    parser.add_argument("--adaptation_setting", type=str, default=None,
+        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+    parser.add_argument("--K", type=int, default=None,
+        help="Legacy few-shot K value. Ignored for target_full_train.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for split (default from YAML or 0)")
     # Model
     parser.add_argument("--width", type=int, default=None,
@@ -146,6 +149,7 @@ def parse_args():
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "num_workers": "num_workers",
+        "adaptation_setting": "adaptation_setting",
         "K": "K",
         "seed": "seed",
         "zero_raw_increment_init": "zero_raw_increment_init",
@@ -156,8 +160,8 @@ def parse_args():
             parser.set_defaults(**{arg_key: yaml_defaults[yaml_key]})
 
     # Set hard-coded fallback defaults for required params not in YAML
-    if parser.get_default("K") is None:
-        parser.set_defaults(K=0)
+    if parser.get_default("adaptation_setting") is None:
+        parser.set_defaults(adaptation_setting="target_full_train")
     if parser.get_default("seed") is None:
         parser.set_defaults(seed=0)
     if parser.get_default("width") is None:
@@ -176,6 +180,11 @@ def parse_args():
         parser.set_defaults(num_workers=0)
 
     args = parser.parse_args()
+
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
 
     # Map --target_normalization_mode to underlying flags
     if args.target_normalization_mode is not None:
@@ -207,7 +216,7 @@ def main():
 
     print("=" * 60)
     print("Phase 4A: Source-only Backbone Training")
-    print(f"  target_region={args.target_region}  K={args.K}  seed={args.seed}")
+    print(f"  target_region={args.target_region}  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
     print(f"  device={device}  width={args.width}  amp={args.amp}")
     print("=" * 60)
@@ -223,6 +232,7 @@ def main():
     # Build config for RunManager (args already resolved with YAML defaults + CLI overrides)
     run_config = {
         "target_region": args.target_region,
+        "adaptation_setting": args.adaptation_setting,
         "K": args.K,
         "seed": args.seed,
         "width": args.width,
@@ -310,7 +320,7 @@ def main():
         print(f"  checkpoint epoch={ckpt['epoch']}  best_loss={ckpt.get('best_loss', 'N/A')}")
         print(f"  resuming from epoch {resumed_epoch} ({resumed_epoch} already completed)")
 
-    # Create source_fit dataset (2015-2020, excluding target region)
+    # Create source_fit dataset (2015-2021, excluding target region)
     print(f"\nLoading source_fit dataset...")
     train_dataset = HydroDADataset(
         da_nc_path=DA_NC,
@@ -320,11 +330,12 @@ def main():
         split_type="source_fit",
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     print(f"  source_fit samples: {len(train_dataset)}")
 
-    # Create source_val dataset (2021, excluding target region)
+    # Create source_val dataset (2022, excluding target region)
     print(f"\nLoading source_val dataset...")
     source_val_dataset = HydroDADataset(
         da_nc_path=DA_NC,
@@ -334,6 +345,7 @@ def main():
         split_type="source_val",
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     print(f"  source_val samples: {len(source_val_dataset)}")
@@ -341,7 +353,7 @@ def main():
     if len(source_val_dataset) == 0:
         raise RuntimeError(
             f"source_val_dataset is empty for target={args.target_region}, K={args.K}, seed={args.seed}. "
-            f"The split manifest must contain source_val_dates (2021 dates for source regions). "
+            f"The split manifest must contain source_val_dates (2022 dates for source regions). "
             f"Re-run build_kdate_splits.py with the updated code that populates source_val_dates."
         )
 

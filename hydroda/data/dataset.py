@@ -26,8 +26,20 @@ _SPLIT_TYPE_TO_DATES_KEY = {
     "source_train": "source_train_dates",
     "source_fit": "source_train_dates",
     "source_val": "source_val_dates",
+    "target_train": "target_train_dates",
+    "target_adaptation": "target_adaptation_dates",
+    "target_eval": "target_eval_dates",
+    # Deprecated aliases retained for old K-date artifacts.
     "target_support": "target_support_dates",
     "target_query": "target_query_dates",
+}
+
+_DATES_KEY_FALLBACKS = {
+    "target_train_dates": "target_support_dates",
+    "target_adaptation_dates": "target_train_dates",
+    "target_eval_dates": "target_query_dates",
+    "target_support_dates": "target_train_dates",
+    "target_query_dates": "target_eval_dates",
 }
 
 
@@ -56,8 +68,9 @@ class HydroDADataset(Dataset):
         splits_json: str,
         target_region: str,
         split_type: str,
-        K: int,
+        K: Optional[int],
         seed: int,
+        adaptation_setting: Optional[str] = None,
         freeze_manifest: Optional[str] = "artifacts/protocol/US_region_split_freeze_manifest.json",
         input_var: str = "input",
         target_var: str = "target",
@@ -75,10 +88,17 @@ class HydroDADataset(Dataset):
         self.da_nc_path = da_nc_path
         self.region_masks_nc = region_masks_nc
         self.splits_json = splits_json
+        try:
+            from hydroda.data.file_hash import compute_sha256
+
+            self.split_manifest_sha256 = compute_sha256(splits_json) if Path(splits_json).exists() else ""
+        except Exception:
+            self.split_manifest_sha256 = ""
         self.target_region = target_region
         self.split_type = split_type
-        self.K = int(K)
+        self.K = int(K) if K is not None else None
         self.seed = int(seed)
+        self.adaptation_setting = adaptation_setting
         self.input_var = input_var
         self.target_var = target_var
         self.base_valid_mask_channel = int(base_valid_mask_channel)
@@ -89,6 +109,11 @@ class HydroDADataset(Dataset):
 
         self.regime_id = self._load_regime_id(freeze_manifest)
         self._split_entry = self._load_split_entry()
+        if self.adaptation_setting is None:
+            self.adaptation_setting = self._split_entry.get(
+                "adaptation_setting",
+                "target_full_train" if self.K is None else f"legacy_few_shot_k{self.K}",
+            )
         self._active_region_ids = (
             [r for r in _ALL_US_REGIONS if r != target_region]
             if split_type in ("source_train", "source_fit", "source_val")
@@ -96,25 +121,28 @@ class HydroDADataset(Dataset):
         )
 
         date_key = _SPLIT_TYPE_TO_DATES_KEY[split_type]
-        all_date_records = list(self._split_entry[date_key])
+        all_date_records = self._get_date_records(date_key)
 
-        # Safety: source_fit must only use 2015-2020 (already enforced by manifest)
+        # Safety: source_fit must only use 2015-2021 (already enforced by manifest)
         if split_type == "source_fit":
             all_date_records = [
                 d for d in all_date_records
-                if len(d.get("date_str", "")) >= 4 and 2015 <= int(d["date_str"][:4]) <= 2020
+                if len(d.get("date_str", "")) >= 4 and 2015 <= int(d["date_str"][:4]) <= 2021
             ]
 
         self._date_records = all_date_records
         self._time_indices = [int(d["time_index"]) for d in self._date_records]
         self._date_str_map = {int(d["time_index"]): d.get("date_str", "") for d in self._date_records}
 
+        self._validate_split_dates()
+
         # Validate: source_fit and source_val must have at least one date
         if split_type in ("source_train", "source_fit", "source_val") and len(self._date_records) == 0:
             raise ValueError(
                 f"HydroDADataset: {split_type} has zero dates. "
-                f"Manifest {date_key} is empty for target={target_region}, K={K}, seed={seed}. "
-                f"Check split generation (source_val_dates must be populated from 2021 dates)."
+                f"Manifest {date_key} is empty for target={target_region}, "
+                f"adaptation_setting={self.adaptation_setting}, K={K}, seed={seed}. "
+                f"Check split generation (source_val_dates must be populated from 2022 dates)."
             )
 
         region_ds = xr.open_dataset(region_masks_nc)
@@ -165,13 +193,56 @@ class HydroDADataset(Dataset):
         with open(self.splits_json, "r", encoding="utf-8") as f:
             splits_data = json.load(f)
         for entry in splits_data.get("splits", []):
-            if (
-                entry.get("target_region_id") == self.target_region
-                and int(entry.get("K")) == self.K
-                and int(entry.get("seed")) == self.seed
-            ):
+            if entry.get("target_region_id") != self.target_region:
+                continue
+            if int(entry.get("seed", 0)) != self.seed:
+                continue
+            if self.adaptation_setting is not None:
+                if entry.get("adaptation_setting") == self.adaptation_setting:
+                    return entry
+                continue
+            if self.K is None:
+                if entry.get("K") is None and entry.get("adaptation_setting", "target_full_train") == "target_full_train":
+                    return entry
+                continue
+            entry_k = entry.get("K", entry.get("K_legacy"))
+            if entry_k is not None and int(entry_k) == self.K:
                 return entry
-        raise KeyError(f"No split entry for target={self.target_region}, K={self.K}, seed={self.seed}")
+        raise KeyError(
+            f"No split entry for target={self.target_region}, "
+            f"adaptation_setting={self.adaptation_setting}, K={self.K}, seed={self.seed}"
+        )
+
+    def _get_date_records(self, date_key: str) -> List[Dict[str, Any]]:
+        seen = set()
+        current = date_key
+        while current and current not in seen:
+            seen.add(current)
+            if current in self._split_entry:
+                return list(self._split_entry[current])
+            current = _DATES_KEY_FALLBACKS.get(current, "")
+        return []
+
+    def _validate_split_dates(self) -> None:
+        dates = [d.get("date_str", "") for d in self._date_records if d.get("date_str")]
+        if not dates:
+            return
+        from hydroda.data.leakage_guard import LeakageGuard
+        from hydroda.data.protocol import ProtocolConfig
+
+        guard = LeakageGuard(ProtocolConfig())
+        if self.split_type in ("target_query", "target_eval"):
+            guard.check_query_evaluation_only(dates)
+        elif self.split_type in ("target_support", "target_train", "target_adaptation"):
+            guard.check_target_adaptation_scope(
+                dates,
+                purpose="target_adaptation",
+                labels_allowed=True,
+            )
+        elif self.split_type == "source_val":
+            guard.check_model_selection_scope(dates, purpose="source_val_dataset")
+        elif self.split_type in ("source_train", "source_fit"):
+            guard.protocol.assert_dates_within(dates, ["source_fit"], "source_training")
 
     def __len__(self) -> int:
         return len(self._time_indices)
@@ -239,7 +310,10 @@ class HydroDADataset(Dataset):
 
         date_str = self._date_str_map.get(time_index, "")
         month, season = _month_and_season(date_str)
-        split_id = f"{self.target_region}-K{self.K}-S{self.seed}-{self.split_type}"
+        if self.K is None:
+            split_id = f"{self.target_region}-{self.adaptation_setting}-S{self.seed}-{self.split_type}"
+        else:
+            split_id = f"{self.target_region}-K{self.K}-S{self.seed}-{self.split_type}"
 
         return {
             "x": input_arr,
@@ -270,6 +344,12 @@ class HydroDADataset(Dataset):
             "split_id": split_id,
             "sample_region_id": sample_region_id,
             "K": self.K,
+            "K_legacy": self.K if str(self.adaptation_setting).startswith("legacy_few_shot") else None,
+            "adaptation_setting": self.adaptation_setting,
+            "target_train_dates_hash": self._split_entry.get("target_train_dates_hash", self._split_entry.get("support_dates_hash", "")),
+            "target_eval_dates_hash": self._split_entry.get("target_eval_dates_hash", self._split_entry.get("target_query_dates_hash", "")),
+            "support_dates_hash": self._split_entry.get("support_dates_hash", ""),
+            "split_manifest_sha256": self._split_entry.get("split_manifest_sha256", "") or self.split_manifest_sha256,
             "seed": self.seed,
         }
 

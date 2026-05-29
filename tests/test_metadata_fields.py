@@ -82,11 +82,11 @@ class TestMetadataFields:
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type="source_train",
-            K=4, seed=3,
+            K=4, seed=2,
             freeze_manifest=MANIFEST,
         )
         sample = ds[0]
-        assert sample["split_id"] == "US-R1-K4-S3-source_train"
+        assert sample["split_id"] == "US-R1-K4-S2-source_train"
         ds.close()
 
     def test_regime_id_dryland_sparse(self):
@@ -151,10 +151,10 @@ class TestMetadataFields:
             splits_json=SPLITS_JSON,
             target_region="US-R2",
             split_type="source_train",
-            K=12, seed=7,
+            K=12, seed=2,
             freeze_manifest=MANIFEST,
         )
         sample = ds[0]
         assert sample["K"] == 12
-        assert sample["seed"] == 7
+        assert sample["seed"] == 2
         ds.close()

@@ -15,7 +15,7 @@ from hydroda.models.resunet import SmallResUNet
 
 def test_zero_init_output_is_near_zero():
     """Zero-init output head should produce near-zero output at initialization."""
-    model = SmallResUNet(in_channels=12, out_channels=2, width=8, zero_init_output=True)
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8, zero_raw_increment_init=True)
 
     # Random input
     x = torch.randn(2, 12, 32, 32)
@@ -26,7 +26,7 @@ def test_zero_init_output_is_near_zero():
     assert torch.abs(pred).max() < 1e-5, f"Zero-init output should be near zero, got {pred.abs().max()}"
 
     # Verify that without zero_init, output is not near zero
-    model2 = SmallResUNet(in_channels=12, out_channels=2, width=8, zero_init_output=False)
+    model2 = SmallResUNet(in_channels=12, out_channels=2, width=8, zero_raw_increment_init=False)
     pred2 = model2(x)
     assert torch.abs(pred2).max() > 0.1, "Non-zero-init output should have magnitude > 0.1"
 
@@ -34,7 +34,7 @@ def test_zero_init_output_is_near_zero():
 def test_zero_init_plus_increment_mean_gives_near_zero_analysis_correction():
     """Zero-init + increment normalization should give near-zero raw correction.
 
-    When zero_init_output=True and target_increment_normalization=True:
+    When zero_raw_increment_init=True and target_increment_normalization=True:
     - At init: pred_inc_norm = 0
     - Denorm: pred_inc_raw = 0 * inc_std + inc_mean = inc_mean
     - For typical increments, inc_mean ~ 0.05 (surface) / -0.03 (rootzone) m³/m³
@@ -68,7 +68,7 @@ def test_zero_init_plus_increment_mean_gives_near_zero_analysis_correction():
 
 def test_zero_init_preserved_after_training():
     """Zero-init should be applied at initialization and preserved through training."""
-    model = SmallResUNet(in_channels=12, out_channels=2, width=8, zero_init_output=True)
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8, zero_raw_increment_init=True)
 
     # Check head weights are zero
     head_weight = model.head.weight.data

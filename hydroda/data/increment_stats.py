@@ -1,9 +1,9 @@
 """Source-fit increment statistics for per-channel loss scale normalization.
 
 No-leakage declaration:
-    - Only source_fit dates (2015-2020) are used
+    - Only source_fit dates (2015-2021) are used
     - Only loss_mask valid pixels are used
-    - target_context / target_query labels are strictly excluded
+    - target_train / target_eval/query labels are strictly excluded
     - Stats are saved as JSON artifacts (artifacts/stats/)
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ def compute_source_fit_increment_stats(
     if split_type not in ("source_train", "source_fit"):
         raise ValueError(
             f"increment_stats: split_type must be source_fit, got {split_type!r}. "
-            f"Target query labels must NOT be used for statistic computation."
+            f"Target train/eval labels must NOT be used for statistic computation."
         )
 
     n_total = len(dataset)

@@ -1,8 +1,8 @@
-# 阶段 2：区域 Mask 与 K-Date Split
+# 阶段 2：区域 Mask 与 Target-Train Split
 
 ## 目标
 
-构建美国区域 mask，并生成 leave-one-region-out split 文件。
+构建美国区域 mask，并生成 leave-one-region-out target_train/target_eval split 文件。旧 K-Date split 只作为 legacy few-shot ablation。
 
 ## 必须实现的模块
 
@@ -20,7 +20,7 @@ hydroda/regions/quality_report.py
 4. 构建 US-R1 到 US-R6 的 masks。
 5. 生成 region quality report。
 6. 生成 US leave-one-region-out splits。
-7. 为 K=0/4/12/24 和 seeds 0..4 生成 support dates。
+7. 为 `adaptation_setting=target_full_train` 生成完整 2015-2021 target_train dates；K=0/4/12/24 只在 legacy ablation 中生成。
 
 ## 输出
 
@@ -35,6 +35,6 @@ reports/split_leakage_report.md
 ## 验收标准
 
 - 六个 US masks 都非空。
-- 每个区域有足够 valid dates 支持 K=24。
-- split report 证明 target query dates 没有进入 support。
-- 同一 `K, seed, region` 的 support dates 与 method 无关。
+- 每个区域有 2015-2021 target_train dates 和 2023-2025 target_eval dates。
+- split report 证明 target_eval/query dates 没有进入 target_train/adaptation。
+- 同一 `adaptation_setting, seed, region` 的 target_train/eval dates 与 method 无关。

@@ -1,14 +1,14 @@
-# 阶段 5：HyRAO-Meta 与稀疏适配
+# 阶段 5：HyperDA full-target-train adaptation
 
 ## 目标
 
-在强 baseline 完成后，实现 region-conditioned adaptation。
+在强 baseline 完成后，实现 target-specific HyperDA / adapter / LoRA adaptation。
 
 ## 组件
 
 ```text
-Region descriptor encoder
-Region latent tuning
+Prompt / target_train summary encoder
+Generated lightweight operator
 Adapter tuning
 Gradient Top-K block tuning
 FISA
@@ -17,9 +17,9 @@ HISA optional
 
 ## 任务
 
-1. 从 target 2022 input-only stream 构建 descriptors。
-2. 实现 region latent initialization。
-3. 实现 support adaptation loop。
+1. 从 target 2022 input stream 和 labeled target_train summaries 构建 prompt。
+2. 实现 target-specific generated operator initialization。
+3. 实现 full target_train adaptation loop。
 4. 实现 adapter tuning。
 5. 实现 block-level gradient scores。
 6. 实现 FISA score。
@@ -27,8 +27,8 @@ HISA optional
 
 ## 验收标准
 
-- K=0 不使用 target analysis labels。
-- K>0 只使用 2022 support labels。
-- 所有方法使用相同 support dates。
-- Adaptation logs 同时记录 support loss 和 query metrics。
-- 报告 support seeds 方差。
+- target_full_train 只使用 2015-2021 target_train labels。
+- 2023-2025 target_eval labels 只用于最终评估。
+- 所有方法使用相同 target_train/eval manifest。
+- Adaptation logs 记录 target_train loss，但不能用 target_eval metrics 做选择。
+- 报告 run seed 方差；legacy K-shot 才报告 support seed 方差。

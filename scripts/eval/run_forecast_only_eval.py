@@ -2,8 +2,8 @@
 
 No-leakage declaration:
     - ForecastBaseline: no fit(), no training, no target label access
-    - Dataset: split from frozen manifest, no query label in normalization
-    - Evaluator: query labels used only as evaluation labels post-prediction
+    - Dataset: split from frozen manifest, no target_eval label in normalization
+    - Evaluator: target_eval labels used only as evaluation labels post-prediction
     - mask coverage audit: computes obs_mask vs label_valid_mask per region
 
 Usage:
@@ -20,8 +20,9 @@ import pandas as pd
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 OUT_DIR = Path("artifacts/results/phase3_forecast_only")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -31,8 +32,9 @@ MAX_SAMPLES_PER_REGION = 100
 
 def audit_mask_coverage(
     region: str,
-    split_type: str = "target_query",
-    K: int = 4,
+    split_type: str = "target_eval",
+    adaptation_setting: str = "target_full_train",
+    K: int | None = None,
     seed: int = 0,
     max_samples: int = 100,
 ) -> Dict[str, Any]:
@@ -48,6 +50,7 @@ def audit_mask_coverage(
             target_region=region,
             split_type=split_type,
             K=K, seed=seed,
+            adaptation_setting=adaptation_setting,
             freeze_manifest=MANIFEST,
         )
     except Exception as e:
@@ -90,7 +93,13 @@ def audit_mask_coverage(
     return result
 
 
-def quick_diagnostic(region: str, split_type: str = "target_query", K: int = 4, seed: int = 0):
+def quick_diagnostic(
+    region: str,
+    split_type: str = "target_eval",
+    adaptation_setting: str = "target_full_train",
+    K: int | None = None,
+    seed: int = 0,
+):
     """Quick diagnostic without running full evaluation."""
     from hydroda.data.dataset import HydroDADataset
 
@@ -102,6 +111,7 @@ def quick_diagnostic(region: str, split_type: str = "target_query", K: int = 4, 
             target_region=region,
             split_type=split_type,
             K=K, seed=seed,
+            adaptation_setting=adaptation_setting,
             freeze_manifest=MANIFEST,
         )
     except Exception as e:
@@ -121,6 +131,7 @@ def quick_diagnostic(region: str, split_type: str = "target_query", K: int = 4, 
     diag = {
         "region": region,
         "split_type": split_type,
+        "adaptation_setting": adaptation_setting,
         "K": K,
         "seed": seed,
         "n_samples_total": len(ds),
@@ -134,10 +145,18 @@ def quick_diagnostic(region: str, split_type: str = "target_query", K: int = 4, 
     return diag
 
 
-def run_forecast_only_fast(region: str, split_type: str = "target_query", K: int = 4, seed: int = 0, max_samples: int = 50):
+def run_forecast_only_fast(
+    region: str,
+    split_type: str = "target_eval",
+    adaptation_setting: str = "target_full_train",
+    K: int | None = None,
+    seed: int = 0,
+    max_samples: int = 50,
+):
     """Run forecast-only on first max_samples for quick verification."""
     from hydroda.baselines.forecast import ForecastBaseline
     from hydroda.data.dataset import HydroDADataset
+    from hydroda.data.file_hash import compute_sha256
     from hydroda.evaluation.harness import evaluate_split
 
     try:
@@ -148,6 +167,7 @@ def run_forecast_only_fast(region: str, split_type: str = "target_query", K: int
             target_region=region,
             split_type=split_type,
             K=K, seed=seed,
+            adaptation_setting=adaptation_setting,
             freeze_manifest=MANIFEST,
         )
     except Exception as e:
@@ -164,10 +184,11 @@ def run_forecast_only_fast(region: str, split_type: str = "target_query", K: int
         predictor=predictor,
         split_role=split_type,
         experiment_id=f"phase3_{region}",
-        protocol_freeze_id="hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12",
+        protocol_freeze_id=PROTOCOL_FREEZE_ID,
         method="forecast_only",
         split_file=SPLITS_JSON,
         mask_file=REGION_MASKS,
+        split_manifest_sha256=compute_sha256(SPLITS_JSON) if Path(SPLITS_JSON).exists() else "",
         preloaded=False,
     )
     ds.close()

@@ -6,17 +6,20 @@
 
 防御：任务明确是 reference DA analysis-increment emulation，不声称自然真值。
 
-### R2. “few-shot 是否只是很多 patch？”
+### R2. “目标域用了完整训练集，是否还叫泛化？”
 
-防御：K 是 DA dates/cycles；报告 effective support budget，但不把 patch 数当 K。
+防御：明确部署设定是 train/eval temporal holdout under target-domain shift：
+2015-2021 target_train 可用于构造 target-specific operator，2023-2025 target_eval
+严格 held out。旧 K-shot 只作为 secondary ablation。
 
 ### R3. “是否有 query leakage？”
 
-防御：split manifest + no-leakage tests + normalization provenance。
+防御：split manifest + target_train/eval date hashes + no-leakage tests + normalization provenance。
 
 ### R4. “简单校正是否已经足够？”
 
-防御：Forecast、source mean、target mean、monthly mean、ridge 都作为主 baseline。
+防御：Forecast、source-only、prompt-conditioned shared、adapter/LoRA 作为主 baseline；
+target-train mean/monthly/ridge 只作为 internal sanity 或附录。
 
 ### R5. “区域是否 cherry-pick？”
 
@@ -49,9 +52,9 @@ seed variance tables
 
 ```text
 1. Define the deployment problem.
-2. Introduce HydroDA-OOD and K-date protocol.
-3. Show simple baselines and OOD gap.
-4. Show adaptation difficulty under K=4/12.
-5. Introduce HyRAO.
-6. Analyze where HyRAO helps: high-update events, dryland, irrigation, vegetation opacity, mountain stress.
+2. Introduce HydroDA-OOD target_train/target_eval protocol.
+3. Show forecast/source-only OOD gap.
+4. Compare target_full_train adaptation mechanisms.
+5. Introduce HyperDA parameter generation.
+6. Analyze legacy K-shot ablation and high-update events after model selection.
 ```

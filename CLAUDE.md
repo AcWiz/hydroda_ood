@@ -1,4 +1,4 @@
-# CLAUDE.md — HydroDA-OOD / HyperDA V4 Executable Research System
+# CLAUDE.md — HydroDA-OOD / HyperDA V4.2 Executable Research System
 
 你正在参与 `hydroda_ood`。请把本仓库当成**论文级 Scientific ML / Geoscience ML / Data Assimilation 实验系统**，而不是一次性脚本项目。
 
@@ -30,6 +30,7 @@ neural land DA analysis-increment emulation
 ```text
 context/00_EXECUTABLE_CONTEXT_MAP.md
 context/01_RESEARCH_CONTRACT.md
+docs/COAUTHOR_CONTEXT.md
 完整研究计划方案.md
 当前 phase 对应的 tasks/*.md
 相关 specs/*.yaml
@@ -50,6 +51,13 @@ CLAUDE.md
 ```
 
 不要把临时规则粗暴追加到本文件末尾。新增协议必须进入对应 context/spec/task，并在 `context/00_EXECUTABLE_CONTEXT_MAP.md` 中注册。
+
+项目清理、legacy/active 文件分类和共同一作协作入口见：
+
+```text
+docs/COAUTHOR_CONTEXT.md
+docs/PROJECT_CLEANUP_AUDIT.md
+```
 
 ---
 
@@ -113,9 +121,9 @@ pred_analysis_rootzone = forecast_rootzone + pred_increment_rootzone
 论文主问题固定为：
 
 ```text
-Can hydroclimatic spatio-temporal prompts generate target-specific neural data
-assimilation increment operators that outperform shared conditional models and
-parameter-efficient few-cycle adaptation under cross-continental hydroclimatic shift?
+Can hydroclimatic spatio-temporal prompts and full target-training-period
+adaptation generate target-specific neural data assimilation increment operators
+that outperform shared conditional models under cross-continental hydroclimatic shift?
 ```
 
 必须围绕以下可证伪比较组织实验：
@@ -126,16 +134,16 @@ parameter-efficient few-cycle adaptation under cross-continental hydroclimatic s
 3. Prompt-conditioned shared backbone
 4. Adapter tuning
 5. LoRA tuning
-6. HyperDA-Zero
-7. HyperDA-Calib
-8. HyperDA-Refine
+6. HyperDA generated operator from full target train
+7. HyperDA generated operator + full target train calibration
+8. HyperDA-Refine with full target train
 ```
 
 论文主表**不再**包含以下无明确学术定位或容易分散主线的 heuristic baseline：
 
 ```text
 source_mean_increment
-target_support_mean_increment
+target_train_mean_increment
 monthly_mean_increment
 ridge_calibration
 nearest-source specialist
@@ -224,38 +232,51 @@ Source: CN + AU -> Target: US
 
 ---
 
-## 5. 时间协议与 K-cycle calibration
+## 5. 时间协议与 target full-training-set adaptation
 
 冻结时间协议：
 
 ```text
-Source fit/train:           2015-01-01 to 2020-12-31
-Source validation:          2021-01-01 to 2021-12-31
-Target context/calibration: 2022-01-01 to 2022-12-31
-Target query/evaluation:    2023-01-01 to 2025-12-31
+Source fit/train:             2015-01-01 to 2020-12-31
+Source validation:            2021-01-01 to 2021-12-31
+Target train/adaptation:      2022-01-01 to 2022-12-31
+Target held-out evaluation:   2023-01-01 to 2025-12-31
 ```
 
-K 正式定义为：
+主协议不再是 few-shot / K-shot target adaptation。HyperDA / adapter / LoRA /
+prompt 构造在训练完成后，可以使用 held-out target domain 的完整 2022
+target training period 来构造 target-specific operator / prompt / adapter /
+generated parameters，然后只在严格 held-out 的 2023-2025 target evaluation
+period 上评估。
+
+主实验适配设置：
 
 ```text
-K = number of labeled target DA analysis cycles from target context year 2022
+adaptation_setting = target_full_train
 ```
 
-主实验 K 取值：
+旧 K-cycle 设定仅保留为 secondary legacy ablation：
 
 ```text
-K ∈ {0, 4, 12}
+legacy_few_shot_K ∈ {0, 4, 12}
 ```
 
-支持集采样：
+旧 K 定义仍是：
 
 ```text
-K=0:  no target analysis labels; input-side prompt only
-K=4:  one labeled DA cycle sampled from each season in 2022
-K=12: one labeled DA cycle sampled from each month in 2022
+K = number of labeled target DA analysis cycles from target train year 2022
 ```
 
 K 不是 patches、pixels 或 mini-batches 数。同一天切出多少 spatial patches，都只算一个 DA calibration cycle。
+
+主协议中不再单独保留 2022 support set；`target_support` 只作为旧代码 /
+legacy few-shot ablation 的别名。论文主表必须按 `adaptation_setting` 区分，
+不能把 `K` 作为主实验列。
+
+Source 覆盖范围主协议保持 `source_fit=2015-2020`、`source_val=2021`。
+不要把 2021 混入 source fit，因为它承担 checkpoint / early stopping /
+hyperparameter selection。source 2022 或 2015-2021 refit 只能作为明确标注的
+expanded-source secondary ablation，不能混入主表。
 
 ---
 
@@ -264,15 +285,15 @@ K 不是 patches、pixels 或 mini-batches 数。同一天切出多少 spatial p
 严格禁止：
 
 ```text
-target query labels 用于 prompt construction
-target query labels 用于 normalization
-target query labels 用于 support-date selection
-target query labels 用于 early stopping
-target query labels 用于 model selection
-target query labels 用于 threshold calibration
-target query labels 用于 prompt feature tuning
+target evaluation labels 用于 prompt construction
+target evaluation labels 用于 normalization
+target evaluation labels 用于 target-train/adaptation sample selection
+target evaluation labels 用于 early stopping
+target evaluation labels 用于 model selection
+target evaluation labels 用于 threshold calibration
+target evaluation labels 用于 prompt feature tuning
 analysis increments 用于定义 region
-model errors 用于重新定义 region 或 support dates
+model errors 用于重新定义 region 或 target-train/adaptation dates
 ```
 
 以下模块必须走同一套协议对象或 guard：
@@ -280,7 +301,7 @@ model errors 用于重新定义 region 或 support dates
 ```text
 PromptBuilder
 Normalizer
-SupportSampler
+TargetAdaptationSampler
 Dataset
 Evaluator
 ExperimentRunner
@@ -301,8 +322,8 @@ Phase 2: HydroDADataset + ProtocolConfig + LeakageGuard
 Phase 3: Forecast-only + metrics/evaluation sanity
 Phase 4: Source-only backbone + prompt-conditioned shared backbone
 Phase 5: Source operator episode bank
-Phase 6: HyperDA-Zero / HyperDA-Calib / HyperDA-Refine
-Phase 7: K=4/K=12 adapter and LoRA comparison
+Phase 6: HyperDA target-full-train generation / calibration / refinement
+Phase 7: adapter and LoRA full-target-train comparison; K=0/4/12 only as legacy ablation
 Phase 8: US-only development report
 Phase 9: CN/AU expansion and leave-one-continent-out
 ```
@@ -352,8 +373,11 @@ config snapshot
 split manifest path
 protocol freeze id
 method name
-K
-support seed
+adaptation_setting
+legacy K only for few-shot ablations
+target_train_dates_hash
+target_eval_dates_hash
+split_manifest_sha256
 trainable parameter count
 adaptation steps
 metrics_long.csv

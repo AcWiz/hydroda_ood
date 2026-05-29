@@ -3,9 +3,8 @@
 No-leakage declaration:
     - Uses trained FiLMConditionalResUNet + RegionPromptEncoder checkpoint
     - Prompt uses input-side features only (x, region_id, month)
-    - No target_query labels used in prompt construction
-    - Target region uses either source-mean embedding (K=0) or target-specific
-      embedding from calibration (K>0)
+    - No target_eval/query labels used in prompt construction
+    - Held-out target unseen-region prompt fallback is retained for split compatibility
 """
 from __future__ import annotations
 
@@ -36,7 +35,7 @@ class PromptConditionedBackbonePredictor:
     Loads checkpoint, sets model and prompt encoder to eval mode, and predicts
     with region-conditioned prompt.
 
-    K=0 inference:
+    Held-out target unseen-region prompt fallback:
         When target region is not in the source region set, uses the mean of all
         source region embeddings as the target region embedding. This is correct
         because the prompt encoder's num_regions only covers source regions,
@@ -101,7 +100,7 @@ class PromptConditionedBackbonePredictor:
             self.prompt_encoder.load_state_dict(checkpoint["prompt_encoder_state_dict"])
         self.prompt_encoder.to(device).eval()
 
-        # BUG FIX: K=0 inference — target region not in source region set.
+        # Held-out target fallback: target region not in source region set.
         # The prompt_encoder was trained with num_regions = len(source_regions).
         # _REGION_TO_IDX maps global region names to indices 0..5, but the
         # prompt encoder's embedding indices correspond only to source regions.
@@ -160,7 +159,7 @@ class PromptConditionedBackbonePredictor:
     def _build_prompt(self, x_norm: torch.Tensor, region_idx: int, month_val: int) -> torch.Tensor:
         """Build prompt vector z, handling unseen target region.
 
-        When the target region is unseen during training (K=0, not in source set),
+        When the target region is unseen during training (not in source set),
         uses pre-computed mean of source embeddings instead of aliasing a
         wrong source region embedding.
         """
@@ -171,7 +170,7 @@ class PromptConditionedBackbonePredictor:
             # Target is a source region: use standard prompt encoder forward
             return self.prompt_encoder(x_norm, region_ids, month)
 
-        # Target region not in source set (K=0): manually assemble prompt
+        # Target region not in source set: manually assemble prompt
         # using mean of source region embeddings
         input_stats = self.prompt_encoder._compute_input_stats(x_norm)  # [1, C*2]
         i_emb = self.prompt_encoder.input_proj(input_stats)  # [1, 16]
@@ -204,7 +203,7 @@ class PromptConditionedBackbonePredictor:
 
         x_norm = self._normalize(x)
 
-        # Build prompt — handles K=0 target region via _build_prompt
+        # Build prompt, including held-out target fallback via _build_prompt.
         region_id_str = sample.get("target_region_id", "")
         region_idx = _REGION_TO_IDX.get(region_id_str, self._target_region_idx)
         month_val = int(sample.get("month", 6))

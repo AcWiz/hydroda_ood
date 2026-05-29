@@ -297,7 +297,7 @@ def generate_markdown_report(
     lines.append("**NOT** from:")
     lines.append("- DA.nc analysis increments")
     lines.append("- Model prediction errors")
-    lines.append("- target_query labels")
+    lines.append("- target_eval/query labels")
     lines.append("- Any training or evaluation results")
 
     with open(output_path, "w") as f:

@@ -5,18 +5,18 @@ Usage:
     # Source-only backbone
     PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \\
         --checkpoint artifacts/checkpoints/phase4_source_only/US-R1/best.pt \\
-        --target_region US-R1 --K 0 --seed 0 \\
-        --split_type target_query --predictor_type source_only
+        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --split_type target_eval --predictor_type source_only
 
     # Prompt-conditioned shared backbone
     PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \\
         --checkpoint artifacts/checkpoints/phase4_prompt_conditioned/US-R1/best.pt \\
-        --target_region US-R1 --K 0 --seed 0 \\
-        --split_type target_query --predictor_type prompt_conditioned
+        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --split_type target_eval --predictor_type prompt_conditioned
 
 No-leakage declaration:
-    - Evaluation uses target_query split (post-prediction label use only)
-    - No target_query labels used in training/normalization/prompt
+    - Evaluation uses target_eval split (target_query alias accepted; post-prediction label use only)
+    - No target_eval/target_query labels used in training/normalization/prompt
     - Reuses evaluate_split() from harness.py
     - Metrics computed post-prediction with LeakageGuard protection
 """
@@ -32,15 +32,16 @@ import pandas as pd
 
 from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
 from hydroda.data.dataset import HydroDADataset
+from hydroda.data.file_hash import compute_sha256
 from hydroda.evaluation.harness import evaluate_split
 from hydroda.utils.device import resolve_device
 
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 
 _PREDICTOR_OUTPUT_DIRS = {
     "source_only": Path("artifacts/results/phase4_source_only"),
@@ -78,9 +79,12 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate neural backbone checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint")
     parser.add_argument("--target_region", type=str, required=True)
-    parser.add_argument("--K", type=int, default=0)
+    parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
+        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+    parser.add_argument("--K", type=int, default=None,
+        help="Legacy few-shot K value. Ignored for target_full_train.")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--split_type", type=str, default="target_query")
+    parser.add_argument("--split_type", type=str, default="target_eval")
     parser.add_argument("--max_samples", type=int, default=0,
         help="Max samples to evaluate (0 = no limit, evaluate all)")
     parser.add_argument("--device", type=str, default="cuda")
@@ -92,6 +96,11 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None,
         help="Override output directory")
     args = parser.parse_args()
+
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
 
     # Resolve device
     device = resolve_device(args.device, require_gpu=args.require_gpu)
@@ -111,7 +120,7 @@ def main():
     print(f"{phase_label}: Neural Backbone Evaluation")
     print(f"  predictor_type={args.predictor_type}")
     print(f"  checkpoint={ckpt_path}")
-    print(f"  target_region={args.target_region}  K={args.K}  seed={args.seed}")
+    print(f"  target_region={args.target_region}  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  split_type={args.split_type}  max_samples={args.max_samples if args.max_samples > 0 else 'all'}")
     print(f"  device={device}")
     print("=" * 60)
@@ -126,6 +135,7 @@ def main():
         split_type=args.split_type,
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
 
@@ -154,15 +164,18 @@ def main():
     print(f"\nRunning evaluation...")
     start_time = time.time()
 
+    split_manifest_sha256 = compute_sha256(SPLITS_JSON) if Path(SPLITS_JSON).exists() else ""
+    experiment_suffix = args.adaptation_setting if args.K is None else f"{args.adaptation_setting}_K{args.K}"
     rows = evaluate_split(
         dataset=dataset,
         predictor=predictor,
         split_role=args.split_type,
-        experiment_id=f"phase4_{args.predictor_type}_{args.target_region}_K{args.K}_S{args.seed}",
+        experiment_id=f"phase4_{args.predictor_type}_{args.target_region}_{experiment_suffix}_S{args.seed}",
         protocol_freeze_id=PROTOCOL_FREEZE_ID,
         method=predictor.method_name,
         split_file=SPLITS_JSON,
         mask_file=REGION_MASKS_NC,
+        split_manifest_sha256=split_manifest_sha256,
         preloaded=False,
         max_samples=args.max_samples if args.max_samples > 0 else None,
     )
@@ -217,12 +230,14 @@ def main():
         "method": predictor.method_name,
         "checkpoint": str(ckpt_path),
         "target_region": args.target_region,
+        "adaptation_setting": args.adaptation_setting,
         "K": args.K,
         "seed": args.seed,
         "split_type": args.split_type,
         "n_samples_evaluated": n_samples,
         "n_metric_rows": len(rows),
         "protocol_freeze_id": PROTOCOL_FREEZE_ID,
+        "split_manifest_sha256": split_manifest_sha256,
         "surface": {
             "skill_mean": float(skill_rows[skill_rows["variable"] == "surface"]["value"].mean()),
             "skill_std": float(skill_rows[skill_rows["variable"] == "surface"]["value"].std()),
@@ -262,6 +277,7 @@ def main():
     diagnostics = {
         "checkpoint": str(ckpt_path),
         "target_region": args.target_region,
+        "adaptation_setting": args.adaptation_setting,
         "split_type": args.split_type,
         "predictor_type": args.predictor_type,
         "n_samples_total": total_samples,

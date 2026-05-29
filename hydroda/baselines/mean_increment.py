@@ -1,10 +1,10 @@
-"""Mean increment baselines — source_mean and target_support_mean.
+"""Mean increment baselines — source_mean and target_train_mean.
 
 No-leakage declaration:
     - SourceMeanIncrementBaseline: fit on source_train only, no target labels
-    - TargetSupportMeanIncrementBaseline: fit on target_support only, uses support labels
+    - TargetSupportMeanIncrementBaseline: legacy name; fit on target_train only
     - Both use metric_mask for valid pixel selection before computing mean
-    - No target_query labels used in any computation
+    - No target_eval/query labels used in any computation
 """
 
 from __future__ import annotations
@@ -12,12 +12,25 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, Any, Optional
 
+from hydroda.data.leakage_guard import LeakageGuard
+from hydroda.data.protocol import ProtocolConfig
+
+
+def _check_target_train_samples(samples: list, purpose: str) -> None:
+    dates = [s.get("date_str", "") for s in samples if s.get("date_str")]
+    if dates:
+        LeakageGuard(ProtocolConfig()).check_target_adaptation_scope(
+            dates,
+            purpose=purpose,
+            labels_allowed=True,
+        )
+
 
 class SourceMeanIncrementBaseline:
     """Mean increment baseline fit on source_train data.
 
     Computes global mean increment from source_train region+dates.
-    Predicts this same increment for ALL target_query samples, all K values.
+    Predicts this same increment for target_eval/query samples.
 
     Prediction: pred_increment = mean_increment (fitted from source_train)
 
@@ -96,14 +109,15 @@ class SourceMeanIncrementBaseline:
 
 
 class TargetSupportMeanIncrementBaseline:
-    """Mean increment baseline fit on target_support data.
+    """Mean increment baseline fit on target_train data.
 
-    Computes global mean increment from target_support region+dates.
-    Only applicable for K > 0 (K=0 has no target_support).
+    This class name is retained for legacy scripts. Under the main protocol it
+    computes the mean increment from the full 2015-2021 target_train/adaptation
+    period, not a K-shot support set.
 
-    Prediction: pred_increment = mean_increment (fitted from target_support)
+    Prediction: pred_increment = mean_increment (fitted from target_train)
 
-    Uses target support labels (for fit), but never sees target_query labels.
+    Uses target train labels (for fit), but never sees target_eval/query labels.
     """
 
     def __init__(self):
@@ -112,12 +126,13 @@ class TargetSupportMeanIncrementBaseline:
         self._fitted = False
 
     def fit(self, samples: list) -> "TargetSupportMeanIncrementBaseline":
-        """Compute mean increment from target_support samples.
+        """Compute mean increment from target_train samples.
 
         Args:
-            samples: List of sample dicts from target_support split.
+            samples: List of sample dicts from target_train split or legacy target_support split.
                 Each must contain: increment_surface, increment_rootzone, metric_mask.
         """
+        _check_target_train_samples(samples, "target_train_mean_increment_fit")
         inc_s_list = []
         inc_r_list = []
 
@@ -128,13 +143,13 @@ class TargetSupportMeanIncrementBaseline:
             inc_r_list.append(s["increment_rootzone"][valid])
 
         if not inc_s_list:
-            raise ValueError("No valid pixels found in target_support samples")
+            raise ValueError("No valid pixels found in target_train samples")
 
         all_inc_s = np.concatenate(inc_s_list)
         all_inc_r = np.concatenate(inc_r_list)
 
         if all_inc_s.size == 0 or all_inc_r.size == 0:
-            raise ValueError("No valid pixels found in target_support samples")
+            raise ValueError("No valid pixels found in target_train samples")
 
         self._mean_inc_surface = float(np.mean(all_inc_s))
         self._mean_inc_rootzone = float(np.mean(all_inc_r))
@@ -142,7 +157,7 @@ class TargetSupportMeanIncrementBaseline:
         return self
 
     def predict(self, sample: Dict[str, Any]) -> Dict[str, np.ndarray]:
-        """Predict using global mean increment from target_support.
+        """Predict using global mean increment from target_train.
 
         Args:
             sample: Dict with forecast_surface, forecast_rootzone keys.
@@ -170,3 +185,6 @@ class TargetSupportMeanIncrementBaseline:
             "pred_analysis_surface": (forecast_surface + pred_inc_s).astype(np.float32),
             "pred_analysis_rootzone": (forecast_rootzone + pred_inc_r).astype(np.float32),
         }
+
+
+TargetTrainMeanIncrementBaseline = TargetSupportMeanIncrementBaseline

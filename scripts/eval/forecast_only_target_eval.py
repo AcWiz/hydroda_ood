@@ -3,8 +3,8 @@
 
 No-leakage declaration:
     - ForecastBaseline: no fit(), no training, no target label access
-    - Dataset: split from frozen manifest, target_query split only
-    - Evaluator: query labels used only as evaluation labels post-prediction
+    - Dataset: split from frozen manifest, target_eval split only
+    - Evaluator: target_eval labels used only as evaluation labels post-prediction
 
 Usage:
     PYTHONPATH=. python scripts/eval/forecast_only_target_eval.py \
@@ -27,21 +27,23 @@ import pandas as pd
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 
 
 def run_forecast_only_for_region(
     region: str,
-    split_type: str = "target_query",
-    K: int = 4,
+    split_type: str = "target_eval",
+    adaptation_setting: str = "target_full_train",
+    K: int | None = None,
     seed: int = 0,
     max_samples: int = 0,
 ) -> tuple[list, dict]:
     """Run forecast-only evaluation for a single region."""
     from hydroda.baselines.forecast import ForecastBaseline
     from hydroda.data.dataset import HydroDADataset
+    from hydroda.data.file_hash import compute_sha256
     from hydroda.evaluation.harness import evaluate_split
 
     ds = HydroDADataset(
@@ -51,19 +53,22 @@ def run_forecast_only_for_region(
         target_region=region,
         split_type=split_type,
         K=K, seed=seed,
+        adaptation_setting=adaptation_setting,
         freeze_manifest=MANIFEST,
     )
 
     predictor = ForecastBaseline()
+    split_manifest_sha256 = compute_sha256(SPLITS_JSON) if Path(SPLITS_JSON).exists() else ""
     rows = evaluate_split(
         dataset=ds,
         predictor=predictor,
         split_role=split_type,
-        experiment_id=f"phase3_forecast_only_{region}",
+        experiment_id=f"phase3_forecast_only_{region}_{adaptation_setting}",
         protocol_freeze_id=PROTOCOL_FREEZE_ID,
         method="forecast_only",
         split_file=SPLITS_JSON,
         mask_file=REGION_MASKS,
+        split_manifest_sha256=split_manifest_sha256,
         preloaded=False,
         max_samples=max_samples if max_samples > 0 else None,
     )
@@ -117,12 +122,16 @@ def main():
         help="Output directory for results"
     )
     parser.add_argument(
-        "--split_type", type=str, default="target_query",
-        help="Split type (default: target_query)"
+        "--split_type", type=str, default="target_eval",
+        help="Split type (default: target_eval)"
     )
     parser.add_argument(
-        "--K", type=int, default=4,
-        help="Number of calibration cycles (default: 4)"
+        "--adaptation_setting", type=str, default="target_full_train",
+        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)"
+    )
+    parser.add_argument(
+        "--K", type=int, default=None,
+        help="Legacy few-shot K value. Ignored for target_full_train."
     )
     parser.add_argument(
         "--seed", type=int, default=0,
@@ -134,6 +143,11 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
+
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -143,11 +157,12 @@ def main():
 
     for region in args.target_region:
         print(f"\n[{region}] Starting forecast-only evaluation...")
-        print(f"  split_type={args.split_type}, K={args.K}, seed={args.seed}, max_samples={args.max_samples}")
+        print(f"  split_type={args.split_type}, adaptation_setting={args.adaptation_setting}, K={args.K}, seed={args.seed}, max_samples={args.max_samples}")
 
         rows, info = run_forecast_only_for_region(
             region=region,
             split_type=args.split_type,
+            adaptation_setting=args.adaptation_setting,
             K=args.K,
             seed=args.seed,
             max_samples=args.max_samples,

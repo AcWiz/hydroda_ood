@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Train prompt-conditioned shared backbone (FiLMConditionalResUNet + RegionPromptEncoder).
 
-Multi-region mixed training: source_fit (2015-2020) from all source regions.
+Multi-region mixed training: source_fit (2015-2021) from all source regions.
 Each sample's prompt uses the region embedding for the region with the most
 valid pixels in the sample.
 
 Usage:
     PYTHONPATH=. python scripts/train/train_prompt_conditioned_shared.py \\
-        --target_region US-R1 --K 0 --seed 0 \\
+        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
         --max_epochs 5 --batch_size 1 --accum_steps 4 --lr 3e-4 \\
         --weight_decay 1e-4 --grad_clip 1.0 \\
         --width 32 --prompt_dim 64 \\
@@ -16,10 +16,10 @@ Usage:
         --config configs/model_resunet_main.yaml
 
 No-leakage declaration:
-    - Training uses source_fit split only (2015-2020, all source regions)
+    - Training uses source_fit split only (2015-2021, all source regions)
     - Normalization stats from source_fit only
     - Region prompt uses input-side features only
-    - No target_query labels used in training/normalization/early_stopping
+    - No target_eval/target_query labels used in training/normalization/early_stopping
 """
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 
 from hydroda.data.dataset import HydroDADataset
+from hydroda.data.file_hash import compute_sha256
 from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
@@ -55,10 +56,10 @@ from hydroda.utils.runtime import gather_runtime_info, get_git_hash, get_timesta
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 CHECKPOINT_DIR = "artifacts/checkpoints/phase4_prompt_conditioned"
-PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 PHASE = "phase4_prompt_conditioned"
 
 _ALL_US_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
@@ -275,6 +276,9 @@ class PromptConditionedTrainer:
         selection_metric: str = "source_val_transfer_safe_score",
         source_val_residual_gain: bool = True,
         cuda_sync_debug: bool = False,
+        target_region: Optional[str] = None,
+        adaptation_setting: str = "target_full_train",
+        K: Optional[int] = None,
         # Resume: optionally inject pre-computed stats to skip recompute
         _resume_ch_mean: Optional[np.ndarray] = None,
         _resume_ch_std: Optional[np.ndarray] = None,
@@ -294,6 +298,12 @@ class PromptConditionedTrainer:
         self.experiment_id = experiment_id
         self.protocol_freeze_id = protocol_freeze_id
         self.split_manifest_path = split_manifest_path
+        split_manifest_file = Path(split_manifest_path) if split_manifest_path else None
+        self.split_manifest_sha256 = (
+            compute_sha256(split_manifest_file)
+            if split_manifest_file is not None and split_manifest_file.exists()
+            else ""
+        )
         self.grad_clip = grad_clip
         self.model_width = model_width
         self.prompt_dim = prompt_dim
@@ -315,6 +325,9 @@ class PromptConditionedTrainer:
         self.selection_metric = selection_metric
         self.source_val_residual_gain = source_val_residual_gain
         self.cuda_sync_debug = cuda_sync_debug
+        self.target_region = target_region
+        self.adaptation_setting = adaptation_setting
+        self.K = None if adaptation_setting == "target_full_train" else K
         self._source_region_global_indices = sorted(global_to_source_lookup.keys()) if global_to_source_lookup else []
 
         # AMP
@@ -384,6 +397,12 @@ class PromptConditionedTrainer:
         self.current_epoch = 0
         self.best_loss = float("inf")
         self.best_safe_score = float("-inf")
+        self.best_selection_metric = self.selection_metric
+        self.best_selection_value = (
+            float("-inf")
+            if self.selection_metric == "source_val_transfer_safe_score"
+            else float("inf")
+        )
         self._skipped_steps = 0
         self.train_history: List[Dict[str, float]] = []
         self.val_history: List[Dict[str, float]] = []
@@ -400,6 +419,25 @@ class PromptConditionedTrainer:
             self._jsonl_logger = JSONLLogger(run_manager.get_log_dir())
             # Open console.log for tee output
             run_manager.open_console_log()
+
+    def _selection_value(
+        self,
+        train_loss: float,
+        source_val_metrics: Dict[str, float],
+        gain_results: Dict[str, Any],
+    ) -> Tuple[float, bool]:
+        """Return (value, maximize) for the configured checkpoint-selection metric."""
+        if self.selection_metric == "source_val_transfer_safe_score":
+            if not gain_results or "selection_score" not in gain_results:
+                return float("-inf"), True
+            return float(gain_results["selection_score"]), True
+        if self.selection_metric == "source_val_loss":
+            if not source_val_metrics or "source_val_loss" not in source_val_metrics:
+                return float("inf"), False
+            return float(source_val_metrics["source_val_loss"]), False
+        if self.selection_metric == "train_loss":
+            return float(train_loss), False
+        raise ValueError(f"Unsupported selection_metric: {self.selection_metric}")
 
     def _compute_normalization_stats(self) -> None:
         print(f"Computing normalization stats from training dataset (n={len(self.train_dataset)})...")
@@ -1032,52 +1070,73 @@ class PromptConditionedTrainer:
                     self._jsonl_logger.log_eval(log_data)
 
             # Best checkpoint selection based on selection_metric
-            is_best = False
-            best_metric = avg_loss
-            if gain_results and "selection_score" in gain_results:
-                if gain_results["selection_score"] > self.best_safe_score:
-                    is_best = True
-                    best_metric = gain_results["selection_score"]
-            elif source_val_metrics and "source_val_loss" in source_val_metrics:
-                sv_loss = source_val_metrics["source_val_loss"]
-                if sv_loss < self.best_loss:
-                    is_best = True
-                    best_metric = sv_loss
-            elif avg_loss < self.best_loss:
-                is_best = True
+            selected_value, maximize_selection = self._selection_value(
+                train_loss=avg_loss,
+                source_val_metrics=source_val_metrics,
+                gain_results=gain_results,
+            )
+            current_best = self.best_selection_value
+            is_best = (
+                selected_value > current_best
+                if maximize_selection
+                else selected_value < current_best
+            )
+            safe_score = (
+                float(gain_results["selection_score"])
+                if gain_results and "selection_score" in gain_results
+                else float("-inf")
+            )
+            is_best_safe_score = safe_score > self.best_safe_score
 
             if is_best:
-                self.best_loss = best_metric
+                self.best_selection_metric = self.selection_metric
+                self.best_selection_value = selected_value
+                if maximize_selection:
+                    self.best_safe_score = selected_value
+                else:
+                    self.best_loss = selected_value
                 ckpt_path = self.checkpoint_dir / "best.pt"
-                self.save_checkpoint(ckpt_path, epoch, best_metric, "best", gain_results=gain_results)
+                self.save_checkpoint(
+                    ckpt_path,
+                    epoch,
+                    selected_value,
+                    "best",
+                    gain_results=gain_results,
+                    selection_value=selected_value,
+                )
 
             # Save safe_score / transfer_safe_score checkpoint
-            if gain_results:
-                if gain_results["selection_score"] > self.best_safe_score:
-                    self.best_safe_score = gain_results["selection_score"]
-                    tag = "best_source_val_transfer_safe_score"
-                    self.save_checkpoint(
-                        self.checkpoint_dir / f"checkpoint_{tag}.pt",
-                        epoch, gain_results["selection_score"], tag,
-                        gain_results=gain_results,
-                    )
+            if is_best_safe_score:
+                self.best_safe_score = safe_score
+                tag = "best_source_val_transfer_safe_score"
+                self.save_checkpoint(
+                    self.checkpoint_dir / f"checkpoint_{tag}.pt",
+                    epoch,
+                    safe_score,
+                    tag,
+                    gain_results=gain_results,
+                    selection_value=safe_score,
+                )
 
             # Always save last.pt
             self.save_checkpoint(
                 self.checkpoint_dir / "last.pt", epoch, avg_loss, "last",
                 gain_results=gain_results,
+                selection_value=selected_value,
             )
 
             # Epoch checkpoints
             self.save_checkpoint(
                 self.checkpoint_dir / "checkpoint_latest.pt", epoch, avg_loss, "latest",
                 gain_results=gain_results,
+                selection_value=selected_value,
             )
             if (epoch + 1) % self.checkpoint_every_n_epochs == 0:
                 self.save_checkpoint(
                     self.checkpoint_dir / f"checkpoint_epoch_{epoch:03d}.pt",
                     epoch, avg_loss, f"epoch_{epoch:03d}",
                     gain_results=gain_results,
+                    selection_value=selected_value,
                 )
 
             record = {
@@ -1149,6 +1208,7 @@ class PromptConditionedTrainer:
             "=" * 60,
             f"Training Complete",
             f"  Total epochs:     {self.current_epoch}",
+            f"  Best selection:   {self.best_selection_metric}={self.best_selection_value:.6f}",
             f"  Best loss:        {self.best_loss:.6f}",
             f"  Best safe score:  {self.best_safe_score:.6f}",
             f"  Skipped steps:    {self._skipped_steps}",
@@ -1243,8 +1303,10 @@ class PromptConditionedTrainer:
             f"- **Normalization source**: source_fit_only",
             f"- **Early stopping source**: {'source_val_only' if has_source_val else 'train_loss_only'}",
             f"- **Model selection source**: {'source_val_only' if has_source_val else 'best_train_loss'}",
-            f"- **Target query usage**: eval_only_no_early_stopping",
+            f"- **Target eval usage**: eval_only_no_early_stopping",
             f"- **Leakage guard**: pass",
+            f"- **Best selection metric**: {self.best_selection_metric}",
+            f"- **Best selection value**: {self.best_selection_value:.6f}",
             f"- **Best loss**: {self.best_loss:.6f}",
             f"- **Best safe score**: {self.best_safe_score:.6f}",
             f"- **Skipped steps**: {self._skipped_steps}",
@@ -1267,13 +1329,27 @@ class PromptConditionedTrainer:
         with open(readme_path, "w") as f:
             f.write("\n".join(lines))
 
-    def save_checkpoint(self, path: Path, epoch: int, loss: float, tag: str = "", gain_results: Optional[Dict[str, Any]] = None) -> None:
+    def save_checkpoint(
+        self,
+        path: Path,
+        epoch: int,
+        loss: float,
+        tag: str = "",
+        gain_results: Optional[Dict[str, Any]] = None,
+        selection_value: Optional[float] = None,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_selection_value = float(loss if selection_value is None else selection_value)
         checkpoint: Dict[str, Any] = {
             "tag": tag,
             "epoch": epoch,
             "loss": loss,
             "best_loss": self.best_loss,
+            "best_safe_score": self.best_safe_score,
+            "best_selection_metric": self.best_selection_metric,
+            "best_selection_value": self.best_selection_value,
+            "selection_metric": self.selection_metric,
+            "selection_value": resolved_selection_value,
             "experiment_id": self.experiment_id,
             "protocol_freeze_id": self.protocol_freeze_id,
             "split_manifest_path": self.split_manifest_path,
@@ -1306,6 +1382,13 @@ class PromptConditionedTrainer:
                 "lambda_amp": self.lambda_amp,
                 "selection_metric": self.selection_metric,
                 "source_val_residual_gain": self.source_val_residual_gain,
+                "target_region": self.target_region,
+                "adaptation_setting": self.adaptation_setting,
+                "K": self.K,
+                "protocol_freeze_id": self.protocol_freeze_id,
+                "selection_value": resolved_selection_value,
+                "best_selection_metric": self.best_selection_metric,
+                "best_selection_value": self.best_selection_value,
                 "ch_mean": self._ch_mean.tolist() if self._ch_mean is not None else None,
                 "ch_std": self._ch_std.tolist() if self._ch_std is not None else None,
                 "inc_mean": self._inc_mean.tolist() if self._inc_mean is not None else None,
@@ -1332,7 +1415,17 @@ class PromptConditionedTrainer:
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.best_loss = float(checkpoint.get("best_loss", float("inf")))
-        self.best_safe_score = checkpoint.get("selection_score", float("-inf"))
+        self.best_safe_score = checkpoint.get(
+            "best_safe_score",
+            checkpoint.get("selection_score", float("-inf")),
+        )
+        self.best_selection_metric = checkpoint.get("best_selection_metric", self.selection_metric)
+        if "best_selection_value" in checkpoint:
+            self.best_selection_value = float(checkpoint["best_selection_value"])
+        elif self.best_selection_metric == "source_val_transfer_safe_score":
+            self.best_selection_value = float(self.best_safe_score)
+        else:
+            self.best_selection_value = float(self.best_loss)
         self._skipped_steps = checkpoint.get("config", {}).get("skipped_steps", 0)
         self.train_history = checkpoint.get("train_history", [])
         self.val_history = checkpoint.get("val_history", [])
@@ -1360,6 +1453,8 @@ class PromptConditionedTrainer:
             "protocol_freeze_id": self.protocol_freeze_id,
             "best_loss": self.best_loss,
             "best_safe_score": self.best_safe_score,
+            "best_selection_metric": self.best_selection_metric,
+            "best_selection_value": self.best_selection_value,
             "final_epoch": self.current_epoch - 1,
             "total_epochs_completed": self.current_epoch,
             "model_width": self.model_width,
@@ -1375,9 +1470,11 @@ class PromptConditionedTrainer:
             "selection_metric": self.selection_metric,
             "source_val_residual_gain": self.source_val_residual_gain,
             "source_regions": self.source_regions,
+            "split_manifest_sha256": self.split_manifest_sha256,
             "normalization_source": "source_fit_only",
             "early_stopping_source": "source_val_only" if has_source_val else "train_loss_only",
             "model_selection_source": "source_val_only" if has_source_val else "best_train_loss",
+            "target_eval_usage": "eval_only_no_early_stopping",
             "target_query_usage": "eval_only_no_early_stopping",
             "leakage_guard_status": "pass",
             "skipped_steps": self._skipped_steps,
@@ -1394,7 +1491,10 @@ class PromptConditionedTrainer:
 def parse_args():
     parser = argparse.ArgumentParser(description="Train prompt-conditioned shared backbone")
     parser.add_argument("--target_region", type=str, required=True)
-    parser.add_argument("--K", type=int, default=0)
+    parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
+        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+    parser.add_argument("--K", type=int, default=None,
+        help="Legacy few-shot K value. Ignored for target_full_train.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--prompt_dim", type=int, default=64)
@@ -1440,7 +1540,12 @@ def parse_args():
         help="Disable residual gain calibration (use alpha=1.0 for both variables)")
     parser.add_argument("--cuda_sync_debug", action="store_true",
         help="Enable CUDA synchronize after each forward pass (debug only)")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
+    return args
 
 
 def load_config(config_path: str) -> dict:
@@ -1454,7 +1559,7 @@ def main():
 
     print("=" * 60)
     print("Phase 4B: Prompt-Conditioned Shared Backbone Training")
-    print(f"  target_region={args.target_region}  K={args.K}  seed={args.seed}")
+    print(f"  target_region={args.target_region}  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
     print(f"  device={device}  width={args.width}  prompt_dim={args.prompt_dim}  amp={args.amp}")
     print("=" * 60)
@@ -1469,7 +1574,10 @@ def main():
 
     # Run config
     run_config = {
-        "target_region": args.target_region, "K": args.K, "seed": args.seed,
+        "target_region": args.target_region,
+        "adaptation_setting": args.adaptation_setting,
+        "K": args.K,
+        "seed": args.seed,
         "width": args.width, "prompt_dim": args.prompt_dim,
         "max_epochs": args.max_epochs, "batch_size": args.batch_size,
         "lr": args.lr, "weight_decay": args.weight_decay,
@@ -1540,6 +1648,7 @@ def main():
         split_type="source_fit",
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     print(f"  source_fit samples: {len(train_dataset)}")
@@ -1566,6 +1675,7 @@ def main():
         split_type="source_val",
         K=args.K,
         seed=args.seed,
+        adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     print(f"  source_val samples: {len(source_val_dataset)}")
@@ -1644,6 +1754,9 @@ def main():
         selection_metric=args.selection_metric,
         source_val_residual_gain=not args.no_source_val_residual_gain,
         cuda_sync_debug=args.cuda_sync_debug,
+        target_region=args.target_region,
+        adaptation_setting=args.adaptation_setting,
+        K=args.K,
     )
 
     # Resume: restore full training state after Trainer creation
@@ -1667,6 +1780,8 @@ def main():
     trainer.save_summary_json(summary_path)
 
     print(f"\nTraining completed in {elapsed:.1f}s ({elapsed/60:.1f}min)")
+    print(f"  best_selection_metric={trainer.best_selection_metric}")
+    print(f"  best_selection_value={trainer.best_selection_value:.6f}")
     print(f"  best_loss={trainer.best_loss:.6f}")
     print(f"  best_safe_score={trainer.best_safe_score:.6f}")
     print(f"  skipped_steps={trainer._skipped_steps}")

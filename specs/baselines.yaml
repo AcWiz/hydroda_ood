@@ -1,4 +1,15 @@
 paper_main_baselines:
+  target_full_train:
+    - forecast_only
+    - source_only_backbone
+    - prompt_conditioned_shared_backbone
+    - adapter_tuning_full_target_train
+    - lora_tuning_full_target_train
+    - hyperda_generated_operator_full_target_train
+    - hyperda_refine_full_target_train
+
+legacy_few_shot_ablation:
+  status: secondary_not_main_table
   K0:
     - forecast_only
     - source_only_backbone
@@ -15,23 +26,30 @@ paper_main_baselines:
 
 internal_sanity_only:
   - source_mean_increment
-  - target_support_mean_increment
-  - source_monthly_mean_increment
-  - target_monthly_support_increment
+  - target_train_mean_increment
+  - target_monthly_train_increment
   - ridge_calibration
   - nearest_source_specialist
   - prompt_weighted_specialist
   - knn_parameter_interpolation
   - linear_prompt_to_parameter
   - random_prompt_hyperda
+  # Deprecated names retained in old result files/scripts:
+  - target_support_mean_increment
+  - target_monthly_support_increment
 
 fairness_requirements:
   same_source_train_split: true
-  same_target_support_dates: true
-  same_target_query_dates: true
-  same_normalization_scope: source_train_only
-  same_support_seed: true
+  same_source_val_split: true
+  same_target_train_period: true
+  same_target_eval_dates: true
+  same_normalization_scope: source_fit_only
+  same_adaptation_setting: true
   same_evaluation_mask: true
+  target_eval_labels_eval_only: true
   report_trainable_parameters: true
   report_adaptation_steps: true
   report_wall_clock_time: true
+  report_target_train_dates_hash: true
+  report_target_eval_dates_hash: true
+  report_split_manifest_sha256: true

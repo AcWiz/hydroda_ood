@@ -114,11 +114,18 @@ def main():
         "artifacts/regions/US_region_masks.nc",
         "artifacts/regions/US_region_mask_tensor.pt",
         "artifacts/regions/US_region_masks_manifest.json",
+        "artifacts/splits/US_loro_target_train_splits.json",
+    ]
+    optional_legacy_paths = [
         "artifacts/splits/US_loro_kdate_splits.json",
     ]
     for p in artifact_paths:
         exists = Path(p).exists()
         print(f"  {p}: {'exists' if exists else 'NOT FOUND'}")
+    print("\nOptional legacy artifact paths:")
+    for p in optional_legacy_paths:
+        exists = Path(p).exists()
+        print(f"  {p}: {'exists' if exists else 'not found'}")
 
     print("\n" + "=" * 60)
 

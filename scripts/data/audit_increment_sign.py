@@ -15,7 +15,7 @@ import xarray as xr
 from pathlib import Path
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 OUTPUT_JSON = "artifacts/experiments/phase3_simple_baselines/US/verification/increment_sign_convention_audit.json"
 OUTPUT_DIR = Path(OUTPUT_JSON).parent
@@ -32,23 +32,19 @@ def run_audit():
     with open(SPLITS_JSON) as f:
         splits_data = json.load(f)
 
-    splits_by_key = {
-        (s["target_region_id"], s["K"], s["seed"]): s
-        for s in splits_data["splits"]
-    }
-
     region_ds = xr.open_dataset(REGION_MASKS_NC)
     region_mask_int = region_ds["region_mask_integer"].values.astype(np.int16)
     region_ds.close()
 
-    # Sample 20 (region, K, seed, time_index) combos
+    # Sample target_eval (region, adaptation_setting, seed, time_index) combos.
     combos = []
     for split in splits_data["splits"]:
         target_region = split["target_region_id"]
-        K = split["K"]
+        setting = split.get("adaptation_setting", "legacy_few_shot")
         seed = split["seed"]
-        for date_entry in split["target_query_dates"][:5]:  # first 5 dates per split
-            combos.append((target_region, K, seed, date_entry["time_index"], date_entry["date_str"]))
+        date_list = split.get("target_eval_dates", split.get("target_query_dates", []))
+        for date_entry in date_list[:5]:  # first 5 dates per split
+            combos.append((target_region, setting, seed, date_entry["time_index"], date_entry["date_str"]))
 
     random.seed(42)
     sample_combos = random.sample(combos, min(50, len(combos)))
@@ -58,7 +54,7 @@ def run_audit():
     tgt_var = ds.variables["target"]
 
     results = []
-    for region, K, seed, ti, date_str in sample_combos:
+    for region, setting, seed, ti, date_str in sample_combos:
         rnum = int(region.split("-R")[1])
         target_mask = np.isin(region_mask_int, [rnum]).astype(np.float32)
 
@@ -108,7 +104,7 @@ def run_audit():
 
         results.append({
             "region": region,
-            "K": K,
+            "adaptation_setting": setting,
             "seed": seed,
             "time_index": int(ti),
             "date_str": date_str,

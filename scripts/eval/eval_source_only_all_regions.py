@@ -6,12 +6,12 @@ where _active_region_mask is restricted to that region's pixels only, then runs
 evaluate_split. Results are saved both per-region and aggregated.
 
 Usage:
-    # Evaluate on 2023-2025 target_query (default):
+    # Evaluate on 2023-2025 target_eval (default):
     PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
         --checkpoint .../checkpoint_best_source_val_safe_score.pt \
-        --split_type target_query --K 0 --seed 0 --device cuda
+        --split_type target_eval --adaptation_setting target_full_train --seed 0 --device cuda
 
-    # Evaluate on 2021 source_val:
+    # Evaluate on 2022 source_val:
     PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
         --checkpoint .../checkpoint_best_source_val_safe_score.pt \
         --split_type source_val --K 0 --seed 0 --device cuda
@@ -30,9 +30,9 @@ from hydroda.utils.device import resolve_device
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_final_2015_2025_context2022_query2023_2025_k0_4_12"
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 _SPLIT_LOOKUP_REGION = "US-R1"
 
 
@@ -40,8 +40,9 @@ def _evaluate_one_region(
     predictor: SourceOnlyBackbonePredictor,
     region_id: str,
     split_type: str,
-    K: int,
+    K: int | None,
     seed: int,
+    adaptation_setting: str,
 ) -> list:
     """Evaluate predictor on a single region's pixels.
 
@@ -57,6 +58,7 @@ def _evaluate_one_region(
         split_type=split_type,
         K=K,
         seed=seed,
+        adaptation_setting=adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
     dataset.set_active_region(region_id)
@@ -88,10 +90,13 @@ def main():
     parser = argparse.ArgumentParser(description="Per-region evaluation for source-only all-regions checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True,
         help="Path to checkpoint.pt")
-    parser.add_argument("--split_type", type=str, default="target_query",
-        choices=["source_val", "target_query", "target_support"],
-        help="Split to evaluate on. Default: target_query (2023-2025).")
-    parser.add_argument("--K", type=int, default=0)
+    parser.add_argument("--split_type", type=str, default="target_eval",
+        choices=["source_val", "target_eval", "target_query", "target_train", "target_support"],
+        help="Split to evaluate on. Default: target_eval (2023-2025).")
+    parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
+        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+    parser.add_argument("--K", type=int, default=None,
+        help="Legacy few-shot K value. Ignored for target_full_train.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_dir", type=str, default=None,
@@ -99,6 +104,11 @@ def main():
     parser.add_argument("--regions", type=str, nargs="*", default=None,
         help="Specific regions to evaluate (default: all US-R1..US-R6)")
     args = parser.parse_args()
+
+    if args.adaptation_setting == "target_full_train":
+        args.K = None
+    elif args.K is None:
+        args.K = 0
 
     device = resolve_device(args.device, require_gpu=False)
 
@@ -121,7 +131,7 @@ def main():
     print(f"  split_type:  {args.split_type}")
     print(f"  results:     {results_dir}")
     print(f"  regions:     {regions}")
-    print(f"  K={args.K}  seed={args.seed}  device={device}")
+    print(f"  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}  device={device}")
     print("=" * 60)
 
     # Load predictor once, reuse for all regions
@@ -141,6 +151,7 @@ def main():
             split_type=args.split_type,
             K=args.K,
             seed=args.seed,
+            adaptation_setting=args.adaptation_setting,
         )
         all_rows.extend(rows)
         print(f"    {region_id}: {len(rows)} metric rows")

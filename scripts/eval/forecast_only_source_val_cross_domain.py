@@ -1,6 +1,6 @@
 """Forecast-only source_val cross-domain evaluation.
 
-Evaluates forecast-only baseline for each target_region on source_val (2021),
+Evaluates forecast-only baseline for each target_region on source_val (2022),
 distinguishing between:
 - target_domain: samples whose sample_region_id == target_region
 - source_domain: samples whose sample_region_id != target_region
@@ -23,7 +23,7 @@ def main():
     root = Path("/sharefiles1/fenglonghan/projects/hydroda_ood")
     da_nc_path = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
     region_masks_nc = str(root / "artifacts/regions/US_region_masks.nc")
-    splits_json = str(root / "artifacts/splits/US_loro_kdate_splits.json")
+    splits_json = str(root / "artifacts/splits/US_loro_target_train_splits.json")
     output_dir = root / "reports/source_val_cross_domain"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_csv = output_dir / "forecast_only_source_val_cross_domain.csv"
@@ -44,8 +44,9 @@ def main():
             splits_json=splits_json,
             target_region=target_region,
             split_type="source_val",
-            K=0,
+            K=None,
             seed=0,
+            adaptation_setting="target_full_train",
             freeze_manifest=str(
                 root / "artifacts/protocol/US_region_split_freeze_manifest.json"
             ),

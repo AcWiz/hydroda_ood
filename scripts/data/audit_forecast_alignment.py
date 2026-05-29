@@ -18,7 +18,7 @@ import xarray as xr
 from pathlib import Path
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 OUTPUT_JSON = "artifacts/experiments/phase3_simple_baselines/US/verification/forecast_alignment_audit.json"
 OUTPUT_DIR = Path(OUTPUT_JSON).parent
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -29,11 +29,11 @@ def run_audit():
     with open(SPLITS_JSON) as f:
         splits_data = json.load(f)
 
-    # Collect all (region, time_index) combos from target_query
+    # Collect all (region, time_index) combos from target_eval.
     combos = []
     for split in splits_data["splits"]:
         target_region = split["target_region_id"]
-        for date_entry in split["target_query_dates"]:
+        for date_entry in split.get("target_eval_dates", split.get("target_query_dates", [])):
             combos.append((target_region, date_entry["time_index"], date_entry["date_str"]))
 
     random.seed(42)
