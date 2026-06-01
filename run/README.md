@@ -25,6 +25,13 @@ bash run/phase4_source_only.sh
 
 # HyperDA source-stage prior and target adaptation protocol skeleton
 bash run/phase4_hyperda.sh US-R1 0 1
+bash run/phase5_hyperda_target_adapt.sh
+
+# One-batch smoke for the target adaptation runner
+MAX_EPOCHS=1 MAX_TRAIN_BATCHES=1 MAX_VAL_BATCHES=1 \
+  bash run/phase5_hyperda_target_adapt.sh
+
+# Explicit source checkpoint / region / seed / GPU
 bash run/phase5_hyperda_target_adapt.sh <source_checkpoint> US-R1 0 1
 ```
 
