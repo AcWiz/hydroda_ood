@@ -43,9 +43,16 @@ variants:
     frozen:
       - theta0
       - H_psi
+      - adapter_basis_bank
     trainable:
-      - zeta_R_only
+      - target_latent
+      - adapter_coefficient_residuals
+      - lightweight_operator_residual
+      - output_head_residual
+      - residual_gain
     adaptation_data: full_target_train_2015_2021
+    selection_data: target_val_2022_preregistered_adaptation_selection_only
+    final_eval_data: target_eval_2023_2025_offline_only
     steps: fixed_pre_registered
   legacy_HyperDA_Zero:
     status: secondary_few_shot_ablation

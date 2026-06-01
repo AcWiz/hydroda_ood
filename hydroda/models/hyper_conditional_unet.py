@@ -10,6 +10,11 @@ import torch.nn.functional as F
 from hydroda.models.hyper_adapters import BasisHyperAdapter
 from hydroda.models.conditional_unet import FiLMLayer
 from hydroda.models.resunet import ConvBlock
+from hydroda.models.target_adaptation import (
+    AdapterCoefficientResidual,
+    MonthlyResidualGain,
+    TargetLatentPrompt,
+)
 
 
 class HyperAdapterConditionalResUNet(nn.Module):
@@ -27,10 +32,13 @@ class HyperAdapterConditionalResUNet(nn.Module):
         hyper_adapter_bottleneck: Optional[int] = None,
         hyper_adapter_scale: float = 1.0,
         zero_raw_increment_init: bool = False,
+        enable_target_adaptation: bool = False,
+        target_latent_dim: int = 32,
     ) -> None:
         super().__init__()
         self.prompt_dim = prompt_dim
         self.hyper_n_basis = int(hyper_n_basis)
+        self.enable_target_adaptation = bool(enable_target_adaptation)
         self.hyper_adapter_bottleneck = (
             int(hyper_adapter_bottleneck)
             if hyper_adapter_bottleneck is not None
@@ -71,15 +79,63 @@ class HyperAdapterConditionalResUNet(nn.Module):
         )
         self.hyper_adapter = self.hyper_adapter_b
         self.head = nn.Conv2d(width, out_channels, 1)
+        if self.enable_target_adaptation:
+            self.target_prompt = TargetLatentPrompt(prompt_dim=prompt_dim, latent_dim=target_latent_dim)
+            self.target_adapter_coefficient_residual_b = AdapterCoefficientResidual(self.hyper_n_basis)
+            self.target_adapter_coefficient_residual_d2 = AdapterCoefficientResidual(self.hyper_n_basis)
+            self.target_adapter_coefficient_residual_d1 = AdapterCoefficientResidual(self.hyper_n_basis)
+            self.residual_gain = MonthlyResidualGain(out_channels=out_channels)
+        else:
+            self.target_prompt = None
+            self.target_adapter_coefficient_residual_b = None
+            self.target_adapter_coefficient_residual_d2 = None
+            self.target_adapter_coefficient_residual_d1 = None
+            self.residual_gain = None
 
         self._zero_raw_increment_init = zero_raw_increment_init
         if zero_raw_increment_init:
             nn.init.zeros_(self.head.weight)
             nn.init.zeros_(self.head.bias)
 
-    def forward(self, x: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _target_residual(self, name: str) -> torch.Tensor | None:
+        module = getattr(self, name)
+        return module() if module is not None else None
+
+    def freeze_source_prior_for_target_adaptation(self) -> None:
+        """Freeze source prior parameters and leave only target adaptation trainable."""
+        if not self.enable_target_adaptation:
+            raise ValueError("target adaptation modules are not enabled")
+        for param in self.parameters():
+            param.requires_grad_(False)
+        for module in [
+            self.target_prompt,
+            self.target_adapter_coefficient_residual_b,
+            self.target_adapter_coefficient_residual_d2,
+            self.target_adapter_coefficient_residual_d1,
+            self.residual_gain,
+        ]:
+            if module is None:
+                continue
+            for param in module.parameters():
+                param.requires_grad_(True)
+
+    def target_trainable_parameter_names(self) -> list[str]:
+        """Return trainable parameter names after target adaptation freezing."""
+        return [name for name, param in self.named_parameters() if param.requires_grad]
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        z: Optional[torch.Tensor] = None,
+        month: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if z is None:
             raise ValueError("HyperAdapterConditionalResUNet requires a prompt tensor z")
+        if self.enable_target_adaptation:
+            if month is None:
+                raise ValueError("target adaptation residual gain requires month tensor")
+            if self.target_prompt is not None:
+                z = self.target_prompt(z)
 
         e1 = self.enc1(x)
         e1 = self.film1(e1, z)
@@ -90,12 +146,27 @@ class HyperAdapterConditionalResUNet(nn.Module):
 
         b = self.bottleneck(e3)
         b = self.film_b(b, z)
-        b = self.hyper_adapter_b(b, z)
+        b = self.hyper_adapter_b(
+            b,
+            z,
+            logit_residual=self._target_residual("target_adapter_coefficient_residual_b"),
+        )
 
         d2 = F.interpolate(b, size=e2.shape[-2:], mode="bilinear", align_corners=False)
         d2 = self.dec2(torch.cat([d2, e2], dim=1))
-        d2 = self.hyper_adapter_d2(d2, z)
+        d2 = self.hyper_adapter_d2(
+            d2,
+            z,
+            logit_residual=self._target_residual("target_adapter_coefficient_residual_d2"),
+        )
         d1 = F.interpolate(d2, size=e1.shape[-2:], mode="bilinear", align_corners=False)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
-        d1 = self.hyper_adapter_d1(d1, z)
-        return self.head(d1)
+        d1 = self.hyper_adapter_d1(
+            d1,
+            z,
+            logit_residual=self._target_residual("target_adapter_coefficient_residual_d1"),
+        )
+        y = self.head(d1)
+        if self.enable_target_adaptation and self.residual_gain is not None:
+            y = self.residual_gain(y, month)
+        return y

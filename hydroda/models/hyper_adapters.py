@@ -56,18 +56,41 @@ class BasisHyperAdapter(nn.Module):
             [_AdapterBasis(channels, self.adapter_bottleneck) for _ in range(n_basis)]
         )
 
-    def coefficients(self, z: torch.Tensor) -> torch.Tensor:
+    def coefficients(
+        self,
+        z: torch.Tensor,
+        logit_residual: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Return per-sample basis coefficients with shape [B, n_basis]."""
-        return torch.softmax(self.coeff_head(z), dim=-1)
+        logits = self.coeff_head(z)
+        if logit_residual is not None:
+            if logit_residual.ndim == 1:
+                if logit_residual.shape[0] != self.n_basis:
+                    raise ValueError("logit_residual length must match n_basis")
+                logits = logits + logit_residual.view(1, self.n_basis)
+            elif logit_residual.shape == logits.shape:
+                logits = logits + logit_residual
+            else:
+                raise ValueError("logit_residual must have shape [n_basis] or [B, n_basis]")
+        return torch.softmax(logits, dim=-1)
 
-    def forward(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        h: torch.Tensor,
+        z: torch.Tensor,
+        logit_residual: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Apply the prompt-conditioned adapter residual to feature map ``h``."""
-        coeffs = self.coefficients(z)
+        coeffs = self.coefficients(z, logit_residual=logit_residual)
         basis_outputs = torch.stack([basis(h) for basis in self.bases], dim=1)
         mixed = torch.einsum("bm,bmchw->bchw", coeffs, basis_outputs)
         return h + self.adapter_scale * mixed
 
-    def coefficient_entropy(self, z: torch.Tensor) -> torch.Tensor:
+    def coefficient_entropy(
+        self,
+        z: torch.Tensor,
+        logit_residual: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Return per-sample entropy of the adapter coefficient distribution."""
-        coeffs = self.coefficients(z).clamp_min(1e-8)
+        coeffs = self.coefficients(z, logit_residual=logit_residual).clamp_min(1e-8)
         return -(coeffs * coeffs.log()).sum(dim=-1)

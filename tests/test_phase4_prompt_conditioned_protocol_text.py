@@ -39,11 +39,15 @@ def test_hyperda_train_wrapper_uses_target_full_train_protocol():
 
     assert "US_loro_kdate_splits.json" not in text
     assert "K=0" not in text
+    assert "zero-shot" not in text.lower()
     assert "--K" not in text
     assert "--adaptation_setting target_full_train" in text
     assert "US_loro_target_train_splits.json" in text
     assert "--model_type hyperda_basis_adapter" in text
     assert "--selection_metric source_val_transfer_safe_score" in text
+    assert "target_train=2015-2021" in text
+    assert "target_val=2022" in text
+    assert "target_eval=2023-2025" in text
 
 
 def test_hyperda_inference_wrapper_uses_target_eval_protocol():
@@ -57,3 +61,15 @@ def test_hyperda_inference_wrapper_uses_target_eval_protocol():
     assert "phase4_prompt_conditioned_hyperda_basis_adapter_*" in text
     assert 'TARGET_PROMPT_FROM_TARGET_TRAIN="${TARGET_PROMPT_FROM_TARGET_TRAIN:-1}"' in text
     assert 'TARGET_TRAIN_RESIDUAL_GAIN_CALIBRATION="${TARGET_TRAIN_RESIDUAL_GAIN_CALIBRATION:-1}"' in text
+
+
+def test_hyperda_target_adaptation_wrapper_declares_frozen_hypernetwork_protocol():
+    text = Path("run/phase5_hyperda_target_adapt.sh").read_text()
+
+    assert "zero-shot" not in text.lower()
+    assert "target_train=2015-2021" in text
+    assert "target_val=2022" in text
+    assert "target_eval=2023-2025" in text
+    assert "freeze_hypernetwork=true" in text
+    assert "trainable=target_latent,adapter_coefficient_residuals,residual_gain" in text
+    assert "target_eval labels are never used for adaptation" in text
