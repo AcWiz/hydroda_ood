@@ -33,7 +33,8 @@ import pandas as pd
 from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
 from hydroda.data.dataset import HydroDADataset
 from hydroda.data.file_hash import compute_sha256
-from hydroda.evaluation.harness import evaluate_split
+from hydroda.evaluation.harness import evaluate_split, summarize_metric_rows
+from hydroda.training.calibration import calibrate_residual_gain
 from hydroda.utils.device import resolve_device
 
 
@@ -95,12 +96,25 @@ def main():
         help="Type of predictor to load")
     parser.add_argument("--output_dir", type=str, default=None,
         help="Override output directory")
+    parser.add_argument("--target_prompt_from_target_train", action="store_true",
+        help="For prompt-conditioned target_eval, build a fixed prompt from target_train input-side fields only")
+    parser.add_argument("--no_target_prompt_from_target_train", action="store_true",
+        help="Ablation: for prompt-conditioned target_eval, keep the checkpoint fallback/mean target prompt")
+    parser.add_argument("--target_train_residual_gain_calibration", action="store_true",
+        help="For prompt-conditioned target_eval, calibrate residual gain on target_train labels only")
     args = parser.parse_args()
 
     if args.adaptation_setting == "target_full_train":
         args.K = None
     elif args.K is None:
         args.K = 0
+
+    if (
+        args.predictor_type == "prompt_conditioned"
+        and args.split_type in ("target_eval", "target_query")
+        and not args.no_target_prompt_from_target_train
+    ):
+        args.target_prompt_from_target_train = True
 
     # Resolve device
     device = resolve_device(args.device, require_gpu=args.require_gpu)
@@ -153,6 +167,77 @@ def main():
             device=str(device),
             target_region=args.target_region,
         )
+        target_train_dataset = None
+        if args.target_prompt_from_target_train or args.target_train_residual_gain_calibration:
+            if args.split_type not in ("target_eval", "target_query"):
+                raise ValueError(
+                    "--target_prompt_from_target_train and "
+                    "--target_train_residual_gain_calibration are only valid for target_eval/target_query"
+                )
+            target_train_dataset = HydroDADataset(
+                da_nc_path=f"{DATA_DIR}/DA.nc",
+                region_masks_nc=REGION_MASKS_NC,
+                splits_json=SPLITS_JSON,
+                target_region=args.target_region,
+                split_type="target_train",
+                K=args.K,
+                seed=args.seed,
+                adaptation_setting=args.adaptation_setting,
+                freeze_manifest=FREEZE_MANIFEST,
+            )
+
+        if args.target_prompt_from_target_train:
+            print("  Building fixed target prompt from target_train inputs...")
+            prompt_metadata = predictor.set_target_prompt_from_samples(
+                target_train_dataset[i] for i in range(len(target_train_dataset))
+            )
+            print(
+                "  target prompt: "
+                f"n={prompt_metadata['n_samples']} "
+                f"dates={prompt_metadata['date_start']}..{prompt_metadata['date_end']} "
+                f"labels={prompt_metadata['label_usage']}"
+            )
+
+        target_train_calibration = {}
+        if args.target_train_residual_gain_calibration:
+            print("  Calibrating residual gain on target_train labels...")
+            samples_s = []
+            samples_r = []
+            alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
+            for i in range(len(target_train_dataset)):
+                sample = target_train_dataset[i]
+                pred = predictor.predict(sample)
+                mask = sample["metric_mask"]
+                latw = sample.get("latitude_weight")
+                if latw is None:
+                    latw = np.ones(mask.shape, dtype=np.float32)
+                samples_s.append((
+                    pred["pred_increment_surface"],
+                    sample["increment_surface"],
+                    sample["forecast_surface"],
+                    mask,
+                    latw,
+                ))
+                samples_r.append((
+                    pred["pred_increment_rootzone"],
+                    sample["increment_rootzone"],
+                    sample["forecast_rootzone"],
+                    mask,
+                    latw,
+                ))
+            target_train_calibration = calibrate_residual_gain(samples_s, samples_r, alpha_grid)
+            if target_train_calibration:
+                predictor.alpha_surface = target_train_calibration["best_alpha_surface"]
+                predictor.alpha_rootzone = target_train_calibration["best_alpha_rootzone"]
+                predictor.apply_residual_gain = True
+                print(
+                    "  target_train alphas: "
+                    f"surface={predictor.alpha_surface:.3f} "
+                    f"rootzone={predictor.alpha_rootzone:.3f}"
+                )
+
+        if target_train_dataset is not None:
+            target_train_dataset.close()
     else:
         predictor = SourceOnlyBackbonePredictor(
             checkpoint_path=str(ckpt_path),
@@ -166,19 +251,31 @@ def main():
 
     split_manifest_sha256 = compute_sha256(SPLITS_JSON) if Path(SPLITS_JSON).exists() else ""
     experiment_suffix = args.adaptation_setting if args.K is None else f"{args.adaptation_setting}_K{args.K}"
-    rows = evaluate_split(
-        dataset=dataset,
-        predictor=predictor,
-        split_role=args.split_type,
-        experiment_id=f"phase4_{args.predictor_type}_{args.target_region}_{experiment_suffix}_S{args.seed}",
-        protocol_freeze_id=PROTOCOL_FREEZE_ID,
-        method=predictor.method_name,
-        split_file=SPLITS_JSON,
-        mask_file=REGION_MASKS_NC,
-        split_manifest_sha256=split_manifest_sha256,
-        preloaded=False,
-        max_samples=args.max_samples if args.max_samples > 0 else None,
-    )
+    eval_kwargs = {
+        "split_role": args.split_type,
+        "experiment_id": f"phase4_{args.predictor_type}_{args.target_region}_{experiment_suffix}_S{args.seed}",
+        "protocol_freeze_id": PROTOCOL_FREEZE_ID,
+        "method": predictor.method_name,
+        "split_file": SPLITS_JSON,
+        "mask_file": REGION_MASKS_NC,
+        "split_manifest_sha256": split_manifest_sha256,
+        "preloaded": False,
+        "max_samples": args.max_samples if args.max_samples > 0 else None,
+    }
+    rows = []
+    n_samples_effective = n_samples
+    if args.predictor_type == "prompt_conditioned" and args.split_type == "source_test":
+        source_regions = getattr(predictor, "source_regions", [])
+        if not source_regions:
+            raise ValueError("Prompt-conditioned source_test requires source_regions metadata in checkpoint")
+        n_samples_effective = n_samples * len(source_regions)
+        for source_region in source_regions:
+            print(f"  source_test active source region: {source_region}")
+            dataset.set_active_region(source_region)
+            rows.extend(evaluate_split(dataset=dataset, predictor=predictor, **eval_kwargs))
+        dataset.set_active_all_regions()
+    else:
+        rows = evaluate_split(dataset=dataset, predictor=predictor, **eval_kwargs)
 
     elapsed = time.time() - start_time
     print(f"  Evaluation done in {elapsed:.1f}s — {len(rows)} metric rows")
@@ -211,20 +308,7 @@ def main():
         by_season_path = region_output_dir / "metrics_by_season.csv"
         by_season_df.to_csv(by_season_path, index=False)
 
-    # Summary
-    skill_rows = df[df["metric"] == "analysis_skill_vs_forecast"]
-    inc_rmse_rows = df[df["metric"] == "increment_rmse"]
-    inc_corr_rows = df[df["metric"] == "increment_corr"]
-
-    # Extract global skill rows (single-row-per-variable, aggregate-then-sqrt)
-    global_skill_rows = df[df["metric"] == "analysis_skill_vs_forecast_global"]
-    global_latw_skill_rows = df[df["metric"] == "analysis_skill_vs_forecast_latw_global"]
-
-    def _get_global(df_sub, variable):
-        match = df_sub[df_sub["variable"] == variable]
-        if len(match) > 0:
-            return float(match["value"].iloc[0])
-        return float("nan")
+    metric_summary = summarize_metric_rows(df)
 
     summary = {
         "method": predictor.method_name,
@@ -234,26 +318,14 @@ def main():
         "K": args.K,
         "seed": args.seed,
         "split_type": args.split_type,
-        "n_samples_evaluated": n_samples,
+        "n_samples_evaluated": n_samples_effective,
         "n_metric_rows": len(rows),
         "protocol_freeze_id": PROTOCOL_FREEZE_ID,
         "split_manifest_sha256": split_manifest_sha256,
-        "surface": {
-            "skill_mean": float(skill_rows[skill_rows["variable"] == "surface"]["value"].mean()),
-            "skill_std": float(skill_rows[skill_rows["variable"] == "surface"]["value"].std()),
-            "skill_global": _get_global(global_skill_rows, "surface"),
-            "skill_latw_global": _get_global(global_latw_skill_rows, "surface"),
-            "rmse_mean": float(inc_rmse_rows[inc_rmse_rows["variable"] == "surface"]["value"].mean()),
-            "corr_mean": float(inc_corr_rows[inc_corr_rows["variable"] == "surface"]["value"].mean()),
-        },
-        "rootzone": {
-            "skill_mean": float(skill_rows[skill_rows["variable"] == "rootzone"]["value"].mean()),
-            "skill_std": float(skill_rows[skill_rows["variable"] == "rootzone"]["value"].std()),
-            "skill_global": _get_global(global_skill_rows, "rootzone"),
-            "skill_latw_global": _get_global(global_latw_skill_rows, "rootzone"),
-            "rmse_mean": float(inc_rmse_rows[inc_rmse_rows["variable"] == "rootzone"]["value"].mean()),
-            "corr_mean": float(inc_corr_rows[inc_corr_rows["variable"] == "rootzone"]["value"].mean()),
-        },
+        "target_prompt": getattr(predictor, "_target_prompt_metadata", {}),
+        "target_train_residual_gain_calibration": target_train_calibration if args.predictor_type == "prompt_conditioned" else {},
+        "surface": metric_summary.get("surface", {}),
+        "rootzone": metric_summary.get("rootzone", {}),
         "eval_time_s": elapsed,
     }
 
@@ -262,16 +334,16 @@ def main():
         json.dump(summary, f, indent=2)
 
     print(f"\n  Summary saved to {summary_path}")
-    print(f"\n  Surface  skill (per-sample mean) ={summary['surface']['skill_mean']:.4f} \u00b1 {summary['surface']['skill_std']:.4f}")
-    print(f"  Surface  skill (global)         ={summary['surface']['skill_global']:.4f}")
-    print(f"  Surface  skill (latw global)    ={summary['surface']['skill_latw_global']:.4f}")
-    print(f"  Rootzone skill (per-sample mean) ={summary['rootzone']['skill_mean']:.4f} \u00b1 {summary['rootzone']['skill_std']:.4f}")
-    print(f"  Rootzone skill (global)         ={summary['rootzone']['skill_global']:.4f}")
-    print(f"  Rootzone skill (latw global)    ={summary['rootzone']['skill_latw_global']:.4f}")
-    print(f"  Surface  inc_rmse={summary['surface']['rmse_mean']:.4f}")
-    print(f"  Rootzone inc_rmse={summary['rootzone']['rmse_mean']:.4f}")
-    print(f"  Surface  inc_corr={summary['surface']['corr_mean']:.4f}")
-    print(f"  Rootzone inc_corr={summary['rootzone']['corr_mean']:.4f}")
+    print(f"\n  Surface  skill primary global   ={summary['surface']['skill_primary']:.10f}")
+    print(f"  Surface  skill primary latw     ={summary['surface']['skill_latw_primary']:.10f}")
+    print(f"  Surface  skill per-sample med   ={summary['surface']['skill_median']:.10f}")
+    print(f"  Rootzone skill primary global   ={summary['rootzone']['skill_primary']:.10f}")
+    print(f"  Rootzone skill primary latw     ={summary['rootzone']['skill_latw_primary']:.10f}")
+    print(f"  Rootzone skill per-sample med   ={summary['rootzone']['skill_median']:.10f}")
+    print(f"  Surface  WRMSE={summary['surface']['rmse_latw_mean']:.10f}")
+    print(f"  Rootzone WRMSE={summary['rootzone']['rmse_latw_mean']:.10f}")
+    print(f"  Surface  Corr_latw={summary['surface']['corr_latw_mean']:.10f}")
+    print(f"  Rootzone Corr_latw={summary['rootzone']['corr_latw_mean']:.10f}")
 
     # Diagnostics
     diagnostics = {
@@ -281,7 +353,7 @@ def main():
         "split_type": args.split_type,
         "predictor_type": args.predictor_type,
         "n_samples_total": total_samples,
-        "n_samples_evaluated": n_samples,
+        "n_samples_evaluated": n_samples_effective,
         "n_metric_rows": len(rows),
         "metrics_computed": sorted(df["metric"].unique().tolist()),
         "variables": sorted(df["variable"].unique().tolist()),

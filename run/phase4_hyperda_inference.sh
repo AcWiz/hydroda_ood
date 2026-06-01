@@ -1,12 +1,13 @@
 #!/bin/bash
-# Phase 4B Prompt-Conditioned Inference: source_test vs target_eval
+# Phase 4C HyperDA Inference: source_test vs target_eval
 #
 # Usage:
-#   bash run/phase4_prompt_conditioned_inference.sh
-#   bash run/phase4_prompt_conditioned_inference.sh /path/to/checkpoint.pt US-R1 0 1
+#   bash run/phase4_hyperda_inference.sh
+#   bash run/phase4_hyperda_inference.sh /path/to/checkpoint.pt US-R1 0 1
+#   bash run/phase4_hyperda_inference.sh /path/to/checkpoint.pt US-R1 0 1 /path/to/output_dir
 #
-# Evaluates the prompt-conditioned shared backbone on:
-#   - source_test:  2023-2025 held-out source regions R2-R6
+# Evaluates the HyperDA basis-adapter checkpoint on:
+#   - source_test:  2023-2025 held-out source regions
 #   - target_eval:  2023-2025 target-region pixels
 
 set -euo pipefail
@@ -17,14 +18,15 @@ SEED="${3:-0}"
 export CUDA_VISIBLE_DEVICES="${4:-${CUDA_VISIBLE_DEVICES:-1}}"
 OUTPUT_DIR_OVERRIDE="${5:-}"
 TARGET_PROMPT_FROM_TARGET_TRAIN="${TARGET_PROMPT_FROM_TARGET_TRAIN:-1}"
+TARGET_TRAIN_RESIDUAL_GAIN_CALIBRATION="${TARGET_TRAIN_RESIDUAL_GAIN_CALIBRATION:-1}"
 
 cd "$(dirname "$0")/.."
 
-# Auto-detect latest prompt-conditioned checkpoint if not provided.
+# Auto-detect latest HyperDA checkpoint if not provided.
 if [[ -z "$CHECKPOINT_PATH" ]]; then
-    LATEST_RUN=$(ls -td artifacts/runs/phase4_prompt_conditioned/phase4_prompt_conditioned_prompt_conditioned_* 2>/dev/null | head -1)
+    LATEST_RUN=$(ls -td artifacts/runs/phase4_prompt_conditioned/phase4_prompt_conditioned_hyperda_basis_adapter_* 2>/dev/null | head -1)
     if [[ -z "$LATEST_RUN" ]]; then
-        echo "ERROR: No phase4_prompt_conditioned run found. Provide checkpoint path manually."
+        echo "ERROR: No HyperDA run found. Provide checkpoint path manually."
         exit 1
     fi
     if [[ -f "${LATEST_RUN}/checkpoints/checkpoint_best_source_val_transfer_safe_score.pt" ]]; then
@@ -43,7 +45,6 @@ fi
 CHECKPOINT_DIR=$(dirname "$CHECKPOINT_PATH")
 RUN_DIR=$(dirname "$CHECKPOINT_DIR")
 CHECKPOINT_NAME=$(basename "$CHECKPOINT_PATH" .pt)
-
 if [[ -n "$OUTPUT_DIR_OVERRIDE" ]]; then
     OUTPUT_BASE="$OUTPUT_DIR_OVERRIDE"
 else
@@ -52,12 +53,13 @@ fi
 PROTOCOL_ID="hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 
 echo "============================================"
-echo "Phase 4B Prompt-Conditioned Inference"
+echo "Phase 4C HyperDA Inference"
 echo "  checkpoint=${CHECKPOINT_PATH}"
 echo "  target_region=${TARGET_REGION}  adaptation_setting=target_full_train  seed=${SEED}"
 echo "  protocol=${PROTOCOL_ID}"
 echo "  output_base=${OUTPUT_BASE}"
 echo "  target_prompt_from_target_train=${TARGET_PROMPT_FROM_TARGET_TRAIN}"
+echo "  target_train_residual_gain_calibration=${TARGET_TRAIN_RESIDUAL_GAIN_CALIBRATION}"
 echo "  device=gpu:${CUDA_VISIBLE_DEVICES}"
 echo "============================================"
 
@@ -90,11 +92,12 @@ PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \
     --device cuda \
     --output_dir "${EVAL_TARGET_DIR}" \
     $(if [[ "${TARGET_PROMPT_FROM_TARGET_TRAIN}" == "1" ]]; then echo "--target_prompt_from_target_train"; fi) \
+    $(if [[ "${TARGET_TRAIN_RESIDUAL_GAIN_CALIBRATION}" == "1" ]]; then echo "--target_train_residual_gain_calibration"; fi) \
     2>&1 | tee "${OUTPUT_BASE}/log_target_eval.txt"
 
 echo ""
 echo "============================================"
-echo "Phase 4B Prompt-Conditioned Inference Results"
+echo "Phase 4C HyperDA Inference Results"
 echo "============================================"
 
 python3 - "${OUTPUT_BASE}" "${TARGET_REGION}" "${PROTOCOL_ID}" <<'PYTHON_SCRIPT'
@@ -122,7 +125,7 @@ tgt = load_summary(target_summary)
 print()
 print("```")
 print(f"Run ID:      {run_dir.name}")
-print("Method:      prompt_conditioned_shared_backbone")
+print("Method:      hyperda_basis_adapter_shared")
 print(f"Checkpoint: {src['checkpoint'] if src else tgt['checkpoint'] if tgt else 'N/A'}")
 print(f"Protocol:    {protocol_id}")
 print(f"Target:      {target_region}  adaptation_setting=target_full_train")
@@ -157,7 +160,7 @@ if src and tgt:
 
     def extract_time(log_path):
         text = log_path.read_text() if log_path.exists() else ""
-        m = re.search(r"Evaluation (?:done|completed) in ([\d.]+)s", text)
+        m = re.search(r"Evaluation (?:done|completed) in ([\\d.]+)s", text)
         return float(m.group(1)) if m else None
 
     print()

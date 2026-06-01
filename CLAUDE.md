@@ -237,14 +237,15 @@ Source: CN + AU -> Target: US
 冻结时间协议：
 
 ```text
-Source fit/train:             2015-01-01 to 2020-12-31
-Source validation:            2021-01-01 to 2021-12-31
-Target train/adaptation:      2022-01-01 to 2022-12-31
+Source fit/train:             2015-01-01 to 2021-12-31
+Source validation:            2022-01-01 to 2022-12-31
+Target train/adaptation:      2015-01-01 to 2021-12-31
+Target validation:            2022-01-01 to 2022-12-31
 Target held-out evaluation:   2023-01-01 to 2025-12-31
 ```
 
 主协议不再是 few-shot / K-shot target adaptation。HyperDA / adapter / LoRA /
-prompt 构造在训练完成后，可以使用 held-out target domain 的完整 2022
+prompt 构造在训练完成后，可以使用 target domain 的完整 2015-2021
 target training period 来构造 target-specific operator / prompt / adapter /
 generated parameters，然后只在严格 held-out 的 2023-2025 target evaluation
 period 上评估。
@@ -264,7 +265,7 @@ legacy_few_shot_K ∈ {0, 4, 12}
 旧 K 定义仍是：
 
 ```text
-K = number of labeled target DA analysis cycles from target train year 2022
+K = number of labeled target DA analysis cycles from target_train years 2015-2021
 ```
 
 K 不是 patches、pixels 或 mini-batches 数。同一天切出多少 spatial patches，都只算一个 DA calibration cycle。
@@ -273,9 +274,9 @@ K 不是 patches、pixels 或 mini-batches 数。同一天切出多少 spatial p
 legacy few-shot ablation 的别名。论文主表必须按 `adaptation_setting` 区分，
 不能把 `K` 作为主实验列。
 
-Source 覆盖范围主协议保持 `source_fit=2015-2020`、`source_val=2021`。
-不要把 2021 混入 source fit，因为它承担 checkpoint / early stopping /
-hyperparameter selection。source 2022 或 2015-2021 refit 只能作为明确标注的
+Source 覆盖范围主协议保持 `source_fit=2015-2021`、`source_val=2022`。
+不要把 2022 混入 source fit，因为它承担 checkpoint / early stopping /
+hyperparameter selection。source refit 只能作为明确标注的
 expanded-source secondary ablation，不能混入主表。
 
 ---

@@ -44,11 +44,14 @@ derived_targets:
 time_protocol:
   source_fit:
     start: "2015-01-01"
-    end: "2020-12-31"
-  source_val:
-    start: "2021-01-01"
     end: "2021-12-31"
+  source_val:
+    start: "2022-01-01"
+    end: "2022-12-31"
   target_train:
+    start: "2015-01-01"
+    end: "2021-12-31"
+  target_val:
     start: "2022-01-01"
     end: "2022-12-31"
   target_eval:

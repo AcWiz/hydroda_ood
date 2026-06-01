@@ -26,6 +26,7 @@ _SPLIT_TYPE_TO_DATES_KEY = {
     "source_train": "source_train_dates",
     "source_fit": "source_train_dates",
     "source_val": "source_val_dates",
+    "source_test": "source_test_dates",
     "target_train": "target_train_dates",
     "target_adaptation": "target_adaptation_dates",
     "target_eval": "target_eval_dates",
@@ -40,6 +41,7 @@ _DATES_KEY_FALLBACKS = {
     "target_eval_dates": "target_query_dates",
     "target_support_dates": "target_train_dates",
     "target_query_dates": "target_eval_dates",
+    "source_test_dates": "target_eval_dates",
 }
 
 
@@ -116,7 +118,7 @@ class HydroDADataset(Dataset):
             )
         self._active_region_ids = (
             [r for r in _ALL_US_REGIONS if r != target_region]
-            if split_type in ("source_train", "source_fit", "source_val")
+            if split_type in ("source_train", "source_fit", "source_val", "source_test")
             else [target_region]
         )
 
@@ -136,8 +138,8 @@ class HydroDADataset(Dataset):
 
         self._validate_split_dates()
 
-        # Validate: source_fit and source_val must have at least one date
-        if split_type in ("source_train", "source_fit", "source_val") and len(self._date_records) == 0:
+        # Validate: source splits must have at least one date
+        if split_type in ("source_train", "source_fit", "source_val", "source_test") and len(self._date_records) == 0:
             raise ValueError(
                 f"HydroDADataset: {split_type} has zero dates. "
                 f"Manifest {date_key} is empty for target={target_region}, "
@@ -243,6 +245,8 @@ class HydroDADataset(Dataset):
             guard.check_model_selection_scope(dates, purpose="source_val_dataset")
         elif self.split_type in ("source_train", "source_fit"):
             guard.protocol.assert_dates_within(dates, ["source_fit"], "source_training")
+        elif self.split_type == "source_test":
+            guard.protocol.assert_dates_within(dates, ["target_eval"], "source_test_dataset")
 
     def __len__(self) -> int:
         return len(self._time_indices)
@@ -298,15 +302,17 @@ class HydroDADataset(Dataset):
         # region_mask: pixels in active region(s)
         region_mask = (self._active_region_mask > 0.5).astype(np.float32)
 
-        # Resolve sample_region_id: find the dominant region from valid labeled pixels
-        sample_region_id = self._resolve_sample_region_id(label_valid_mask)
-
         # loss_mask = metric_mask: training and evaluation use the same mask.
         # Channel 11 (base_valid_mask) is NOT required in training — SMAP coverage
         # gaps do not indicate missing input features and would cause a catastrophic
         # train-eval distribution mismatch (see FINAL_SOURCE_ONLY_DIAGNOSIS.md).
         loss_mask = np.logical_and(region_mask, label_valid_mask).astype(np.float32)
         metric_mask = loss_mask
+
+        # Resolve sample_region_id from the same active, labeled pixels used by
+        # training/evaluation so single-region source_test passes route to the
+        # matching source prompt.
+        sample_region_id = self._resolve_sample_region_id(metric_mask)
 
         date_str = self._date_str_map.get(time_index, "")
         month, season = _month_and_season(date_str)

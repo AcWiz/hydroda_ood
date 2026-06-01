@@ -97,11 +97,13 @@ def main():
     years = np.array([datetime.fromtimestamp(t).year for t in time_vals])
     source_mask = (years >= 2015) & (years <= 2021)
     val_mask = years == 2022
+    source_test_mask = (years >= 2023) & (years <= 2025)
     target_train_mask = (years >= 2015) & (years <= 2021)
     query_mask = (years >= 2023) & (years <= 2025)
 
     print(f"  Source train (2015-2021): {source_mask.sum()} cycles")
     print(f"  Source val (2022): {val_mask.sum()} cycles")
+    print(f"  Source test (2023-2025): {source_test_mask.sum()} cycles")
     print(f"  Target train/adaptation (2015-2021): {target_train_mask.sum()} cycles")
     print(f"  Target eval/query (2023-2025): {query_mask.sum()} cycles")
 
@@ -146,6 +148,16 @@ def main():
         if np.isfinite(base_valid[idx]).sum() > 0
     ]
     print(f"  Total source val cycles (all regions): {len(val_dates_all)}")
+
+    # Pre-compute source_test_dates ONCE outside region loop (2023-2025).
+    print("Pre-computing source_test_dates for all source regions...")
+    all_test_indices = np.where(source_test_mask)[0]
+    test_dates_all = [
+        (int(idx), dts[idx])
+        for idx in all_test_indices
+        if np.isfinite(base_valid[idx]).sum() > 0
+    ]
+    print(f"  Total source test cycles (all regions): {len(test_dates_all)}")
 
     # Helper: get target dates for a region
     def get_target_dates(region_idx, target_mask, require_valid=False):
@@ -221,6 +233,20 @@ def main():
                     val_dates.append((idx, dt))
         print(f"  Source val cycles (2022): {len(val_dates)}")
 
+        # Get source test dates from pre-computed test_dates_all (2023-2025)
+        test_dates = []
+        for src_idx in source_region_indices:
+            region_mask_3d = region_onehot[src_idx]
+            region_size = region_sizes[src_idx]
+            if region_size == 0:
+                continue
+            for idx, dt in test_dates_all:
+                bv = base_valid[idx]
+                valid = (region_mask_3d & (bv > 0)).sum()
+                if valid > 0:
+                    test_dates.append((idx, dt))
+        print(f"  Source test cycles (2023-2025): {len(test_dates)}")
+
         # Get available target-train dates in 2015-2021
         target_train_available = get_target_dates(target_idx, target_train_mask, require_valid=False)
         print(f"  Available target-train dates in 2015-2021: {len(target_train_available)}")
@@ -246,6 +272,7 @@ def main():
                     seed=seed,
                     source_train_dates=dates_to_serializable(source_dates),
                     source_val_dates=dates_to_serializable(val_dates),
+                    source_test_dates=dates_to_serializable(test_dates),
                     target_train_dates=dates_to_serializable(target_train_selected),
                     query_dates=dates_to_serializable(query_dates),
                     adaptation_setting="target_full_train",
@@ -272,6 +299,7 @@ def main():
                         seed=seed,
                         source_train_dates=dates_to_serializable(source_dates),
                         source_val_dates=dates_to_serializable(val_dates),
+                        source_test_dates=dates_to_serializable(test_dates),
                         support_dates=dates_to_serializable(support_selected),
                         target_train_dates=dates_to_serializable(support_selected),
                         query_dates=dates_to_serializable(query_dates),

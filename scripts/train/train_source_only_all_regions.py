@@ -304,8 +304,8 @@ def _run_per_region_evaluation(
         r_skill = per_region_summary[region_id].get("rootzone", {}).get("analysis_skill_vs_forecast_latw", {})
         s_val = s_skill.get("mean") if isinstance(s_skill, dict) else s_skill
         r_val = r_skill.get("mean") if isinstance(r_skill, dict) else r_skill
-        s_str = f"{s_val:.6f}" if s_val is not None else "N/A"
-        r_str = f"{r_val:.6f}" if r_val is not None else "N/A"
+        s_str = f"{s_val:.10f}" if s_val is not None else "N/A"
+        r_str = f"{r_val:.10f}" if r_val is not None else "N/A"
         print(f"{region_id:<8} {s_str:>14} {r_str:>14}")
     print(f"{'─' * 80}")
 

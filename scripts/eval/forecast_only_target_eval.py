@@ -81,7 +81,15 @@ def aggregate_summary(rows: list) -> dict:
     if not rows:
         return {"status": "no_rows"}
     df = pd.DataFrame(rows)
-    summary = {"method": "forecast_only", "n_samples_evaluated": len(df)}
+    per_sample = df[df["query_date"] != "global"]
+    n_dates = per_sample["query_date"].nunique()
+    n_valid_pixels_total = int(per_sample.groupby("query_date")["n_valid_pixels"].first().sum())
+    summary = {
+        "method": "forecast_only",
+        "n_metric_rows": len(df),
+        "n_dates": n_dates,
+        "n_valid_pixels_total": n_valid_pixels_total,
+    }
 
     for variable in ["surface", "rootzone"]:
         var_df = df[df["variable"] == variable]
@@ -90,21 +98,32 @@ def aggregate_summary(rows: list) -> dict:
         summary[variable] = {}
         for metric in ["analysis_skill_vs_forecast", "analysis_skill_vs_forecast_global",
                         "analysis_skill_vs_forecast_latw_global",
-                        "increment_rmse", "analysis_rmse"]:
+                        "analysis_skill_vs_forecast_latw",
+                        "increment_rmse", "analysis_rmse",
+                        "increment_rmse_latw", "analysis_rmse_latw",
+                        "increment_corr_latw"]:
             metric_df = var_df[var_df["metric"] == metric]
             if metric_df.empty:
                 continue
             # Global metrics are single-row per variable (aggregate-then-sqrt),
             # not per-sample metrics — take the scalar value directly
-            if metric in ("analysis_skill_vs_forecast_global",
-                          "analysis_skill_vs_forecast_latw_global"):
+            if metric.endswith("_global"):
                 summary[variable][metric] = float(metric_df["value"].iloc[0])
+            elif metric == "analysis_skill_vs_forecast_latw":
+                # Per-sample latw skill — aggregate mean/std
+                summary[variable]["analysis_skill_vs_forecast_latw_mean"] = float(metric_df["value"].mean())
+                summary[variable]["analysis_skill_vs_forecast_latw_std"] = float(metric_df["value"].std())
             else:
                 summary[variable][f"{metric}_mean"] = float(metric_df["value"].mean())
                 summary[variable][f"{metric}_std"] = float(metric_df["value"].std())
 
-    summary["n_metric_rows"] = len(df)
-    summary["regions"] = sorted(df["target_region_id"].unique().tolist())
+    # Use active_region_ids (correct per-sample region); sample_region_id is a known dataset bug (always US-R5)
+    per_sample = df[df["query_date"] != "global"]
+    summary["regions"] = sorted(set(
+        rid for aids in per_sample["active_region_ids"].dropna().unique()
+        for rid in str(aids).split("|")
+    ))
+    summary["target_region_id"] = sorted(df["target_region_id"].unique().tolist())
     return summary
 
 

@@ -4,7 +4,7 @@
 
 ## Split leakage
 
-- [ ] target_train/adaptation dates 只来自 2022 target_train。
+- [ ] target_train/adaptation dates 只来自 2015-2021 target_train。
 - [ ] target_eval/query dates 只来自 2023-2025 target_eval。
 - [ ] target_train 和 target_eval 无重叠。
 - [ ] target adaptation sample selection 未使用 target_eval labels。

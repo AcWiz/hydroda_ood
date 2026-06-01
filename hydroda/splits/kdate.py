@@ -2,11 +2,11 @@
 
 No-leakage declaration:
     Main target-train dates are selected by the frozen target training period
-    (2022) and data availability, not by model outcomes.
+    (2015-2021) and data availability, not by model outcomes.
 
     Legacy few-shot support dates are selected ONLY via:
     - Calendar constraints (quarter/month/half-month rules)
-    - Time availability in 2022
+    - Time availability in 2015-2021
     - base_valid_mask coverage threshold
 
     NOT via:

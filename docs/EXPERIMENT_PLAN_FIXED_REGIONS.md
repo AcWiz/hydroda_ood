@@ -59,10 +59,11 @@ region_protocol_version = fixed_bbox_v1
 ```text
 source regions = other five US regions
 target region  = held-out US region
-source fit     = 2015-04 to 2020-12
-source val      = 2021
-target context  = 2022
-target query    = 2023-01 to 2025-05
+source fit     = 2015-01 to 2021-12
+source val      = 2022
+target train    = 2015-2021
+target val      = 2022
+target eval     = 2023-2025
 ```
 
 ### CN/AU stage

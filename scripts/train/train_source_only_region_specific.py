@@ -319,8 +319,8 @@ def _run_post_train_evaluation(
         r_skill = per_region_summary[region_id].get("rootzone", {}).get("analysis_skill_vs_forecast_latw", {})
         s_val = s_skill.get("mean") if isinstance(s_skill, dict) else s_skill
         r_val = r_skill.get("mean") if isinstance(r_skill, dict) else r_skill
-        s_str = f"{s_val:.6f}" if s_val is not None else "N/A"
-        r_str = f"{r_val:.6f}" if r_val is not None else "N/A"
+        s_str = f"{s_val:.10f}" if s_val is not None else "N/A"
+        r_str = f"{r_val:.10f}" if r_val is not None else "N/A"
         print(f"  {region_id} {split_type}: surface_skill={s_str}  rootzone_skill={r_str}")
 
 
@@ -601,7 +601,7 @@ def main():
     # Print results
     print(f"\nTraining completed in {elapsed:.1f}s ({elapsed/60:.1f}min)")
     print(f"  best_loss={trainer.best_loss:.6f}")
-    print(f"  best_safe_score={trainer.best_safe_score:.4f}")
+    print(f"  best_safe_score={trainer.best_safe_score:.10f}")
     print(f"  run_dir={run_manager.get_run_dir()}")
     print(f"  summary={summary_path}")
 

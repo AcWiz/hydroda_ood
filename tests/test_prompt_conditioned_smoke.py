@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
+from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
 from hydroda.models.prompt_encoder import RegionPromptEncoder
 from hydroda.training.losses import WeightedMaskedHuberLoss
 from scripts.train import train_prompt_conditioned_shared as train_pc
@@ -218,6 +219,238 @@ def test_summary_and_checkpoint_record_best_selection_value_for_safe_score():
         assert ckpt["best_selection_value"] == 0.42
 
 
+def test_hyperda_summary_and_checkpoint_record_model_metadata():
+    """HyperDA checkpoints should record generated-adapter architecture metadata."""
+    train_dataset = FakePromptDataset(n_samples=4, H=32, W=48)
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_adapter_scale=0.25,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=2, input_channels=12, hidden_dim=16)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trainer = PromptConditionedTrainer(
+            model=model,
+            prompt_encoder=prompt_encoder,
+            train_dataset=train_dataset,
+            max_epochs=1,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+            checkpoint_dir=tmpdir,
+            source_regions=["US-R1", "US-R2"],
+            global_to_source_lookup={0: 0, 1: 1},
+            model_type="hyperda_basis_adapter",
+            hyper_n_basis=3,
+            hyper_adapter_bottleneck=8,
+            hyper_adapter_scale=0.25,
+        )
+
+        summary_path = Path(tmpdir) / "summary.json"
+        trainer.save_summary_json(summary_path)
+        summary = json.loads(summary_path.read_text())
+
+        assert summary["model_type"] == "hyperda_basis_adapter"
+        assert summary["hyper_n_basis"] == 3
+        assert summary["hyper_adapter_bottleneck"] == 8
+        assert summary["hyper_adapter_scale"] == 0.25
+
+        trainer.save_checkpoint(Path(tmpdir) / "hyperda.pt", epoch=0, loss=1.0, tag="test")
+        ckpt = torch.load(Path(tmpdir) / "hyperda.pt", map_location="cpu", weights_only=False)
+
+        assert ckpt["config"]["model_type"] == "hyperda_basis_adapter"
+        assert ckpt["config"]["hyper_n_basis"] == 3
+        assert ckpt["config"]["hyper_adapter_bottleneck"] == 8
+        assert ckpt["config"]["hyper_adapter_scale"] == 0.25
+
+
+def test_predictor_loads_hyperda_model_type():
+    """Prompt-conditioned predictor should auto-load HyperDA checkpoints."""
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_adapter_scale=0.25,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=2, input_channels=12, hidden_dim=16)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = Path(tmpdir) / "hyperda.pt"
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+                "config": {
+                    "model_type": "hyperda_basis_adapter",
+                    "width": 8,
+                    "prompt_dim": 16,
+                    "num_regions": 2,
+                    "hyper_n_basis": 3,
+                    "hyper_adapter_bottleneck": 8,
+                    "hyper_adapter_scale": 0.25,
+                    "source_region_global_indices": [1, 2],
+                },
+            },
+            ckpt_path,
+        )
+
+        from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+        predictor = PromptConditionedBackbonePredictor(
+            checkpoint_path=str(ckpt_path),
+            device="cpu",
+            target_region="US-R1",
+        )
+
+        assert predictor.method_name == "hyperda_basis_adapter_shared"
+        assert isinstance(predictor.model, HyperAdapterConditionalResUNet)
+
+
+def _make_prompt_predictor_checkpoint(path: Path) -> None:
+    model = FiLMConditionalResUNet(in_channels=12, out_channels=2, width=8, prompt_dim=16)
+    prompt_encoder = RegionPromptEncoder(num_regions=2, input_channels=12, hidden_dim=16)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "config": {
+                "model_type": "prompt_conditioned",
+                "width": 8,
+                "prompt_dim": 16,
+                "num_regions": 2,
+                # Held-out US-R1 target; compact prompt ids are US-R2 -> 0, US-R3 -> 1.
+                "source_region_global_indices": [1, 2],
+            },
+        },
+        path,
+    )
+
+
+def _make_prompt_sample(*, split_role: str, target_region_id: str, sample_region_id: str) -> Dict[str, Any]:
+    h, w = 8, 8
+    return {
+        "x": np.zeros((12, h, w), dtype=np.float32),
+        "forecast_surface": np.zeros((h, w), dtype=np.float32),
+        "forecast_rootzone": np.zeros((h, w), dtype=np.float32),
+        "month": 6,
+        "target_region_id": target_region_id,
+        "sample_region_id": sample_region_id,
+        "split_role": split_role,
+    }
+
+
+def test_source_test_prompt_uses_sample_region_compact_prompt_id():
+    """Source split inference should use the source sample's prompt, not target fallback."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = Path(tmpdir) / "prompt.pt"
+        _make_prompt_predictor_checkpoint(ckpt_path)
+
+        from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+        predictor = PromptConditionedBackbonePredictor(
+            checkpoint_path=str(ckpt_path),
+            device="cpu",
+            target_region="US-R1",
+        )
+        seen = {}
+
+        def fake_build_prompt(x_norm, region_idx, month_val):
+            seen["region_idx"] = region_idx
+            return torch.zeros((1, 16), dtype=torch.float32)
+
+        predictor._build_prompt = fake_build_prompt
+        predictor.predict(
+            _make_prompt_sample(
+                split_role="source_test",
+                target_region_id="US-R1",
+                sample_region_id="US-R3",
+            )
+        )
+
+        assert seen["region_idx"] == 1
+
+
+def test_target_eval_prompt_uses_held_out_target_prompt_route():
+    """Target eval should continue to use the held-out target prompt route."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = Path(tmpdir) / "prompt.pt"
+        _make_prompt_predictor_checkpoint(ckpt_path)
+
+        from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+        predictor = PromptConditionedBackbonePredictor(
+            checkpoint_path=str(ckpt_path),
+            device="cpu",
+            target_region="US-R1",
+        )
+        seen = {}
+
+        def fake_build_prompt(x_norm, region_idx, month_val):
+            seen["region_idx"] = region_idx
+            return torch.zeros((1, 16), dtype=torch.float32)
+
+        predictor._build_prompt = fake_build_prompt
+        predictor.predict(
+            _make_prompt_sample(
+                split_role="target_eval",
+                target_region_id="US-R1",
+                sample_region_id="US-R3",
+            )
+        )
+
+        assert seen["region_idx"] == 0
+
+
+def test_target_train_fixed_prompt_uses_only_input_side_fields():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = Path(tmpdir) / "prompt.pt"
+        _make_prompt_predictor_checkpoint(ckpt_path)
+
+        from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+        predictor = PromptConditionedBackbonePredictor(
+            checkpoint_path=str(ckpt_path),
+            device="cpu",
+            target_region="US-R1",
+        )
+
+        class LabelPoisonSample(dict):
+            def __getitem__(self, key):
+                if key.startswith("analysis_") or key.startswith("increment_"):
+                    raise AssertionError(f"target labels must not be read for prompt construction: {key}")
+                return super().__getitem__(key)
+
+            def get(self, key, default=None):
+                if key.startswith("analysis_") or key.startswith("increment_"):
+                    raise AssertionError(f"target labels must not be read for prompt construction: {key}")
+                return super().get(key, default)
+
+        samples = [
+            LabelPoisonSample({
+                "x": np.full((12, 8, 8), fill_value=float(i), dtype=np.float32),
+                "month": 1 + i,
+                "date_str": f"201{i}-01-01",
+            })
+            for i in range(2)
+        ]
+
+        metadata = predictor.set_target_prompt_from_samples(samples)
+
+        assert metadata["n_samples"] == 2
+        assert metadata["date_start"] == "2010-01-01"
+        assert metadata["date_end"] == "2011-01-01"
+        assert predictor.uses_fixed_target_prompt is True
+
+
 def test_transfer_safe_score_uses_source_val_only():
     """Verify transfer safe score computation uses only source_val data."""
     from hydroda.training.calibration import calibrate_residual_gain_region_aware
@@ -286,6 +519,18 @@ def test_latitude_weights_equal_one_unweighted_equivalence():
         f"Uniform lat_w={result_w['total_loss'].item():.6f} vs None={result_u['total_loss'].item():.6f}"
 
     print(f"  test_latitude_weights_equal_one_unweighted_equivalence passed.")
+
+
+def test_prompt_conditioned_normalized_targets_use_unit_loss_scale():
+    """Normalized increment targets must not be divided by physical inc_std again."""
+    trainer = PromptConditionedTrainer.__new__(PromptConditionedTrainer)
+    trainer.target_increment_normalization = True
+    trainer._inc_std = np.array([0.0073, 0.000886], dtype=np.float32)
+
+    scale = trainer._get_increment_scale()
+
+    assert scale is not None
+    assert torch.allclose(scale, torch.ones(2, dtype=torch.float32))
 
 
 def test_prompt_collapse_detection():

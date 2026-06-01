@@ -9,12 +9,13 @@ No-leakage declaration:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
 import torch
 
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
+from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
 from hydroda.models.prompt_encoder import RegionPromptEncoder
 
 
@@ -76,17 +77,39 @@ class PromptConditionedBackbonePredictor:
         )
         saved_config = checkpoint.get("config", {})
 
-        # Init FiLMConditionalResUNet
+        # Init conditional backbone
         width = saved_config.get("width", 32)
         prompt_dim = saved_config.get("prompt_dim", 64)
-        self.model = FiLMConditionalResUNet(
-            in_channels=12,
-            out_channels=2,
-            width=width,
-            prompt_dim=prompt_dim,
-            zero_raw_increment_init=saved_config.get("zero_raw_increment_init", False),
+        model_type = saved_config.get("model_type", "prompt_conditioned")
+        self.model_type = model_type
+        self.method_name = (
+            "hyperda_basis_adapter_shared"
+            if model_type == "hyperda_basis_adapter"
+            else "prompt_conditioned_shared_backbone"
         )
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        if model_type == "hyperda_basis_adapter":
+            self.model = HyperAdapterConditionalResUNet(
+                in_channels=12,
+                out_channels=2,
+                width=width,
+                prompt_dim=prompt_dim,
+                hyper_n_basis=saved_config.get("hyper_n_basis", 8),
+                hyper_adapter_bottleneck=saved_config.get("hyper_adapter_bottleneck"),
+                hyper_adapter_scale=saved_config.get("hyper_adapter_scale", 1.0),
+                zero_raw_increment_init=saved_config.get("zero_raw_increment_init", False),
+            )
+        else:
+            self.model = FiLMConditionalResUNet(
+                in_channels=12,
+                out_channels=2,
+                width=width,
+                prompt_dim=prompt_dim,
+                zero_raw_increment_init=saved_config.get("zero_raw_increment_init", False),
+            )
+        if model_type == "hyperda_basis_adapter":
+            self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        else:
+            self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.to(device).eval()
 
         # Init RegionPromptEncoder
@@ -109,8 +132,14 @@ class PromptConditionedBackbonePredictor:
         # as an "unknown target" embedding.
         self._is_target_unseen = False
         self._target_region_emb: Optional[torch.Tensor] = None
+        self._source_global_to_prompt_idx: Dict[int, int] = {}
         source_global_indices = saved_config.get("source_region_global_indices")
         if source_global_indices is not None:
+            self.source_regions = [f"US-R{int(global_idx) + 1}" for global_idx in source_global_indices]
+            self._source_global_to_prompt_idx = {
+                int(global_idx): prompt_idx
+                for prompt_idx, global_idx in enumerate(source_global_indices)
+            }
             source_global_set = set(source_global_indices)
             if self._target_region_idx not in source_global_set:
                 self._is_target_unseen = True
@@ -118,11 +147,14 @@ class PromptConditionedBackbonePredictor:
                     all_emb = self.prompt_encoder.region_embed.weight.data.clone()  # [N, 16]
                     self._target_region_emb = all_emb.mean(dim=0)  # [16]
         elif self._target_region_idx >= num_regions:
+            self.source_regions = [f"US-R{i + 1}" for i in range(num_regions)]
             # Fallback for old checkpoints without source_region_global_indices
             self._is_target_unseen = True
             with torch.no_grad():
                 all_emb = self.prompt_encoder.region_embed.weight.data.clone()
                 self._target_region_emb = all_emb.mean(dim=0)
+        else:
+            self.source_regions = [f"US-R{i + 1}" for i in range(num_regions)]
 
         # Normalization params
         ch_mean = saved_config.get("ch_mean")
@@ -141,6 +173,9 @@ class PromptConditionedBackbonePredictor:
         self.alpha_surface = float(checkpoint.get("residual_gain_alpha_surface", 1.0))
         self.alpha_rootzone = float(checkpoint.get("residual_gain_alpha_rootzone", 1.0))
         self.apply_residual_gain = apply_residual_gain
+        self._prompt_route_uses_target_fallback = False
+        self._fixed_target_prompt: Optional[torch.Tensor] = None
+        self._target_prompt_metadata: Dict[str, Any] = {}
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Apply channel-wise normalization with NaN/Inf guard."""
@@ -166,7 +201,7 @@ class PromptConditionedBackbonePredictor:
         region_ids = torch.tensor([region_idx], dtype=torch.long, device=x_norm.device)
         month = torch.tensor([month_val], dtype=torch.long, device=x_norm.device)
 
-        if not self._is_target_unseen:
+        if not (self._is_target_unseen and self._prompt_route_uses_target_fallback):
             # Target is a source region: use standard prompt encoder forward
             return self.prompt_encoder(x_norm, region_ids, month)
 
@@ -182,6 +217,88 @@ class PromptConditionedBackbonePredictor:
         combined = torch.cat([r_emb, i_emb, t_emb], dim=1)  # [1, 40]
         z = self.prompt_encoder.mlp(combined)  # [1, hidden_dim]
         return z
+
+    @staticmethod
+    def _is_source_split(split_role: str) -> bool:
+        return split_role in {"source_train", "source_fit", "source_val", "source_test"}
+
+    def _resolve_prompt_region_idx(self, sample: Dict[str, Any]) -> tuple[int, bool]:
+        """Return compact prompt id and whether to use held-out target fallback.
+
+        Training uses compact source-region ids (0..Nsource-1). Source split
+        evaluation must therefore route by the sample's source region, while
+        target splits use the held-out target route.
+        """
+        split_role = str(sample.get("split_role", ""))
+        if self._is_source_split(split_role):
+            region_id_str = sample.get("sample_region_id") or sample.get("target_region_id", "")
+            global_idx = _REGION_TO_IDX.get(region_id_str, self._target_region_idx)
+            if self._source_global_to_prompt_idx:
+                if global_idx not in self._source_global_to_prompt_idx:
+                    raise ValueError(
+                        f"Source split sample_region_id={region_id_str!r} is not in checkpoint "
+                        f"source_region_global_indices={sorted(self._source_global_to_prompt_idx)}"
+                    )
+                return self._source_global_to_prompt_idx[global_idx], False
+            return global_idx, False
+
+        region_id_str = sample.get("target_region_id", "")
+        return _REGION_TO_IDX.get(region_id_str, self._target_region_idx), True
+
+    @property
+    def uses_fixed_target_prompt(self) -> bool:
+        return self._fixed_target_prompt is not None
+
+    def set_target_prompt_from_samples(self, samples: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build a fixed target prompt from target_train input-side fields only.
+
+        The prompt summary reads only ``x``, ``month``, and ``date_str``. It
+        deliberately does not read target analysis or increment labels.
+        """
+        input_embs = []
+        temporal_embs = []
+        dates = []
+
+        with torch.no_grad():
+            for sample in samples:
+                x = torch.from_numpy(np.asarray(sample["x"], dtype=np.float32))
+                x = x.unsqueeze(0).to(self.device)
+                x_norm = self._normalize(x)
+                input_stats = self.prompt_encoder._compute_input_stats(x_norm)
+                input_embs.append(self.prompt_encoder.input_proj(input_stats))
+
+                month = torch.tensor([int(sample.get("month", 6))], dtype=torch.long, device=self.device)
+                temporal = self.prompt_encoder._temporal_encoding(month)
+                temporal_embs.append(self.prompt_encoder.temporal_proj(temporal))
+
+                date_str = sample.get("date_str", "")
+                if date_str:
+                    dates.append(str(date_str))
+
+            if not input_embs:
+                raise ValueError("Cannot build target prompt from zero target_train samples")
+
+            i_emb = torch.stack(input_embs, dim=0).mean(dim=0)
+            t_emb = torch.stack(temporal_embs, dim=0).mean(dim=0)
+            if self._is_target_unseen:
+                if self._target_region_emb is None:
+                    raise RuntimeError("Target region fallback embedding was not initialized")
+                r_emb = self._target_region_emb.unsqueeze(0).to(self.device)
+            else:
+                target_ids = torch.tensor([self._target_region_idx], dtype=torch.long, device=self.device)
+                r_emb = self.prompt_encoder.region_embed(target_ids)
+
+            combined = torch.cat([r_emb, i_emb, t_emb], dim=1)
+            self._fixed_target_prompt = self.prompt_encoder.mlp(combined).detach()
+
+        self._target_prompt_metadata = {
+            "prompt_source": "target_train_input_side_summary",
+            "n_samples": len(input_embs),
+            "date_start": min(dates) if dates else "",
+            "date_end": max(dates) if dates else "",
+            "label_usage": "none",
+        }
+        return dict(self._target_prompt_metadata)
 
     def predict(self, sample: Dict[str, Any]) -> Dict[str, np.ndarray]:
         """Predict DA increments and analysis for a single sample with prompt conditioning.
@@ -203,13 +320,20 @@ class PromptConditionedBackbonePredictor:
 
         x_norm = self._normalize(x)
 
-        # Build prompt, including held-out target fallback via _build_prompt.
-        region_id_str = sample.get("target_region_id", "")
-        region_idx = _REGION_TO_IDX.get(region_id_str, self._target_region_idx)
+        # Build prompt. Source splits route by sample_region_id; target splits
+        # route by target_region_id and use held-out target fallback when needed.
+        region_idx, use_target_fallback = self._resolve_prompt_region_idx(sample)
         month_val = int(sample.get("month", 6))
 
         with torch.no_grad():
-            z = self._build_prompt(x_norm, region_idx, month_val)
+            if use_target_fallback and self._fixed_target_prompt is not None:
+                z = self._fixed_target_prompt.to(x_norm.device)
+            else:
+                try:
+                    self._prompt_route_uses_target_fallback = use_target_fallback
+                    z = self._build_prompt(x_norm, region_idx, month_val)
+                finally:
+                    self._prompt_route_uses_target_fallback = False
             pred = self.model(x_norm, z)  # [1, 2, H, W]
 
         pred_inc_s = pred[0, 0].cpu().numpy().astype(np.float32)

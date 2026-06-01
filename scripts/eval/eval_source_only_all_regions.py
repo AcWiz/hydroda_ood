@@ -33,7 +33,6 @@ REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
-_SPLIT_LOOKUP_REGION = "US-R1"
 
 
 def _evaluate_one_region(
@@ -54,7 +53,7 @@ def _evaluate_one_region(
         da_nc_path=DA_NC,
         region_masks_nc=REGION_MASKS_NC,
         splits_json=SPLITS_JSON,
-        target_region=_SPLIT_LOOKUP_REGION,
+        target_region=region_id,
         split_type=split_type,
         K=K,
         seed=seed,
@@ -91,7 +90,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True,
         help="Path to checkpoint.pt")
     parser.add_argument("--split_type", type=str, default="target_eval",
-        choices=["source_val", "target_eval", "target_query", "target_train", "target_support"],
+        choices=["source_val", "source_test", "target_eval", "target_train"],
         help="Split to evaluate on. Default: target_eval (2023-2025).")
     parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
         help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
@@ -119,8 +118,8 @@ def main():
     if args.output_dir:
         run_dir = Path(args.output_dir)
     else:
-        run_dir = checkpoint_path.parent.parent
-    results_dir = run_dir / "results" / args.split_type
+        run_dir = checkpoint_path.parent.parent / "results" / checkpoint_path.stem
+    results_dir = run_dir / args.split_type
     results_dir.mkdir(parents=True, exist_ok=True)
 
     regions = args.regions if args.regions else list(_ALL_US_REGIONS)
@@ -172,8 +171,8 @@ def main():
         r = per_region_summary[region_id].get("rootzone", {}).get("analysis_skill_vs_forecast_latw", {})
         s_val = s.get("mean") if isinstance(s, dict) else s
         r_val = r.get("mean") if isinstance(r, dict) else r
-        s_str = f"{s_val:.6f}" if s_val is not None else "N/A"
-        r_str = f"{r_val:.6f}" if r_val is not None else "N/A"
+        s_str = f"{s_val:.10f}" if s_val is not None else "N/A"
+        r_str = f"{r_val:.10f}" if r_val is not None else "N/A"
         print(f"{region_id:<8} {s_str:>14} {r_str:>14}")
     print(f"{'─' * 80}")
 

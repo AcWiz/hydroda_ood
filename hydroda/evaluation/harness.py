@@ -363,6 +363,87 @@ def evaluate_split(
     return rows
 
 
+def summarize_metric_rows(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    """Summarize evaluation rows with aggregate skill as the primary diagnostic.
+
+    Per-sample skill is kept as a diagnostic distribution because averaging
+    ratios can be dominated by tiny forecast-RMSE denominators.
+    """
+    summary: Dict[str, Dict[str, float]] = {}
+    if df.empty:
+        return summary
+
+    per_sample = df[df["query_date"] != "global"] if "query_date" in df.columns else df
+
+    def _single(metric: str, variable: str) -> float:
+        match = df[(df["metric"] == metric) & (df["variable"] == variable)]
+        if len(match) > 0:
+            return float(match["value"].mean())
+        return float("nan")
+
+    def _mean(metric: str, variable: str) -> float:
+        match = per_sample[(per_sample["metric"] == metric) & (per_sample["variable"] == variable)]
+        if len(match) > 0:
+            return float(match["value"].mean())
+        return float("nan")
+
+    for variable in sorted(df["variable"].dropna().unique().tolist()):
+        skill = per_sample[
+            (per_sample["metric"] == "analysis_skill_vs_forecast")
+            & (per_sample["variable"] == variable)
+        ]["value"].astype(float)
+        skill_latw = per_sample[
+            (per_sample["metric"] == "analysis_skill_vs_forecast_latw")
+            & (per_sample["variable"] == variable)
+        ]["value"].astype(float)
+
+        var_summary: Dict[str, float] = {
+            "skill_primary": _single("analysis_skill_vs_forecast_global", variable),
+            "skill_latw_primary": _single("analysis_skill_vs_forecast_latw_global", variable),
+            "skill_global": _single("analysis_skill_vs_forecast_global", variable),
+            "skill_latw_global": _single("analysis_skill_vs_forecast_latw_global", variable),
+            "rmse_mean": _mean("increment_rmse", variable),
+            "corr_mean": _mean("increment_corr", variable),
+            # Per-sample latw aggregations
+            "rmse_latw_mean": _mean("increment_rmse_latw", variable),
+            "corr_latw_mean": _mean("increment_corr_latw", variable),
+        }
+        if len(skill) > 0:
+            var_summary.update({
+                "skill_mean": float(skill.mean()),
+                "skill_std": float(skill.std()),
+                "skill_median": float(skill.median()),
+                "skill_p05": float(skill.quantile(0.05)),
+                "skill_p95": float(skill.quantile(0.95)),
+                "skill_negative_outlier_count": int((skill < -10.0).sum()),
+            })
+        else:
+            var_summary.update({
+                "skill_mean": float("nan"),
+                "skill_std": float("nan"),
+                "skill_median": float("nan"),
+                "skill_p05": float("nan"),
+                "skill_p95": float("nan"),
+                "skill_negative_outlier_count": 0,
+            })
+        # Per-sample skill latw aggregation
+        if len(skill_latw) > 0:
+            var_summary.update({
+                "skill_latw_mean": float(skill_latw.mean()),
+                "skill_latw_std": float(skill_latw.std()),
+                "skill_latw_median": float(skill_latw.median()),
+            })
+        else:
+            var_summary.update({
+                "skill_latw_mean": float("nan"),
+                "skill_latw_std": float("nan"),
+                "skill_latw_median": float("nan"),
+            })
+        summary[str(variable)] = var_summary
+
+    return summary
+
+
 KEY_METRICS = [
     "analysis_skill_vs_forecast_latw",
     "increment_rmse_latw",

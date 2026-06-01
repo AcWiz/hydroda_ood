@@ -44,7 +44,9 @@ INTERNAL_SANITY_ONLY = {
     "prompt_weighted_specialist",
     "knn_parameter_interpolation",
     "linear_prompt_to_parameter",
+    "hyperda_basis_adapter_shared",
     # Deprecated names retained in old artifacts/scripts.
+    "hyperda_basis_adapter",
     "target_support_mean_increment",
     "target_monthly_support_increment",
 }

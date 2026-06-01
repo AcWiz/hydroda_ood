@@ -106,3 +106,81 @@ When `--wandb_mode disabled`:
 - No wandb.init() called
 - Logger is a no-op for all logging calls
 - Safe to run on machines without internet access
+
+## HyperDA v1 Experiment Record
+
+HyperDA v1 is the first generated-operator method after the prompt-conditioned
+FiLM baseline. It reuses the Phase 4 target-full-train protocol and changes
+only the conditional model class.
+
+### Default Development Run
+
+Use one region and one seed first:
+
+```bash
+bash run/phase4_hyperda.sh US-R1 0 1
+```
+
+Default settings:
+
+- `model_type=hyperda_basis_adapter`
+- `width=32`
+- `prompt_dim=64`
+- `hyper_n_basis=8`
+- `hyper_adapter_bottleneck=32`
+- `hyper_adapter_scale=1.0`
+- `batch_size=16`
+- `accum_steps=4`
+- `max_epochs=50`
+- `selection_metric=source_val_transfer_safe_score`
+
+Protocol invariants:
+
+- train split: `source_fit`
+- model selection: `source_val`
+- target evaluation: `target_eval` only after training
+- split artifact: `artifacts/splits/US_loro_target_train_splits.json`
+- adaptation setting: `target_full_train`
+- no `--K` argument
+
+### Artifact Paths
+
+Training writes under:
+
+```text
+artifacts/runs/phase4_prompt_conditioned/phase4_prompt_conditioned_hyperda_basis_adapter_*/
+```
+
+The checkpoint summary and config include:
+
+- `model_type`
+- `hyper_n_basis`
+- `hyper_adapter_bottleneck`
+- `hyper_adapter_scale`
+- `best_selection_metric`
+- `best_selection_value`
+- source/target protocol safety fields
+
+### Evaluation
+
+After training, evaluate the best transfer-safe checkpoint:
+
+```bash
+bash run/phase4_prompt_conditioned_inference.sh \
+  artifacts/runs/phase4_prompt_conditioned/<run_name>/checkpoints/checkpoint_best_source_val_transfer_safe_score.pt \
+  US-R1 0 1
+```
+
+The existing prompt-conditioned predictor auto-loads HyperDA checkpoints when
+`config.model_type` is `hyperda_basis_adapter`.
+
+### Required Comparison Before Paper Claims
+
+For any table or claim, compare under the same current protocol:
+
+- `source_only_backbone`
+- `prompt_conditioned_shared_backbone`
+- `hyperda_basis_adapter`
+
+The initial development scope is `US-R1`, seed `0`. Multi-region and multi-seed
+runs should be added only after HyperDA v1 is stable.

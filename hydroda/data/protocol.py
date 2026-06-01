@@ -53,6 +53,9 @@ class ProtocolConfig:
     source_val: DateRange = field(
         default_factory=lambda: DateRange.from_strings("source_val", "2022-01-01", "2022-12-31")
     )
+    source_test: DateRange = field(
+        default_factory=lambda: DateRange.from_strings("source_test", "2023-01-01", "2025-12-31")
+    )
     target_train: DateRange = field(
         default_factory=lambda: DateRange.from_strings("target_train", "2015-01-01", "2021-12-31")
     )
@@ -140,6 +143,7 @@ class ProtocolConfig:
             "source_train": self.source_train,
             "source_fit": self.source_fit,
             "source_val": self.source_val,
+            "source_test": self.source_test,
             "target_train": self.target_train,
             "target_adapt": self.target_adapt,
             "target_adaptation": self.target_adapt,
@@ -167,4 +171,9 @@ class ProtocolConfig:
             expanded.add("target_query")
         if "target_query" in expanded:
             expanded.add("target_eval")
+        # source_test shares the same date range as target_eval (2023-2025)
+        if "source_test" in expanded:
+            expanded.add("target_eval")
+        if "target_eval" in expanded:
+            expanded.add("source_test")
         return expanded

@@ -27,6 +27,7 @@ import numpy as np
 PERIODS = {
     "source_fit": "2015-01-01 to 2021-12-31",
     "source_val": "2022-01-01 to 2022-12-31",
+    "source_test": "2023-01-01 to 2025-12-31",
     "target_train": "2015-01-01 to 2021-12-31",
     "target_adapt": "2015-01-01 to 2021-12-31",
     "target_val": "2022-01-01 to 2022-12-31",
@@ -39,6 +40,7 @@ PERIODS = {
 PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 TARGET_TRAIN_YEARS = set(range(2015, 2022))
 SOURCE_VAL_YEARS = {2022}
+SOURCE_TEST_YEARS = {2023, 2024, 2025}
 TARGET_EVAL_YEARS = {2023, 2024, 2025}
 
 
@@ -56,6 +58,7 @@ def create_split_manifest(
     support_dates: Optional[List[dict]] = None,
     query_dates: Optional[List[dict]] = None,
     source_val_dates: List[dict] | None = None,
+    source_test_dates: List[dict] | None = None,
     target_train_dates: Optional[List[dict]] = None,
     adaptation_setting: Optional[str] = None,
     country_id: str = "US",
@@ -73,6 +76,7 @@ def create_split_manifest(
         support_dates: Legacy support dates. For the main protocol this is an alias of target_train_dates.
         query_dates: List of dicts for target eval/query dates
         source_val_dates: List of dicts for source validation (2022). If None, defaults to [].
+        source_test_dates: List of dicts for source test (2023-2025). If None, defaults to [].
         target_train_dates: Full target training/adaptation dates (2015-2021). If None, falls back to support_dates.
         adaptation_setting: Main adaptation setting, e.g. "target_full_train".
         country_id: Country identifier (default "US")
@@ -84,6 +88,7 @@ def create_split_manifest(
     """
     source_train_dates = list(source_train_dates or [])
     source_val_dates = list(source_val_dates or [])
+    source_test_dates = list(source_test_dates or [])
     query_dates = list(query_dates or [])
 
     legacy_K = int(K) if K is not None else None
@@ -112,6 +117,7 @@ def create_split_manifest(
         "country_id": country_id,
         "source_fit_period": PERIODS["source_fit"],
         "source_val_period": PERIODS["source_val"],
+        "source_test_period": PERIODS["source_test"],
         "target_train_period": PERIODS["target_train"],
         "target_adapt_period": PERIODS["target_adapt"],
         "target_val_period": PERIODS["target_val"],
@@ -127,6 +133,7 @@ def create_split_manifest(
         "seed": seed,
         "source_train_dates": source_train_dates,
         "source_val_dates": source_val_dates,
+        "source_test_dates": source_test_dates,
         "target_train_dates": target_train_dates,
         "target_adaptation_dates": target_train_dates,
         "target_eval_dates": target_eval_dates,
@@ -135,6 +142,7 @@ def create_split_manifest(
         "target_query_dates": target_eval_dates,
         "source_train_cycle_count": len(source_train_dates),
         "source_val_cycle_count": len(source_val_dates),
+        "source_test_cycle_count": len(source_test_dates),
         "target_train_cycle_count": len(target_train_dates),
         "target_adaptation_cycle_count": len(target_train_dates),
         "target_eval_cycle_count": len(target_eval_dates),
@@ -142,6 +150,7 @@ def create_split_manifest(
         "target_query_cycle_count": len(target_eval_dates),
         "source_train_dates_hash": _records_hash(source_train_dates),
         "source_val_dates_hash": _records_hash(source_val_dates),
+        "source_test_dates_hash": _records_hash(source_test_dates),
         "target_train_dates_hash": _records_hash(target_train_dates),
         "target_adaptation_dates_hash": _records_hash(target_train_dates),
         "target_eval_dates_hash": _records_hash(target_eval_dates),
@@ -288,7 +297,7 @@ def generate_split_summary_markdown(splits: List[Dict], output_path: str) -> Non
         src_str = "+".join(s["source_region_ids"])
         lines.append(
             f"| {s['target_region_id']} | {src_str} | "
-            f"{s.get('adaptation_setting', 'legacy_few_shot')} | "
+            f"{s.get('adaptation_setting', 'target_full_train')} | "
             f"{s.get('K', 'legacy_none')} | {s['seed']} | "
             f"{s['source_train_cycle_count']:,} | "
             f"{s.get('source_val_cycle_count', 0):,} | "
@@ -327,7 +336,7 @@ def aggregate_split_statistics(splits: List[Dict]) -> Dict:
     stats = {
         "total_splits": len(splits),
         "K_values": sorted(set(s.get("K") for s in splits), key=lambda v: (-1 if v is None else v)),
-        "adaptation_settings": sorted(set(s.get("adaptation_setting", "legacy_few_shot") for s in splits)),
+        "adaptation_settings": sorted(set(s.get("adaptation_setting", "target_full_train") for s in splits)),
         "seeds": sorted(set(s["seed"] for s in splits)),
         "regions": sorted(set(s["target_region_id"] for s in splits)),
         "total_source_cycles": sum(s["source_train_cycle_count"] for s in splits),

@@ -31,3 +31,29 @@ def test_prompt_conditioned_inference_wrapper_uses_target_eval_protocol():
     assert "--split_type target_eval" in text
     assert "target_query" not in text
     assert "checkpoint_best_source_val_transfer_safe_score.pt" in text
+    assert 'TARGET_PROMPT_FROM_TARGET_TRAIN="${TARGET_PROMPT_FROM_TARGET_TRAIN:-1}"' in text
+
+
+def test_hyperda_train_wrapper_uses_target_full_train_protocol():
+    text = Path("run/phase4_hyperda.sh").read_text()
+
+    assert "US_loro_kdate_splits.json" not in text
+    assert "K=0" not in text
+    assert "--K" not in text
+    assert "--adaptation_setting target_full_train" in text
+    assert "US_loro_target_train_splits.json" in text
+    assert "--model_type hyperda_basis_adapter" in text
+    assert "--selection_metric source_val_transfer_safe_score" in text
+
+
+def test_hyperda_inference_wrapper_uses_target_eval_protocol():
+    text = Path("run/phase4_hyperda_inference.sh").read_text()
+
+    assert "context2022_query2023_2025_k0_4_12" not in text
+    assert "--K" not in text
+    assert "--split_type target_eval" in text
+    assert "target_query" not in text
+    assert "checkpoint_best_source_val_transfer_safe_score.pt" in text
+    assert "phase4_prompt_conditioned_hyperda_basis_adapter_*" in text
+    assert 'TARGET_PROMPT_FROM_TARGET_TRAIN="${TARGET_PROMPT_FROM_TARGET_TRAIN:-1}"' in text
+    assert 'TARGET_TRAIN_RESIDUAL_GAIN_CALIBRATION="${TARGET_TRAIN_RESIDUAL_GAIN_CALIBRATION:-1}"' in text

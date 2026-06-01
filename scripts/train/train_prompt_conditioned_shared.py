@@ -44,6 +44,7 @@ from hydroda.data.file_hash import compute_sha256
 from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
+from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
 from hydroda.models.prompt_encoder import RegionPromptEncoder
 from hydroda.training.calibration import calibrate_residual_gain, calibrate_residual_gain_region_aware
 from hydroda.training.losses import MaskedHuberLoss, WeightedMaskedHuberLoss
@@ -279,6 +280,10 @@ class PromptConditionedTrainer:
         target_region: Optional[str] = None,
         adaptation_setting: str = "target_full_train",
         K: Optional[int] = None,
+        model_type: str = "prompt_conditioned",
+        hyper_n_basis: int = 8,
+        hyper_adapter_bottleneck: Optional[int] = None,
+        hyper_adapter_scale: float = 1.0,
         # Resume: optionally inject pre-computed stats to skip recompute
         _resume_ch_mean: Optional[np.ndarray] = None,
         _resume_ch_std: Optional[np.ndarray] = None,
@@ -328,6 +333,10 @@ class PromptConditionedTrainer:
         self.target_region = target_region
         self.adaptation_setting = adaptation_setting
         self.K = None if adaptation_setting == "target_full_train" else K
+        self.model_type = model_type
+        self.hyper_n_basis = int(hyper_n_basis)
+        self.hyper_adapter_bottleneck = hyper_adapter_bottleneck
+        self.hyper_adapter_scale = float(hyper_adapter_scale)
         self._source_region_global_indices = sorted(global_to_source_lookup.keys()) if global_to_source_lookup else []
 
         # AMP
@@ -537,6 +546,8 @@ class PromptConditionedTrainer:
 
     def _get_increment_scale(self) -> Optional[torch.Tensor]:
         """Return per-channel increment scale [2] from source_fit stats."""
+        if self.target_increment_normalization:
+            return torch.ones(2, dtype=torch.float32)
         if self._inc_std is not None:
             return torch.from_numpy(self._inc_std.astype(np.float32))
         return None
@@ -794,6 +805,10 @@ class PromptConditionedTrainer:
             f"  Total params:    {num_model_params + num_pe_params:,}",
             f"  Model width:     {self.model_width}",
             f"  Prompt dim:      {self.prompt_dim}",
+            f"  Model type:      {self.model_type}",
+            f"  Hyper n_basis:   {self.hyper_n_basis}",
+            f"  Hyper bottleneck:{self.hyper_adapter_bottleneck}",
+            f"  Hyper scale:     {self.hyper_adapter_scale}",
             f"  Loss fn:         {type(self.loss_fn).__name__}",
             f"  Lat-weighted:    {self.use_lat_weighted_loss}",
             f"  Batch size:      {self.batch_size}",
@@ -1277,8 +1292,12 @@ class PromptConditionedTrainer:
             f"- **Experiment**: {self.experiment_id}",
             f"- **Protocol**: {self.protocol_freeze_id}",
             f"- **Split manifest**: {self.split_manifest_path}",
+            f"- **Model type**: {self.model_type}",
             f"- **Model width**: {self.model_width}",
             f"- **Prompt dim**: {self.prompt_dim}",
+            f"- **Hyper n basis**: {self.hyper_n_basis}",
+            f"- **Hyper adapter bottleneck**: {self.hyper_adapter_bottleneck}",
+            f"- **Hyper adapter scale**: {self.hyper_adapter_scale}",
             f"- **Model params**: {num_model_params:,}",
             f"- **Prompt encoder params**: {num_pe_params:,}",
             f"- **Total params**: {num_model_params + num_pe_params:,}",
@@ -1369,8 +1388,12 @@ class PromptConditionedTrainer:
                 "accum_steps": self.accum_steps,
                 "effective_batch_size": self.batch_size * self.accum_steps,
                 "grad_clip": self.grad_clip,
+                "model_type": self.model_type,
                 "width": self.model_width,
                 "prompt_dim": self.prompt_dim,
+                "hyper_n_basis": self.hyper_n_basis,
+                "hyper_adapter_bottleneck": self.hyper_adapter_bottleneck,
+                "hyper_adapter_scale": self.hyper_adapter_scale,
                 "num_regions": self.prompt_encoder.num_regions,
                 "num_workers": self.num_workers,
                 "target_increment_normalization": self.target_increment_normalization,
@@ -1459,6 +1482,10 @@ class PromptConditionedTrainer:
             "total_epochs_completed": self.current_epoch,
             "model_width": self.model_width,
             "prompt_dim": self.prompt_dim,
+            "model_type": self.model_type,
+            "hyper_n_basis": self.hyper_n_basis,
+            "hyper_adapter_bottleneck": self.hyper_adapter_bottleneck,
+            "hyper_adapter_scale": self.hyper_adapter_scale,
             "trainable_parameters": num_params,
             "batch_size": self.batch_size,
             "accum_steps": self.accum_steps,
@@ -1489,7 +1516,7 @@ class PromptConditionedTrainer:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train prompt-conditioned shared backbone")
+    parser = argparse.ArgumentParser(description="Train prompt-conditioned or HyperDA shared backbone")
     parser.add_argument("--target_region", type=str, required=True)
     parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
         help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
@@ -1498,6 +1525,15 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--prompt_dim", type=int, default=64)
+    parser.add_argument("--model_type", type=str, default="prompt_conditioned",
+        choices=["prompt_conditioned", "hyperda_basis_adapter"],
+        help="Conditional model type to train")
+    parser.add_argument("--hyper_n_basis", type=int, default=8,
+        help="Number of generated adapter bases for model_type=hyperda_basis_adapter")
+    parser.add_argument("--hyper_adapter_bottleneck", type=int, default=None,
+        help="Bottleneck channels for generated HyperDA adapter")
+    parser.add_argument("--hyper_adapter_scale", type=float, default=1.0,
+        help="Residual scale for generated HyperDA adapter")
     parser.add_argument("--zero_raw_increment_init", action="store_true")
     parser.add_argument("--target_increment_normalization", action="store_true")
     parser.add_argument("--max_epochs", type=int, default=30)
@@ -1529,6 +1565,8 @@ def parse_args():
         help="Path to checkpoint.pt to resume from (last.pt or best.pt). "
              "When provided, training continues from the saved epoch and "
              "normalization stats are restored from the checkpoint.")
+    parser.add_argument("--init_from_prompt_checkpoint", type=str, default=None,
+        help="For HyperDA, initialize shared FiLM backbone and prompt encoder from a prompt-conditioned checkpoint.")
     parser.add_argument("--checkpoint_every", type=int, default=5,
         help="Save epoch checkpoint every N epochs (default 5)")
     parser.add_argument("--selection_metric", type=str, default="source_val_transfer_safe_score",
@@ -1553,15 +1591,54 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _load_prompt_checkpoint_initialization(
+    trainer: PromptConditionedTrainer,
+    checkpoint_path: str,
+    device: torch.device,
+) -> None:
+    """Initialize compatible model/prompt weights from a prompt-conditioned checkpoint."""
+    ckpt_path = Path(checkpoint_path)
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"--init_from_prompt_checkpoint not found: {ckpt_path}")
+
+    print(f"\nInitializing from prompt checkpoint: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+
+    model_state = ckpt.get("model_state_dict", {})
+    model_result = trainer.model.load_state_dict(model_state, strict=False)
+    print(
+        "  model init: "
+        f"missing={len(model_result.missing_keys)} unexpected={len(model_result.unexpected_keys)}"
+    )
+
+    prompt_state = ckpt.get("prompt_encoder_state_dict")
+    if prompt_state is not None:
+        prompt_result = trainer.prompt_encoder.load_state_dict(prompt_state, strict=False)
+        print(
+            "  prompt init: "
+            f"missing={len(prompt_result.missing_keys)} unexpected={len(prompt_result.unexpected_keys)}"
+        )
+
+    cfg = ckpt.get("config", {})
+    if cfg.get("ch_mean") is not None and cfg.get("ch_std") is not None:
+        trainer._ch_mean = np.array(cfg["ch_mean"], dtype=np.float32)
+        trainer._ch_std = np.array(cfg["ch_std"], dtype=np.float32)
+        print("  restored input normalization stats from prompt checkpoint")
+    if cfg.get("inc_mean") is not None and cfg.get("inc_std") is not None:
+        trainer._inc_mean = np.array(cfg["inc_mean"], dtype=np.float32)
+        trainer._inc_std = np.array(cfg["inc_std"], dtype=np.float32)
+        print("  restored increment normalization stats from prompt checkpoint")
+
+
 def main():
     args = parse_args()
     device = resolve_device(args.device, require_gpu=args.require_gpu)
 
     print("=" * 60)
-    print("Phase 4B: Prompt-Conditioned Shared Backbone Training")
+    print("Phase 4B: Prompt-Conditioned / HyperDA Shared Backbone Training")
     print(f"  target_region={args.target_region}  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
-    print(f"  device={device}  width={args.width}  prompt_dim={args.prompt_dim}  amp={args.amp}")
+    print(f"  device={device}  width={args.width}  prompt_dim={args.prompt_dim}  model_type={args.model_type}  amp={args.amp}")
     print("=" * 60)
 
     # Load config
@@ -1578,7 +1655,11 @@ def main():
         "adaptation_setting": args.adaptation_setting,
         "K": args.K,
         "seed": args.seed,
+        "model_type": args.model_type,
         "width": args.width, "prompt_dim": args.prompt_dim,
+        "hyper_n_basis": args.hyper_n_basis,
+        "hyper_adapter_bottleneck": args.hyper_adapter_bottleneck,
+        "hyper_adapter_scale": args.hyper_adapter_scale,
         "max_epochs": args.max_epochs, "batch_size": args.batch_size,
         "lr": args.lr, "weight_decay": args.weight_decay,
         "grad_clip": args.grad_clip, "accum_steps": args.accum_steps,
@@ -1591,6 +1672,7 @@ def main():
         "use_lat_weighted_loss": args.use_lat_weighted_loss,
         "wandb_mode": args.wandb_mode,
         "checkpoint_every": args.checkpoint_every,
+        "init_from_prompt_checkpoint": args.init_from_prompt_checkpoint,
         "selection_metric": args.selection_metric,
         "lambda_amp": args.lambda_amp,
         "source_val_residual_gain": not args.no_source_val_residual_gain,
@@ -1610,7 +1692,7 @@ def main():
     # RunManager
     run_manager = RunManager(
         phase=PHASE,
-        method="prompt_conditioned",
+        method=args.model_type,
         target_region=args.target_region,
         config=run_config,
         output_dir=args.output_dir,
@@ -1682,12 +1764,27 @@ def main():
 
     # Init model + prompt encoder
     num_source_regions = len(run_config["source_regions"])
-    print(f"\nInitializing FiLMConditionalResUNet (width={args.width}, prompt_dim={args.prompt_dim})...")
-    model = FiLMConditionalResUNet(
-        in_channels=12, out_channels=2, width=args.width,
-        prompt_dim=args.prompt_dim,
-        zero_raw_increment_init=args.zero_raw_increment_init,
-    )
+    if args.model_type == "hyperda_basis_adapter":
+        print(
+            f"\nInitializing HyperAdapterConditionalResUNet "
+            f"(width={args.width}, prompt_dim={args.prompt_dim}, "
+            f"n_basis={args.hyper_n_basis}, adapter_bottleneck={args.hyper_adapter_bottleneck})..."
+        )
+        model = HyperAdapterConditionalResUNet(
+            in_channels=12, out_channels=2, width=args.width,
+            prompt_dim=args.prompt_dim,
+            hyper_n_basis=args.hyper_n_basis,
+            hyper_adapter_bottleneck=args.hyper_adapter_bottleneck,
+            hyper_adapter_scale=args.hyper_adapter_scale,
+            zero_raw_increment_init=args.zero_raw_increment_init,
+        )
+    else:
+        print(f"\nInitializing FiLMConditionalResUNet (width={args.width}, prompt_dim={args.prompt_dim})...")
+        model = FiLMConditionalResUNet(
+            in_channels=12, out_channels=2, width=args.width,
+            prompt_dim=args.prompt_dim,
+            zero_raw_increment_init=args.zero_raw_increment_init,
+        )
     prompt_encoder = RegionPromptEncoder(
         num_regions=num_source_regions,
         input_channels=12,
@@ -1757,6 +1854,10 @@ def main():
         target_region=args.target_region,
         adaptation_setting=args.adaptation_setting,
         K=args.K,
+        model_type=args.model_type,
+        hyper_n_basis=args.hyper_n_basis,
+        hyper_adapter_bottleneck=args.hyper_adapter_bottleneck,
+        hyper_adapter_scale=args.hyper_adapter_scale,
     )
 
     # Resume: restore full training state after Trainer creation
@@ -1766,6 +1867,12 @@ def main():
         print(f"  Restored: optimizer, scheduler, epoch, best_loss, train_history")
         print(f"  train_history entries so far: {len(trainer.train_history)}")
         print(f"  val_history entries so far: {len(trainer.val_history)}")
+    elif args.init_from_prompt_checkpoint:
+        _load_prompt_checkpoint_initialization(
+            trainer=trainer,
+            checkpoint_path=args.init_from_prompt_checkpoint,
+            device=device,
+        )
 
     run_manager.save_environment_info(gather_runtime_info())
 

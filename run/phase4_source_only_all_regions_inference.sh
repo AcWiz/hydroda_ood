@@ -1,9 +1,9 @@
 #!/bin/bash
 # Per-region evaluation for a trained source-only all-regions checkpoint.
 #
-# Evaluates on both source_val (2022) and target_query (2023-2025) splits,
+# Evaluates on both source_test (2023-2025) and target_eval (2023-2025) splits,
 # producing per-region metrics_long.csv, metrics_by_region.csv, per_region_summary.json
-# under results/source_val/ and results/target_query/.
+# under results/source_test/ and results/target_eval/.
 #
 # Usage:
 #   bash run/phase4_source_only_all_regions_eval.sh                                    # default checkpoint
@@ -25,22 +25,22 @@ echo "  checkpoint: ${CHECKPOINT}"
 echo "  K=${K}  seed=${SEED}"
 echo "============================================"
 
-# ---- source_val (2022) ----
+# ---- source_test (2023-2025) ----
 echo ""
-echo ">>> [1/2] Evaluating on source_val (2022)..."
+echo ">>> [1/2] Evaluating on source_test (2023-2025)..."
 PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
     --checkpoint "${CHECKPOINT}" \
-    --split_type source_val \
+    --split_type source_test \
     --K "${K}" \
     --seed "${SEED}" \
     --device cuda
 
-# ---- target_query (2023-2025) ----
+# ---- target_eval (2023-2025) ----
 echo ""
-echo ">>> [2/2] Evaluating on target_query (2023-2025)..."
+echo ">>> [2/2] Evaluating on target_eval (2023-2025)..."
 PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
     --checkpoint "${CHECKPOINT}" \
-    --split_type target_query \
+    --split_type target_eval \
     --K "${K}" \
     --seed "${SEED}" \
     --device cuda
