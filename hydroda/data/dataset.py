@@ -29,6 +29,7 @@ _SPLIT_TYPE_TO_DATES_KEY = {
     "source_test": "source_test_dates",
     "target_train": "target_train_dates",
     "target_adaptation": "target_adaptation_dates",
+    "target_val": "target_val_dates",
     "target_eval": "target_eval_dates",
     # Deprecated aliases retained for old K-date artifacts.
     "target_support": "target_support_dates",
@@ -38,6 +39,10 @@ _SPLIT_TYPE_TO_DATES_KEY = {
 _DATES_KEY_FALLBACKS = {
     "target_train_dates": "target_support_dates",
     "target_adaptation_dates": "target_train_dates",
+    # Existing frozen US manifests predate explicit target_val_dates. Calendar
+    # records are shared with source_val_dates, while HydroDADataset's active
+    # region mask makes this a held-out target-region validation split.
+    "target_val_dates": "source_val_dates",
     "target_eval_dates": "target_query_dates",
     "target_support_dates": "target_train_dates",
     "target_query_dates": "target_eval_dates",
@@ -241,6 +246,8 @@ class HydroDADataset(Dataset):
                 purpose="target_adaptation",
                 labels_allowed=True,
             )
+        elif self.split_type == "target_val":
+            guard.protocol.assert_dates_within(dates, ["target_val"], "target_adaptation_validation")
         elif self.split_type == "source_val":
             guard.check_model_selection_scope(dates, purpose="source_val_dataset")
         elif self.split_type in ("source_train", "source_fit"):

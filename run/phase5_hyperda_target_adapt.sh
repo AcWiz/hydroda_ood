@@ -39,10 +39,23 @@ echo "  target_eval labels are never used for adaptation"
 echo "  split_artifact=artifacts/splits/US_loro_target_train_splits.json"
 echo "============================================"
 
-PYTHONPATH=. python - <<'PY'
-raise SystemExit(
-    "HyperDA target adaptation modules are implemented, but the full dataset "
-    "optimizer runner is not wired yet. Use this wrapper as the preregistered "
-    "protocol contract until scripts/train/train_hyperda_target_adapt.py is added."
-)
-PY
+PYTHONPATH=. python scripts/train/train_hyperda_target_adapt.py \
+    --source_checkpoint "${SOURCE_CHECKPOINT}" \
+    --target_region "${TARGET_REGION}" \
+    --adaptation_setting target_full_train \
+    --seed "${SEED}" \
+    --device cuda \
+    --target_latent_dim 32 \
+    --batch_size 8 \
+    --max_epochs 20 \
+    --lr 1e-3 \
+    --weight_decay 1e-4 \
+    --grad_clip 1.0 \
+    --num_workers 0 \
+    --use_lat_weighted_loss \
+    --lambda_prior 1e-4 \
+    --lambda_latent 1e-4 \
+    --lambda_gain 1e-3 \
+    --lambda_gain_smooth 1e-3 \
+    --log_every_steps 50 \
+    --checkpoint_every 5

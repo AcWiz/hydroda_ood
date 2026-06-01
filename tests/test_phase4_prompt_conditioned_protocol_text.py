@@ -94,3 +94,5 @@ def test_hyperda_target_adaptation_wrapper_declares_frozen_hypernetwork_protocol
     assert "freeze_hypernetwork=true" in text
     assert "trainable=target_latent,adapter_coefficient_residuals,residual_gain" in text
     assert "target_eval labels are never used for adaptation" in text
+    assert "scripts/train/train_hyperda_target_adapt.py" in text
+    assert "HyperDA target adaptation modules are implemented, but the full dataset" not in text
