@@ -6,11 +6,32 @@ def test_research_plan_protocol_block_uses_target_full_train_dates():
 
     assert "Source validation:          2021" not in text
     assert "Target train / adaptation:    2022" not in text
+    assert "target 2022 input-side prompt" not in text
     assert "Source fit/train:           2015-2021" in text
     assert "Source validation:          2022" in text
     assert "Target train / adaptation:  2015-2021" in text
     assert "Target validation:          2022" in text
     assert "Target eval/test:           2023-2025" in text
+    assert "HyperDA-Adapt" in text
+    assert "不再把主方法表述为 zero-shot" in text
+
+
+def test_project_experiment_plan_documents_use_historical_target_adaptation():
+    docs = [
+        Path("context/04_实验矩阵.md").read_text(),
+        Path("tasks/phase4_neural_baselines.md").read_text(),
+        Path("tasks/phase6_reporting_and_paper_artifacts.md").read_text(),
+        Path("tasks/阶段5_HyRAO与稀疏适配.md").read_text(),
+    ]
+    combined = "\n".join(docs)
+
+    assert "target 2022 input-side prompt" not in combined
+    assert "HyperDA-Adapt" in combined
+    assert "target_val=2022" in combined
+    assert "target latent" in combined
+    assert "adapter coefficient residual" in combined
+    assert "residual gain" in combined
+    assert "zero-shot；目标阶段训练" in combined
 
 
 def test_prompt_conditioned_train_wrapper_uses_target_full_train_protocol():
