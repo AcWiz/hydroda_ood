@@ -14,15 +14,25 @@ and calls a Python training/evaluation entry point under `scripts/train/` or `sc
 | `phase4_source_only_inference.sh` | Evaluate a source-only checkpoint | `scripts/eval/evaluate_checkpoint.py` | 4 |
 | `phase4_prompt_conditioned.sh` | Train prompt-conditioned shared backbone | `scripts/train/train_prompt_conditioned_shared.py` | 4 |
 | `phase4_prompt_conditioned_inference.sh` | Evaluate prompt-conditioned checkpoint | `scripts/eval/evaluate_checkpoint.py` | 4 |
+| `phase4_hyperda.sh` | Train HyperDA source-stage basis-adapter prior | `scripts/train/train_prompt_conditioned_shared.py` | 4 |
+| `phase5_hyperda_target_adapt.sh` | Preregister HyperDA target historical adaptation protocol | `scripts/train/train_hyperda_target_adapt.py` planned | 5 |
 
 ## Usage
 
 ```bash
-# Default: US-R1, K=0, seed=0
+# Default: US-R1, adaptation_setting=target_full_train, seed=0
 bash run/phase4_source_only.sh
 
-# Custom region, K, seed
-bash run/phase4_source_only.sh US-R2 0 1
+# HyperDA source-stage prior and target adaptation protocol skeleton
+bash run/phase4_hyperda.sh US-R1 0 1
+bash run/phase5_hyperda_target_adapt.sh
+
+# One-batch smoke for the target adaptation runner
+MAX_EPOCHS=1 MAX_TRAIN_BATCHES=1 MAX_VAL_BATCHES=1 \
+  bash run/phase5_hyperda_target_adapt.sh
+
+# Explicit source checkpoint / region / seed / GPU
+bash run/phase5_hyperda_target_adapt.sh <source_checkpoint> US-R1 0 1
 ```
 
 ## Prerequisites

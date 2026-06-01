@@ -2,7 +2,12 @@
 
 ## 目标
 
-实现 HyperDA full-target-train generation/refinement，并与 adapter / LoRA 在完整 2015-2021 target_train 下公平比较。旧 HyperDA-Zero/Calib/Refine K=0/4/12 只作为 secondary ablation。随后生成 US-only development report 和最终 LOCO paper artifacts。
+实现 HyperDA full-target-train generation/adaptation/refinement，并与 adapter / LoRA
+在完整 2015-2021 target_train 下公平比较。主方法不是 zero-shot；目标阶段训练
+target-specific latent / operator residual / residual gain，2022 target_val 只用于
+预注册 adaptation selection，2023-2025 target_eval 只用于最终评估。旧
+HyperDA-Zero/Calib/Refine K=0/4/12 只作为 secondary ablation。随后生成 US-only
+development report 和最终 LOCO paper artifacts。
 
 ## 需要实现
 
@@ -14,9 +19,9 @@ hydroda/models/prompt_encoder.py
 hydroda/adaptation/adapter_tuning.py
 hydroda/adaptation/lora_tuning.py
 hydroda/adaptation/hyperda_refine.py
-scripts/run_hyperda_zero.py
-scripts/run_hyperda_calib.py
-scripts/run_hyperda_refine.py
+hydroda/models/target_adaptation.py
+scripts/train/train_hyperda_target_adapt.py
+run/phase5_hyperda_target_adapt.sh
 scripts/run_kcycle_comparison.py
 scripts/make_paper_tables.py
 scripts/make_paper_figures.py
@@ -26,13 +31,20 @@ scripts/make_paper_figures.py
 
 ```text
 HyperDA-FullTargetTrain:
-  prompt = target 2022 input-side prompt + full target_train labeled summaries
+  prompt = target_train 2015-2021 input-side prompt + full target_train labeled summaries
   labels = all available 2015-2021 target_train cycles
+
+HyperDA-Adapt-FullTargetTrain:
+  initialize zeta_R = H_psi(P_R)
+  freeze theta0, H_psi, adapter basis bank
+  train target latent, adapter coefficient residuals, residual gain on target_train
+  select adaptation step / checkpoint only with target_val=2022
 
 HyperDA-Refine-FullTargetTrain:
   initialize ζ_R = H_ψ(P_R)
-  freeze θ0 and H_ψ
-  update only ζ_R for pre-registered steps on full target_train cycles
+  freeze θ0, H_ψ, and adapter basis bank
+  update target latent, adapter coefficient residuals, lightweight operator residual,
+    output-head residual, and residual gain for pre-registered steps on target_train
 ```
 
 ## 主比较
@@ -46,6 +58,7 @@ Adapter tuning
 LoRA tuning
 Prompt-conditioned shared + calibration prompt
 HyperDA-FullTargetTrain
+HyperDA-Adapt-FullTargetTrain
 HyperDA-Refine-FullTargetTrain
 ```
 
@@ -69,7 +82,7 @@ seed mean ± std / CI
 ```text
 1. HyperDA full-target-train 只使用 2015-2021 target_train labels 进行 target-specific operator 构造。
 2. 2023-2025 target_eval labels 只用于最终评估。
-3. HyperDA-Refine 只更新 ζ_R，不更新 θ0 或 Hψ。
+3. HyperDA-Adapt / Refine 不更新 θ0、Hψ 或 adapter basis bank。
 4. adapter / LoRA 使用相同 target_train dates、steps、seed、normalization。
 5. 所有表格能从 metrics_long.csv 自动生成。
 ```

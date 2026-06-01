@@ -64,7 +64,9 @@ source_only_backbone:
 prompt_conditioned_shared:
   train: source regions / continents, 2015-2021
   input: x + region prompt token/feature map
-  target_full_train: target 2022 input-side prompt + full target_train adaptation summary
+  target_full_train: source-trained shared conditional baseline; optional fixed
+    target prompt summary may use target_train 2015-2021 input-side fields only,
+    with no target_train labels and no target_val/target_eval labels
   legacy K-shot: K=0/4/12 only as secondary ablation
 ```
 
