@@ -12,8 +12,13 @@ from hydroda.models.conditional_unet import FiLMLayer
 from hydroda.models.resunet import ConvBlock
 from hydroda.models.target_adaptation import (
     AdapterCoefficientResidual,
+    HydroMSRGainOutputAdapter,
+    HydroMSRGainLiteOutputAdapter,
+    HydroMSROutputAdapter,
+    HydroMSRROSEOutputAdapter,
     MonthlyResidualGain,
     TargetLatentPrompt,
+    TargetSpatialResidualHead,
 )
 
 
@@ -34,6 +39,14 @@ class HyperAdapterConditionalResUNet(nn.Module):
         zero_raw_increment_init: bool = False,
         enable_target_adaptation: bool = False,
         target_latent_dim: int = 32,
+        enable_target_spatial_refine: bool = False,
+        target_spatial_refine_hidden: int = 16,
+        target_spatial_refine_rootzone: bool = False,
+        target_spatial_refine_input: str = "normalized",
+        target_spatial_refine_type: str = "simple",
+        target_spatial_refine_gain_span: float = 0.25,
+        hydro_msr_hidden: int | None = None,
+        enable_hydro_msr_da_film: bool = False,
     ) -> None:
         super().__init__()
         self.prompt_dim = prompt_dim
@@ -45,6 +58,21 @@ class HyperAdapterConditionalResUNet(nn.Module):
             else max(8, (width * 4) // 4)
         )
         self.hyper_adapter_scale = float(hyper_adapter_scale)
+        self.enable_target_spatial_refine = bool(enable_target_spatial_refine)
+        self.target_spatial_refine_hidden = int(target_spatial_refine_hidden)
+        self.target_spatial_refine_rootzone = bool(target_spatial_refine_rootzone)
+        if target_spatial_refine_input not in {"normalized", "raw"}:
+            raise ValueError("target_spatial_refine_input must be 'normalized' or 'raw'")
+        self.target_spatial_refine_input = str(target_spatial_refine_input)
+        if target_spatial_refine_type not in {"simple", "hydro_msr", "hydro_msr_gain", "hydro_msr_gain_lite", "hydro_msr_rose"}:
+            raise ValueError(
+                "target_spatial_refine_type must be 'simple', 'hydro_msr', "
+                "'hydro_msr_gain', 'hydro_msr_gain_lite', or 'hydro_msr_rose'"
+            )
+        self.target_spatial_refine_type = str(target_spatial_refine_type)
+        self.target_spatial_refine_gain_span = float(target_spatial_refine_gain_span)
+        self.hydro_msr_hidden = int(hydro_msr_hidden) if hydro_msr_hidden is not None else self.target_spatial_refine_hidden
+        self.enable_hydro_msr_da_film = bool(enable_hydro_msr_da_film)
 
         self.enc1 = ConvBlock(in_channels, width)
         self.enc2 = ConvBlock(width, width * 2)
@@ -85,12 +113,56 @@ class HyperAdapterConditionalResUNet(nn.Module):
             self.target_adapter_coefficient_residual_d2 = AdapterCoefficientResidual(self.hyper_n_basis)
             self.target_adapter_coefficient_residual_d1 = AdapterCoefficientResidual(self.hyper_n_basis)
             self.residual_gain = MonthlyResidualGain(out_channels=out_channels)
+            if self.enable_target_spatial_refine and self.target_spatial_refine_type == "hydro_msr_gain":
+                self.target_spatial_refine = HydroMSRGainOutputAdapter(
+                    input_channels=in_channels,
+                    out_channels=out_channels,
+                    hidden_channels=self.hydro_msr_hidden,
+                    refine_rootzone=self.target_spatial_refine_rootzone,
+                    enable_da_film=self.enable_hydro_msr_da_film,
+                )
+            elif self.enable_target_spatial_refine and self.target_spatial_refine_type == "hydro_msr_gain_lite":
+                self.target_spatial_refine = HydroMSRGainLiteOutputAdapter(
+                    input_channels=in_channels,
+                    out_channels=out_channels,
+                    hidden_channels=self.hydro_msr_hidden,
+                    refine_rootzone=self.target_spatial_refine_rootzone,
+                    enable_da_film=self.enable_hydro_msr_da_film,
+                    gain_span=self.target_spatial_refine_gain_span,
+                    learn_rootzone_gain=False,
+                )
+            elif self.enable_target_spatial_refine and self.target_spatial_refine_type == "hydro_msr":
+                self.target_spatial_refine = HydroMSROutputAdapter(
+                    input_channels=in_channels,
+                    out_channels=out_channels,
+                    hidden_channels=self.hydro_msr_hidden,
+                    refine_rootzone=self.target_spatial_refine_rootzone,
+                    enable_da_film=self.enable_hydro_msr_da_film,
+                )
+            elif self.enable_target_spatial_refine and self.target_spatial_refine_type == "hydro_msr_rose":
+                self.target_spatial_refine = HydroMSRROSEOutputAdapter(
+                    input_channels=in_channels,
+                    out_channels=out_channels,
+                    hidden_channels=self.hydro_msr_hidden,
+                    refine_rootzone=self.target_spatial_refine_rootzone,
+                    enable_da_film=self.enable_hydro_msr_da_film,
+                )
+            elif self.enable_target_spatial_refine:
+                self.target_spatial_refine = TargetSpatialResidualHead(
+                    input_channels=in_channels,
+                    out_channels=out_channels,
+                    hidden_channels=self.target_spatial_refine_hidden,
+                    refine_rootzone=self.target_spatial_refine_rootzone,
+                )
+            else:
+                self.target_spatial_refine = None
         else:
             self.target_prompt = None
             self.target_adapter_coefficient_residual_b = None
             self.target_adapter_coefficient_residual_d2 = None
             self.target_adapter_coefficient_residual_d1 = None
             self.residual_gain = None
+            self.target_spatial_refine = None
 
         self._zero_raw_increment_init = zero_raw_increment_init
         if zero_raw_increment_init:
@@ -113,6 +185,7 @@ class HyperAdapterConditionalResUNet(nn.Module):
             self.target_adapter_coefficient_residual_d2,
             self.target_adapter_coefficient_residual_d1,
             self.residual_gain,
+            self.target_spatial_refine,
         ]:
             if module is None:
                 continue
@@ -128,6 +201,7 @@ class HyperAdapterConditionalResUNet(nn.Module):
         x: torch.Tensor,
         z: Optional[torch.Tensor] = None,
         month: Optional[torch.Tensor] = None,
+        x_raw: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if z is None:
             raise ValueError("HyperAdapterConditionalResUNet requires a prompt tensor z")
@@ -169,4 +243,10 @@ class HyperAdapterConditionalResUNet(nn.Module):
         y = self.head(d1)
         if self.enable_target_adaptation and self.residual_gain is not None:
             y = self.residual_gain(y, month)
+        if self.enable_target_adaptation and self.target_spatial_refine is not None:
+            refine_x = x_raw if self.target_spatial_refine_input == "raw" and x_raw is not None else x
+            if self.target_spatial_refine_type in {"hydro_msr_gain", "hydro_msr_gain_lite"}:
+                y = y + self.target_spatial_refine(refine_x, y, x_raw=x_raw, month=month)
+            else:
+                y = y + self.target_spatial_refine(refine_x, y, x_raw=x_raw)
         return y

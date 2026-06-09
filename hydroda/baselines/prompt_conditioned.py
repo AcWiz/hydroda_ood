@@ -76,27 +76,52 @@ class PromptConditionedBackbonePredictor:
             weights_only=False,
         )
         saved_config = checkpoint.get("config", {})
+        source_config = checkpoint.get("source_checkpoint_config", {})
+
+        def cfg_get(name: str, default: Any = None) -> Any:
+            if name in saved_config and saved_config[name] is not None:
+                return saved_config[name]
+            return source_config.get(name, default)
+
+        if bool(cfg_get("enable_pigo", False)):
+            raise ValueError(
+                "PIGO target-adaptation checkpoints are no longer supported. "
+                "Use a non-PIGO spatial-rootzone Phase 5 checkpoint."
+            )
 
         # Init conditional backbone
-        width = saved_config.get("width", 32)
-        prompt_dim = saved_config.get("prompt_dim", 64)
+        width = cfg_get("width", 32)
+        prompt_dim = cfg_get("prompt_dim", 64)
         model_type = saved_config.get("model_type", "prompt_conditioned")
         self.model_type = model_type
-        self.method_name = (
-            "hyperda_basis_adapter_shared"
-            if model_type == "hyperda_basis_adapter"
-            else "prompt_conditioned_shared_backbone"
-        )
-        if model_type == "hyperda_basis_adapter":
+        is_hyperda = model_type in {"hyperda_basis_adapter", "hyperda_basis_adapter_target_adapt"}
+        is_target_adapt = model_type == "hyperda_basis_adapter_target_adapt"
+        if is_target_adapt:
+            self.method_name = "hyperda_target_adapt"
+        elif is_hyperda:
+            self.method_name = "hyperda_basis_adapter_shared"
+        else:
+            self.method_name = "prompt_conditioned_shared_backbone"
+        if is_hyperda:
             self.model = HyperAdapterConditionalResUNet(
                 in_channels=12,
                 out_channels=2,
                 width=width,
                 prompt_dim=prompt_dim,
-                hyper_n_basis=saved_config.get("hyper_n_basis", 8),
-                hyper_adapter_bottleneck=saved_config.get("hyper_adapter_bottleneck"),
-                hyper_adapter_scale=saved_config.get("hyper_adapter_scale", 1.0),
-                zero_raw_increment_init=saved_config.get("zero_raw_increment_init", False),
+                hyper_n_basis=cfg_get("hyper_n_basis", 8),
+                hyper_adapter_bottleneck=cfg_get("hyper_adapter_bottleneck"),
+                hyper_adapter_scale=cfg_get("hyper_adapter_scale", 1.0),
+                zero_raw_increment_init=cfg_get("zero_raw_increment_init", False),
+                enable_target_adaptation=is_target_adapt,
+                target_latent_dim=cfg_get("target_latent_dim", 32),
+                enable_target_spatial_refine=cfg_get("enable_target_spatial_refine", False),
+                target_spatial_refine_hidden=cfg_get("target_spatial_refine_hidden", 16),
+                target_spatial_refine_rootzone=cfg_get("target_spatial_refine_rootzone", False),
+                target_spatial_refine_input=cfg_get("target_spatial_refine_input", "normalized"),
+                target_spatial_refine_type=cfg_get("target_spatial_refine_type", "simple"),
+                target_spatial_refine_gain_span=cfg_get("target_spatial_refine_gain_span", 0.25),
+                hydro_msr_hidden=cfg_get("hydro_msr_hidden", cfg_get("target_spatial_refine_hidden", 16)),
+                enable_hydro_msr_da_film=cfg_get("enable_hydro_msr_da_film", False),
             )
         else:
             self.model = FiLMConditionalResUNet(
@@ -104,16 +129,17 @@ class PromptConditionedBackbonePredictor:
                 out_channels=2,
                 width=width,
                 prompt_dim=prompt_dim,
-                zero_raw_increment_init=saved_config.get("zero_raw_increment_init", False),
+                zero_raw_increment_init=cfg_get("zero_raw_increment_init", False),
             )
-        if model_type == "hyperda_basis_adapter":
+        if is_hyperda:
             self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         else:
             self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.to(device).eval()
+        self._requires_month = is_target_adapt
 
         # Init RegionPromptEncoder
-        num_regions = saved_config.get("num_regions", 6)
+        num_regions = cfg_get("num_regions", 6)
         self.prompt_encoder = RegionPromptEncoder(
             num_regions=num_regions,
             input_channels=12,
@@ -133,7 +159,7 @@ class PromptConditionedBackbonePredictor:
         self._is_target_unseen = False
         self._target_region_emb: Optional[torch.Tensor] = None
         self._source_global_to_prompt_idx: Dict[int, int] = {}
-        source_global_indices = saved_config.get("source_region_global_indices")
+        source_global_indices = cfg_get("source_region_global_indices")
         if source_global_indices is not None:
             self.source_regions = [f"US-R{int(global_idx) + 1}" for global_idx in source_global_indices]
             self._source_global_to_prompt_idx = {
@@ -157,14 +183,14 @@ class PromptConditionedBackbonePredictor:
             self.source_regions = [f"US-R{i + 1}" for i in range(num_regions)]
 
         # Normalization params
-        ch_mean = saved_config.get("ch_mean")
-        ch_std = saved_config.get("ch_std")
+        ch_mean = cfg_get("ch_mean")
+        ch_std = cfg_get("ch_std")
         self._ch_mean = np.array(ch_mean, dtype=np.float32) if ch_mean is not None else None
         self._ch_std = np.array(ch_std, dtype=np.float32) if ch_std is not None else None
 
         # Increment normalization params
-        inc_mean = saved_config.get("inc_mean")
-        inc_std = saved_config.get("inc_std")
+        inc_mean = cfg_get("inc_mean")
+        inc_std = cfg_get("inc_std")
         self._inc_mean = np.array(inc_mean, dtype=np.float32) if inc_mean is not None else None
         self._inc_std = np.array(inc_std, dtype=np.float32) if inc_std is not None else None
         self._has_inc_norm = self._inc_mean is not None and self._inc_std is not None
@@ -334,7 +360,11 @@ class PromptConditionedBackbonePredictor:
                     z = self._build_prompt(x_norm, region_idx, month_val)
                 finally:
                     self._prompt_route_uses_target_fallback = False
-            pred = self.model(x_norm, z)  # [1, 2, H, W]
+            month_tensor = torch.tensor([month_val], dtype=torch.long, device=x_norm.device)
+            if self._requires_month:
+                pred = self.model(x_norm, z, month=month_tensor, x_raw=x)  # [1, 2, H, W]
+            else:
+                pred = self.model(x_norm, z)  # [1, 2, H, W]
 
         pred_inc_s = pred[0, 0].cpu().numpy().astype(np.float32)
         pred_inc_r = pred[0, 1].cpu().numpy().astype(np.float32)

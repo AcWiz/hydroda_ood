@@ -15,7 +15,7 @@ set -euo pipefail
 
 TARGET_REGION="${1:-US-R1}"
 SEED="${2:-0}"
-export CUDA_VISIBLE_DEVICES="${3:-1}"
+export CUDA_VISIBLE_DEVICES="${3:-0}"
 
 cd "$(dirname "$0")/.."
 
@@ -30,8 +30,142 @@ echo "  width=32 lr=3e-4 batch_size=16 accum_steps=4"
 echo "  lat_weighted_loss=True zero_init=True inc_norm=True amp=True"
 echo "============================================"
 
+# PYTHONPATH=. python scripts/train/train_source_only_backbone.py \
+#     --target_region "${TARGET_REGION}" \
+#     --adaptation_setting target_full_train \
+#     --seed "${SEED}" \
+#     --device cuda \
+#     --amp \
+#     --accum_steps 4 \
+#     --zero_raw_increment_init \
+#     --target_increment_normalization \
+#     --use_lat_weighted_loss \
+#     --batch_size 16 \
+#     --max_epochs 50 \
+#     --lr 3e-4 \
+#     --weight_decay 1e-4 \
+#     --grad_clip 1.0 \
+#     --num_workers 0 \
+#     --width 32 \
+#     --log_every_steps 100 \
+#     --eval_every_epochs 1 \
+#     --checkpoint_every 10 \
+#     --selection_metric source_val_loss
+
+# echo "Done: ${TARGET_REGION} seed=${SEED}"
+
+
+
+
+
+
+
+
+# PYTHONPATH=. python scripts/train/train_source_only_backbone.py \
+#     --target_region US-R2 \
+#     --adaptation_setting target_full_train \
+#     --seed "${SEED}" \
+#     --device cuda \
+#     --amp \
+#     --accum_steps 4 \
+#     --zero_raw_increment_init \
+#     --target_increment_normalization \
+#     --use_lat_weighted_loss \
+#     --batch_size 16 \
+#     --max_epochs 50 \
+#     --lr 3e-4 \
+#     --weight_decay 1e-4 \
+#     --grad_clip 1.0 \
+#     --num_workers 0 \
+#     --width 32 \
+#     --log_every_steps 100 \
+#     --eval_every_epochs 1 \
+#     --checkpoint_every 10 \
+#     --selection_metric source_val_loss
+
+# echo "Done: ${TARGET_REGION} seed=${SEED}"
+
+
+
 PYTHONPATH=. python scripts/train/train_source_only_backbone.py \
-    --target_region "${TARGET_REGION}" \
+    --target_region US-R3 \
+    --adaptation_setting target_full_train \
+    --seed "${SEED}" \
+    --device cuda \
+    --amp \
+    --accum_steps 4 \
+    --zero_raw_increment_init \
+    --target_increment_normalization \
+    --use_lat_weighted_loss \
+    --batch_size 16 \
+    --max_epochs 50 \
+    --lr 3e-4 \
+    --weight_decay 1e-4 \
+    --grad_clip 1.0 \
+    --num_workers 0 \
+    --width 32 \
+    --log_every_steps 100 \
+    --eval_every_epochs 1 \
+    --checkpoint_every 10 \
+    --selection_metric source_val_loss \
+    --resume_from artifacts/runs/phase4_source_only_region_specific/phase4_source_only_region_specific_source_only_US-R3_w32_e50_lr0.0003_norm_nozero_s0_20260607_175040/checkpoints/checkpoint_latest.pt
+
+echo "Done: ${TARGET_REGION} seed=${SEED}"
+
+
+PYTHONPATH=. python scripts/train/train_source_only_backbone.py \
+    --target_region US-R4 \
+    --adaptation_setting target_full_train \
+    --seed "${SEED}" \
+    --device cuda \
+    --amp \
+    --accum_steps 4 \
+    --zero_raw_increment_init \
+    --target_increment_normalization \
+    --use_lat_weighted_loss \
+    --batch_size 16 \
+    --max_epochs 50 \
+    --lr 3e-4 \
+    --weight_decay 1e-4 \
+    --grad_clip 1.0 \
+    --num_workers 0 \
+    --width 32 \
+    --log_every_steps 100 \
+    --eval_every_epochs 1 \
+    --checkpoint_every 10 \
+    --selection_metric source_val_loss
+
+echo "Done: ${TARGET_REGION} seed=${SEED}"
+
+
+
+PYTHONPATH=. python scripts/train/train_source_only_backbone.py \
+    --target_region US-R5 \
+    --adaptation_setting target_full_train \
+    --seed "${SEED}" \
+    --device cuda \
+    --amp \
+    --accum_steps 4 \
+    --zero_raw_increment_init \
+    --target_increment_normalization \
+    --use_lat_weighted_loss \
+    --batch_size 16 \
+    --max_epochs 50 \
+    --lr 3e-4 \
+    --weight_decay 1e-4 \
+    --grad_clip 1.0 \
+    --num_workers 0 \
+    --width 32 \
+    --log_every_steps 100 \
+    --eval_every_epochs 1 \
+    --checkpoint_every 10 \
+    --selection_metric source_val_loss
+
+echo "Done: ${TARGET_REGION} seed=${SEED}"
+
+
+PYTHONPATH=. python scripts/train/train_source_only_backbone.py \
+    --target_region US-R6 \
     --adaptation_setting target_full_train \
     --seed "${SEED}" \
     --device cuda \

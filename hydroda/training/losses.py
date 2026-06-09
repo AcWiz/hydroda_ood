@@ -104,7 +104,6 @@ class MaskedHuberLoss(nn.Module):
             "valid_pixel_fraction": valid_fraction.detach(),
         }
 
-
 class MaskedMSELoss(nn.Module):
     """Masked MSE loss as fallback if Huber diverges.
 

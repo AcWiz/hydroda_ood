@@ -1,26 +1,8 @@
 #!/bin/bash
-# Phase 5: HyperDA target historical adaptation entrypoint.
+# Phase 5: Regime-aware DA gain adapter target historical adaptation.
 #
-# This wrapper preregisters the target adaptation protocol. The full optimizer
-# runner is intentionally separate from source-stage training: target_eval
-# labels are never used for adaptation, selection, or normalization.
-#
-# Protocol:
-#   target_train=2015-2021
-#   target_val=2022
-#   target_eval=2023-2025
-#   freeze_hypernetwork=true
-#   trainable=target_latent,adapter_coefficient_residuals,residual_gain,target_spatial_refine
-#
-# Usage:
-#   bash run/phase5_hyperda_target_adapt.sh
-#   bash run/phase5_hyperda_target_adapt.sh <source_checkpoint> US-R1 0 1
-#   RESUME_FROM=/path/to/last.pt MAX_EPOCHS=50 bash run/phase5_hyperda_target_adapt.sh <source_checkpoint> US-R1 0 1
-#   MAX_EPOCHS=50 bash run/phase5_hyperda_target_adapt.sh <source_checkpoint> US-R1 0 1 --resume_from /path/to/last.pt
-#
-# Optional environment overrides:
-#   MAX_EPOCHS=5 BATCH_SIZE=4 LR=5e-4 bash run/phase5_hyperda_target_adapt.sh
-#   MAX_TRAIN_BATCHES=1 MAX_VAL_BATCHES=1 bash run/phase5_hyperda_target_adapt.sh
+# This wrapper uses the Hydro-MSR candidate residual and learns a soft
+# DA-evidence-conditioned gain for selective residual updates.
 
 set -euo pipefail
 
@@ -44,10 +26,9 @@ fi
 if [[ -z "${SOURCE_CHECKPOINT}" || ! -f "${SOURCE_CHECKPOINT}" ]]; then
     echo "ERROR: source HyperDA checkpoint not found." >&2
     echo "Provide it explicitly:" >&2
-    echo "  bash run/phase5_hyperda_target_adapt.sh <source_checkpoint> ${TARGET_REGION} ${SEED} ${CUDA_VISIBLE_DEVICES}" >&2
+    echo "  bash run/phase5_da_gain_adapter.sh <source_checkpoint> ${TARGET_REGION} ${SEED} ${CUDA_VISIBLE_DEVICES}" >&2
     exit 2
 fi
-
 
 MAX_EPOCHS="${MAX_EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
@@ -59,7 +40,14 @@ ENABLE_TARGET_SPATIAL_REFINE="${ENABLE_TARGET_SPATIAL_REFINE:-1}"
 TARGET_SPATIAL_REFINE_HIDDEN="${TARGET_SPATIAL_REFINE_HIDDEN:-16}"
 TARGET_SPATIAL_REFINE_ROOTZONE="${TARGET_SPATIAL_REFINE_ROOTZONE:-1}"
 TARGET_SPATIAL_REFINE_INPUT="${TARGET_SPATIAL_REFINE_INPUT:-normalized}"
+TARGET_SPATIAL_REFINE_TYPE="${TARGET_SPATIAL_REFINE_TYPE:-hydro_msr_gain}"
+TARGET_SPATIAL_REFINE_GAIN_SPAN="${TARGET_SPATIAL_REFINE_GAIN_SPAN:-0.25}"
+HYDRO_MSR_HIDDEN="${HYDRO_MSR_HIDDEN:-16}"
+ENABLE_HYDRO_MSR_DA_FILM="${ENABLE_HYDRO_MSR_DA_FILM:-0}"
+ENABLE_DA_REGIME_GAIN_MIXER="${ENABLE_DA_REGIME_GAIN_MIXER:-1}"
+STAGE1_EPOCHS="${STAGE1_EPOCHS:-10}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
+DEVICE="${DEVICE:-cuda}"
 LAMBDA_PRIOR="${LAMBDA_PRIOR:-1e-4}"
 LAMBDA_LATENT="${LAMBDA_LATENT:-1e-4}"
 LAMBDA_GAIN="${LAMBDA_GAIN:-1e-3}"
@@ -67,11 +55,14 @@ LAMBDA_GAIN_SMOOTH="${LAMBDA_GAIN_SMOOTH:-1e-3}"
 LAMBDA_ANALYSIS="${LAMBDA_ANALYSIS:-0.25}"
 SURFACE_WEIGHT="${SURFACE_WEIGHT:-3.0}"
 ROOTZONE_WEIGHT="${ROOTZONE_WEIGHT:-1.0}"
-TARGET_SELECTION_METRIC="${TARGET_SELECTION_METRIC:-objective}"
+SELECTION_ROOTZONE_WEIGHT="${SELECTION_ROOTZONE_WEIGHT:-1.0}"
+TARGET_SELECTION_METRIC="${TARGET_SELECTION_METRIC:-combined_val_wrmse}"
 MAX_TRAIN_BATCHES="${MAX_TRAIN_BATCHES:-0}"
 MAX_VAL_BATCHES="${MAX_VAL_BATCHES:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 RESUME_FROM="${RESUME_FROM:-}"
+RUN_NAME="${RUN_NAME:-phase5_hydro_msr_gain_${TARGET_REGION}_s${SEED}}"
+
 RESUME_ARGS=()
 HAS_RESUME_ARG=0
 for arg in "${EXTRA_ARGS[@]}"; do
@@ -88,7 +79,7 @@ if [[ -z "${RESUME_LABEL}" && "${HAS_RESUME_ARG}" == "1" ]]; then
 fi
 
 echo "============================================"
-echo "Phase 5 HyperDA Target Historical Adaptation"
+echo "Phase 5 Regime-aware DA Gain Adapter"
 echo "  source_checkpoint=${SOURCE_CHECKPOINT}"
 echo "  target_region=${TARGET_REGION}"
 echo "  seed=${SEED}"
@@ -97,16 +88,16 @@ echo "  target_train=2015-2021"
 echo "  target_val=2022"
 echo "  target_eval=2023-2025"
 echo "  freeze_hypernetwork=true"
-echo "  trainable=target_latent,adapter_coefficient_residuals,residual_gain,target_spatial_refine"
+echo "  staged_schedule=global_target_modules:${STAGE1_EPOCHS},spatial_gain:remaining"
 echo "  target_eval labels are never used for adaptation"
-echo "  split_artifact=artifacts/splits/US_loro_target_train_splits.json"
 echo "  max_epochs=${MAX_EPOCHS} batch_size=${BATCH_SIZE} lr=${LR}"
-echo "  target_latent_dim=${TARGET_LATENT_DIM}"
-echo "  enable_target_spatial_refine=${ENABLE_TARGET_SPATIAL_REFINE} hidden=${TARGET_SPATIAL_REFINE_HIDDEN} refine_rootzone=${TARGET_SPATIAL_REFINE_ROOTZONE} refine_input=${TARGET_SPATIAL_REFINE_INPUT}"
-echo "  max_train_batches=${MAX_TRAIN_BATCHES} max_val_batches=${MAX_VAL_BATCHES}"
-echo "  lambda_analysis=${LAMBDA_ANALYSIS}"
-echo "  surface_weight=${SURFACE_WEIGHT} rootzone_weight=${ROOTZONE_WEIGHT}"
-echo "  target_selection_metric=${TARGET_SELECTION_METRIC}"
+echo "  device=${DEVICE}"
+echo "  target_spatial_refine_type=${TARGET_SPATIAL_REFINE_TYPE} refine_input=${TARGET_SPATIAL_REFINE_INPUT}"
+echo "  target_spatial_refine_gain_span=${TARGET_SPATIAL_REFINE_GAIN_SPAN}"
+echo "  hydro_msr_hidden=${HYDRO_MSR_HIDDEN} enable_hydro_msr_da_film=${ENABLE_HYDRO_MSR_DA_FILM}"
+echo "  enable_da_regime_gain_mixer=${ENABLE_DA_REGIME_GAIN_MIXER} stage1_epochs=${STAGE1_EPOCHS}"
+echo "  target_selection_metric=${TARGET_SELECTION_METRIC} selection_rootzone_weight=${SELECTION_ROOTZONE_WEIGHT}"
+echo "  run_name=${RUN_NAME}"
 echo "  output_dir=${OUTPUT_DIR:-auto}"
 echo "  resume_from=${RESUME_LABEL:-none}"
 echo "============================================"
@@ -116,12 +107,19 @@ PYTHONPATH=. python scripts/train/train_hyperda_target_adapt.py \
     --target_region "${TARGET_REGION}" \
     --adaptation_setting target_full_train \
     --seed "${SEED}" \
-    --device cuda \
+    --device "${DEVICE}" \
+    --run_name "${RUN_NAME}" \
     --target_latent_dim "${TARGET_LATENT_DIM}" \
     $(if [[ "${ENABLE_TARGET_SPATIAL_REFINE}" == "1" ]]; then echo "--enable_target_spatial_refine"; fi) \
     --target_spatial_refine_hidden "${TARGET_SPATIAL_REFINE_HIDDEN}" \
     $(if [[ "${TARGET_SPATIAL_REFINE_ROOTZONE}" == "1" ]]; then echo "--target_spatial_refine_rootzone"; fi) \
     --target_spatial_refine_input "${TARGET_SPATIAL_REFINE_INPUT}" \
+    --target_spatial_refine_type "${TARGET_SPATIAL_REFINE_TYPE}" \
+    --target_spatial_refine_gain_span "${TARGET_SPATIAL_REFINE_GAIN_SPAN}" \
+    --hydro_msr_hidden "${HYDRO_MSR_HIDDEN}" \
+    $(if [[ "${ENABLE_HYDRO_MSR_DA_FILM}" == "1" ]]; then echo "--enable_hydro_msr_da_film"; fi) \
+    $(if [[ "${ENABLE_DA_REGIME_GAIN_MIXER}" == "1" ]]; then echo "--enable_da_regime_gain_mixer"; fi) \
+    --stage1_epochs "${STAGE1_EPOCHS}" \
     --batch_size "${BATCH_SIZE}" \
     --max_epochs "${MAX_EPOCHS}" \
     --lr "${LR}" \
@@ -136,6 +134,7 @@ PYTHONPATH=. python scripts/train/train_hyperda_target_adapt.py \
     --lambda_analysis "${LAMBDA_ANALYSIS}" \
     --surface_weight "${SURFACE_WEIGHT}" \
     --rootzone_weight "${ROOTZONE_WEIGHT}" \
+    --selection_rootzone_weight "${SELECTION_ROOTZONE_WEIGHT}" \
     --target_selection_metric "${TARGET_SELECTION_METRIC}" \
     --log_every_steps 50 \
     --checkpoint_every 5 \

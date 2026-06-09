@@ -39,7 +39,7 @@ import torch.nn as nn
 from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 
-from hydroda.data.dataset import HydroDADataset
+from hydroda.data.dataset import HydroDADataset, collate_hydroda_samples
 from hydroda.data.file_hash import compute_sha256
 from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
@@ -486,16 +486,6 @@ class PromptConditionedTrainer:
         target_dataset = dataset or self.train_dataset
 
         def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-            x = torch.from_numpy(np.stack([s["x"] for s in batch], axis=0))
-            increment_surface = torch.from_numpy(
-                np.stack([s["increment_surface"] for s in batch], axis=0)
-            )
-            increment_rootzone = torch.from_numpy(
-                np.stack([s["increment_rootzone"] for s in batch], axis=0)
-            )
-            loss_mask = torch.from_numpy(
-                np.stack([s["loss_mask"] for s in batch], axis=0)
-            )
             # Determine region per sample from region_mask_integer
             # Map global region index (0..5) to source-only index for prompt encoder
             region_ids = []
@@ -512,26 +502,9 @@ class PromptConditionedTrainer:
                 src_rid = self.global_to_source_lookup[global_rid]
                 region_ids.append(src_rid)
                 months.append(int(s.get("month", 6)))
-            result = {
-                "x": x,
-                "increment_surface": increment_surface,
-                "increment_rootzone": increment_rootzone,
-                "loss_mask": loss_mask,
-                "region_ids": torch.tensor(region_ids, dtype=torch.long),
-                "months": torch.tensor(months, dtype=torch.long),
-            }
-            # Add latitude_weight for lat-weighted loss
-            if "latitude_weight" in batch[0]:
-                latitude_weight = torch.from_numpy(
-                    np.stack([s["latitude_weight"] for s in batch], axis=0)
-                )
-                result["latitude_weight"] = latitude_weight
-            # Add forecast fields for gain calibration
-            for key in ["forecast_surface", "forecast_rootzone"]:
-                if key in batch[0]:
-                    result[key] = torch.from_numpy(
-                        np.stack([s[key] for s in batch], axis=0)
-                    )
+            result = collate_hydroda_samples(batch)
+            result["region_ids"] = torch.tensor(region_ids, dtype=torch.long)
+            result["months"] = torch.tensor(months, dtype=torch.long)
             return result
 
         pin_mem = self.device == "cuda"
@@ -1720,6 +1693,8 @@ def main():
 
     start_time = time.time()
 
+    source_regions = run_config["source_regions"]
+
     # Load source_fit dataset (all source regions)
     print(f"\nLoading source_fit dataset...")
     train_dataset = HydroDADataset(
@@ -1737,7 +1712,6 @@ def main():
     print(f"  source regions: {run_config['source_regions']}")
 
     # Build mapping from global region index (0..5) to source-only index (0..num_source-1)
-    source_regions = run_config["source_regions"]
     global_to_source_idx = {}
     for src_idx, region_name in enumerate(source_regions):
         global_idx = _GLOBAL_REGION_IDX_MAP[region_name]

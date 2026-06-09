@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from torch.utils.data import DataLoader
 
@@ -257,8 +258,206 @@ def test_checkpoint_every_5_epochs_smoke():
         # Since source_val_dataset is provided, best source_val checkpoints should exist
         safe_score_files = list(ckpt_dir.glob("checkpoint_best_source_val_*.pt"))
         assert len(safe_score_files) >= 1, f"Expected best source_val checkpoint, found {safe_score_files}"
-
         print(f"  Checkpoint smoke test passed: {sorted([p.name for p in ckpt_dir.glob('*.pt')])}")
+
+
+def test_region_specific_parse_args_rejects_tensor_cache_backend(monkeypatch, tmp_path):
+    from scripts.train import train_source_only_region_specific as runner
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_source_only_region_specific.py",
+            "--target_region",
+            "US-R1",
+            "--adaptation_setting",
+            "target_full_train",
+            "--dataset_backend",
+            "tensor_cache",
+            "--tensor_cache_dir",
+            str(tmp_path / "cache"),
+            "--tensor_cache_max_years",
+            "2",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        runner.parse_args()
+
+
+def test_source_only_backbone_parse_args_rejects_tensor_cache_backend(monkeypatch, tmp_path):
+    from scripts.train import train_source_only_backbone as runner
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_source_only_backbone.py",
+            "--target_region",
+            "US-R1",
+            "--adaptation_setting",
+            "target_full_train",
+            "--dataset_backend",
+            "tensor_cache",
+            "--tensor_cache_dir",
+            str(tmp_path / "cache"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        runner.parse_args()
+
+
+def test_region_specific_wrapper_does_not_forward_tensor_cache_env():
+    script = Path("run/phase4_source_only_region_specific.sh").read_text(encoding="utf-8")
+
+    assert "DATASET_BACKEND" not in script
+    assert "TENSOR_CACHE_DIR" not in script
+    assert "TENSOR_CACHE_MAX_YEARS" not in script
+    assert "--dataset_backend" not in script
+    assert "--tensor_cache_dir" not in script
+    assert "--tensor_cache_max_years" not in script
+
+
+def test_source_only_wrapper_uses_netcdf_only_training_path():
+    script = Path("run/phase4_source_only.sh").read_text(encoding="utf-8")
+
+    assert "DATASET_BACKEND" not in script
+    assert "TENSOR_CACHE_DIR" not in script
+    assert "TENSOR_CACHE_MAX_YEARS" not in script
+    assert "tensor_cache_grouping" not in script
+    assert "--dataset_backend" not in script
+    assert "--tensor_cache_dir" not in script
+    assert "--tensor_cache_max_years" not in script
+    assert "--batch_size 16" in script
+
+
+def test_paper_facing_source_only_baseline_wrappers_share_strong_recipe():
+    wrappers = [
+        Path("run/phase4_source_only_all_regions.sh").read_text(encoding="utf-8"),
+        Path("run/phase4_source_only_region_specific.sh").read_text(encoding="utf-8"),
+    ]
+
+    for script in wrappers:
+        assert "--adaptation_setting target_full_train" in script
+        assert "--zero_raw_increment_init" in script
+        assert "--target_increment_normalization" in script
+        assert "--use_lat_weighted_loss" in script
+        assert "--batch_size 16" in script
+        assert "--max_epochs 50" in script
+        assert "--lr 3e-4" in script
+        assert "--weight_decay 1e-4" in script
+        assert "--grad_clip 1.0" in script
+        assert "--accum_steps 4" in script
+        assert "--checkpoint_every 10" in script
+        assert "--selection_metric source_val_loss" in script
+
+
+def test_region_specific_runner_init_from_checkpoint_loads_model_weights(tmp_path):
+    from scripts.train import train_source_only_region_specific as runner
+
+    source_model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+    target_model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+    for param in source_model.parameters():
+        torch.nn.init.constant_(param, 0.123)
+    for param in target_model.parameters():
+        torch.nn.init.constant_(param, -0.456)
+
+    ckpt_path = tmp_path / "pooled_global.pt"
+    torch.save(
+        {
+            "model_state_dict": source_model.state_dict(),
+            "config": {"width": 8},
+            "protocol_freeze_id": "test_protocol",
+        },
+        ckpt_path,
+    )
+
+    checkpoint = runner.load_init_checkpoint_into_model(
+        model=target_model,
+        checkpoint_path=ckpt_path,
+        device="cpu",
+    )
+
+    assert checkpoint["protocol_freeze_id"] == "test_protocol"
+    for source_param, target_param in zip(source_model.parameters(), target_model.parameters()):
+        torch.testing.assert_close(target_param, source_param)
+
+
+def test_region_specific_finetune_wrapper_initializes_from_pooled_global():
+    script = Path("run/phase4_source_only_region_specific_finetune.sh").read_text(encoding="utf-8")
+
+    assert "phase4_source_only_all_regions" in script
+    assert "--init_from_checkpoint" in script
+    assert "--adaptation_setting target_full_train" in script
+    assert "--zero_raw_increment_init" in script
+    assert "--target_increment_normalization" in script
+    assert "--use_lat_weighted_loss" in script
+    assert "--batch_size 16" in script
+    assert "--max_epochs 50" in script
+    assert "--selection_metric source_val_loss" in script
+
+
+def test_region_specific_parse_args_disables_trainer_zero_init_for_checkpoint_init(monkeypatch, tmp_path):
+    from scripts.train import train_source_only_region_specific as runner
+
+    ckpt_path = tmp_path / "global.pt"
+    ckpt_path.write_text("stub")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_source_only_region_specific.py",
+            "--target_region",
+            "US-R1",
+            "--adaptation_setting",
+            "target_full_train",
+            "--init_from_checkpoint",
+            str(ckpt_path),
+            "--zero_raw_increment_init",
+            "--target_increment_normalization",
+        ],
+    )
+
+    args = runner.parse_args()
+
+    assert args.init_from_checkpoint == str(ckpt_path)
+    assert args.zero_raw_increment_init is False
+    assert args.model_zero_raw_increment_init is False
+    assert args.trainer_zero_raw_increment_init is False
+    assert args.requested_zero_raw_increment_init is True
+
+
+def test_run_readme_lists_region_specific_finetune_baseline():
+    readme = Path("run/README.md").read_text(encoding="utf-8")
+
+    assert "phase4_source_only_region_specific_finetune.sh" in readme
+    assert "train_source_only_region_specific.py" in readme
+    assert "pooled global checkpoint" in readme
+
+
+def test_main_method_wrappers_use_netcdf_only_training_path():
+    for script_path in [
+        "run/phase4_prompt_conditioned.sh",
+        "run/phase4_hyperda.sh",
+    ]:
+        script = Path(script_path).read_text(encoding="utf-8")
+        assert "DATASET_BACKEND" not in script
+        assert "TENSOR_CACHE_DIR" not in script
+        assert "TENSOR_CACHE_MAX_YEARS" not in script
+        assert "--dataset_backend" not in script
+        assert "--tensor_cache_dir" not in script
+        assert "--tensor_cache_max_years" not in script
+
+
+def test_phase5_target_adapt_wrapper_uses_netcdf_only_training_path():
+    script = Path("run/phase5_hyperda_target_adapt.sh").read_text(encoding="utf-8")
+
+    assert "DATASET_BACKEND" not in script
+    assert "TENSOR_CACHE_DIR" not in script
+    assert "TENSOR_CACHE_MAX_YEARS" not in script
+    assert "--dataset_backend" not in script
+    assert "--tensor_cache_dir" not in script
+    assert "--tensor_cache_max_years" not in script
 
 
 def test_trainer_uses_weighted_loss_when_enabled():

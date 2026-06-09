@@ -23,7 +23,7 @@ import torch.nn as nn
 from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 
-from hydroda.data.dataset import HydroDADataset
+from hydroda.data.dataset import HydroDADataset, collate_hydroda_samples
 from hydroda.data.file_hash import compute_sha256
 from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
@@ -53,20 +53,19 @@ def _compute_channel_stats(dataset: HydroDADataset, sample_indices: List[int]) -
 
     for idx in indices:
         sample = dataset[idx]
-        x = sample["x"]  # (12, H, W)
-        # Only consider finite values
-        valid = np.isfinite(x)
-        # Sum per channel
-        for c in range(x.shape[0]):
-            ch_data = x[c][valid[c]]
-            if ch_data.size == 0:
-                continue
-            if sums is None:
-                sums = np.zeros(12, dtype=np.float64)
-                sq_sums = np.zeros(12, dtype=np.float64)
-            sums[c] += ch_data.sum()
-            sq_sums[c] += (ch_data ** 2).sum()
-            count += ch_data.size
+        for physical_sample in _iter_physical_samples(sample):
+            x = physical_sample["x"]  # (12, H, W)
+            valid = np.isfinite(x)
+            for c in range(x.shape[0]):
+                ch_data = x[c][valid[c]]
+                if ch_data.size == 0:
+                    continue
+                if sums is None:
+                    sums = np.zeros(12, dtype=np.float64)
+                    sq_sums = np.zeros(12, dtype=np.float64)
+                sums[c] += ch_data.sum()
+                sq_sums[c] += (ch_data ** 2).sum()
+                count += ch_data.size
 
     if sums is None:
         # Fallback: return ones (no normalization)
@@ -75,10 +74,11 @@ def _compute_channel_stats(dataset: HydroDADataset, sample_indices: List[int]) -
     channel_counts = np.zeros(12, dtype=np.float64)
     for idx in indices:
         sample = dataset[idx]
-        x = sample["x"]
-        valid = np.isfinite(x)
-        for c in range(12):
-            channel_counts[c] += valid[c].sum()
+        for physical_sample in _iter_physical_samples(sample):
+            x = physical_sample["x"]
+            valid = np.isfinite(x)
+            for c in range(12):
+                channel_counts[c] += valid[c].sum()
 
     means = sums / np.maximum(channel_counts, 1.0)
     variances = (sq_sums / np.maximum(channel_counts, 1.0)) - (means ** 2)
@@ -86,6 +86,10 @@ def _compute_channel_stats(dataset: HydroDADataset, sample_indices: List[int]) -
     stds = np.sqrt(variances) + 1e-6
 
     return means.astype(np.float32), stds.astype(np.float32)
+
+
+def _iter_physical_samples(sample: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [sample]
 
 
 class Trainer:
@@ -321,12 +325,13 @@ class Trainer:
         inc_r_values = []
         for idx in indices:
             sample = self.train_dataset[idx]
-            inc_s = sample["increment_surface"]
-            inc_r = sample["increment_rootzone"]
-            valid_s = np.isfinite(inc_s)
-            valid_r = np.isfinite(inc_r)
-            inc_s_values.append(inc_s[valid_s].reshape(-1))
-            inc_r_values.append(inc_r[valid_r].reshape(-1))
+            for physical_sample in _iter_physical_samples(sample):
+                inc_s = physical_sample["increment_surface"]
+                inc_r = physical_sample["increment_rootzone"]
+                valid_s = np.isfinite(inc_s)
+                valid_r = np.isfinite(inc_r)
+                inc_s_values.append(inc_s[valid_s].reshape(-1))
+                inc_r_values.append(inc_r[valid_r].reshape(-1))
 
         inc_s_all = np.concatenate(inc_s_values)
         inc_r_all = np.concatenate(inc_r_values)
@@ -345,35 +350,7 @@ class Trainer:
         target_dataset = dataset or self.train_dataset
 
         def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-            x = torch.from_numpy(np.stack([s["x"] for s in batch], axis=0))
-            increment_surface = torch.from_numpy(
-                np.stack([s["increment_surface"] for s in batch], axis=0)
-            )
-            increment_rootzone = torch.from_numpy(
-                np.stack([s["increment_rootzone"] for s in batch], axis=0)
-            )
-            loss_mask = torch.from_numpy(
-                np.stack([s["loss_mask"] for s in batch], axis=0)
-            )
-            result = {
-                "x": x,
-                "increment_surface": increment_surface,
-                "increment_rootzone": increment_rootzone,
-                "loss_mask": loss_mask,
-            }
-            # Add latitude_weight if available (for lat-weighted loss)
-            if "latitude_weight" in batch[0]:
-                latitude_weight = torch.from_numpy(
-                    np.stack([s["latitude_weight"] for s in batch], axis=0)
-                )
-                result["latitude_weight"] = latitude_weight
-            # Add forecast fields (for gain calibration)
-            for key in ["forecast_surface", "forecast_rootzone"]:
-                if key in batch[0]:
-                    result[key] = torch.from_numpy(
-                        np.stack([s[key] for s in batch], axis=0)
-                    )
-            return result
+            return collate_hydroda_samples(batch)
 
         pin_mem = self.device == "cuda"
         return DataLoader(
@@ -627,6 +604,9 @@ class Trainer:
             self.optimizer.zero_grad()
 
             for batch_idx, batch in enumerate(dataloader):
+                if self.device == "cuda":
+                    torch.cuda.reset_peak_memory_stats()
+
                 x = batch["x"].to(self.device)
                 inc_surface = batch["increment_surface"].to(self.device)
                 inc_rootzone = batch["increment_rootzone"].to(self.device)
@@ -653,6 +633,19 @@ class Trainer:
 
                 # Forward pass + loss (AMP handled in _forward_and_loss)
                 pred, losses = self._forward_and_loss(x_norm, target, loss_mask, latitude_weight=latitude_weight)
+                batch_stats: Dict[str, float] = {
+                    "pred_s_mean": float(pred[:, 0].mean().item()),
+                    "pred_s_std": float(pred[:, 0].std().item()),
+                    "pred_r_mean": float(pred[:, 1].mean().item()),
+                    "pred_r_std": float(pred[:, 1].std().item()),
+                    "target_s_mean": float(target[:, 0].mean().item()),
+                    "target_s_std": float(target[:, 0].std().item()),
+                    "target_r_mean": float(target[:, 1].mean().item()),
+                    "target_r_std": float(target[:, 1].std().item()),
+                    "loss_mask_numel": float(loss_mask.numel()),
+                    "region_forward_count": 1.0,
+                    "logical_batch_size": float(x.size(0)),
+                }
 
                 # Optional CUDA sync for precise error attribution (debug only)
                 if self.cuda_sync_debug and self.device == "cuda":
@@ -702,15 +695,15 @@ class Trainer:
                             grad_norm += p.grad.data.norm(2).item() ** 2
                     grad_norm = grad_norm ** 0.5 if grad_norm > 0 else 0.0
 
-                    # Compute pred stats from latest batch
-                    pred_s_mean = float(pred[:, 0].mean().item())
-                    pred_s_std = float(pred[:, 0].std().item())
-                    pred_r_mean = float(pred[:, 1].mean().item())
-                    pred_r_std = float(pred[:, 1].std().item())
-                    target_s_mean = float(target[:, 0].mean().item())
-                    target_s_std = float(target[:, 0].std().item())
-                    target_r_mean = float(target[:, 1].mean().item())
-                    target_r_std = float(target[:, 1].std().item())
+                    # Compute pred stats from latest logical batch.
+                    pred_s_mean = batch_stats["pred_s_mean"]
+                    pred_s_std = batch_stats["pred_s_std"]
+                    pred_r_mean = batch_stats["pred_r_mean"]
+                    pred_r_std = batch_stats["pred_r_std"]
+                    target_s_mean = batch_stats["target_s_mean"]
+                    target_s_std = batch_stats["target_s_std"]
+                    target_r_mean = batch_stats["target_r_mean"]
+                    target_r_std = batch_stats["target_r_std"]
 
                     # GPU memory
                     gpu_alloc = 0.0
@@ -719,12 +712,15 @@ class Trainer:
                         dev_idx = torch.cuda.current_device()
                         gpu_alloc = torch.cuda.memory_allocated(dev_idx) / 1e9
                         gpu_res = torch.cuda.memory_reserved(dev_idx) / 1e9
+                        gpu_peak_res = torch.cuda.max_memory_reserved(dev_idx) / 1e9
+                    else:
+                        gpu_peak_res = 0.0
 
                     lr = float(self.optimizer.param_groups[0]["lr"])
                     valid_px = int(
                         losses.get("valid_pixel_count", losses.get("valid_weight_sum", 0)).item()
                     )
-                    total_px = loss_mask.numel()
+                    total_px = int(batch_stats["loss_mask_numel"])
                     valid_fraction = valid_px / max(total_px, 1)
                     amp_scale = self._amp_scaler.get_scale() if self.use_amp else 0.0
 
@@ -748,6 +744,9 @@ class Trainer:
                         "true_inc_rootzone_std": round(target_r_std, 6),
                         "gpu_allocated_gb": round(gpu_alloc, 2),
                         "gpu_reserved_gb": round(gpu_res, 2),
+                        "gpu_peak_reserved_gb": round(gpu_peak_res, 2),
+                        "region_forward_count": int(batch_stats["region_forward_count"]),
+                        "logical_batch_size": int(batch_stats["logical_batch_size"]),
                         "amp_scale": amp_scale,
                         "skipped_steps": self._skipped_steps,
                     }
@@ -767,7 +766,7 @@ class Trainer:
                             f"valid={valid_fraction:.3f} g={grad_norm:.2e} | "
                             f"pred_s={pred_s_mean:.3f}/{pred_s_std:.3f} pred_r={pred_r_mean:.3f}/{pred_r_std:.3f} | "
                             f"true_s={target_s_mean:.3f}/{target_s_std:.3f} true_r={target_r_mean:.3f}/{target_r_std:.3f} | "
-                            f"gpu={gpu_alloc:.1f}GB {batches_per_sec:.1f}b/s | lr={lr:.2e} "
+                            f"gpu={gpu_alloc:.1f}GB peak={gpu_peak_res:.1f}GB {batches_per_sec:.1f}b/s | lr={lr:.2e} "
                             f"amp_scale={amp_scale:.0f} skip={self._skipped_steps}",
                             flush=True,
                         )
@@ -784,6 +783,9 @@ class Trainer:
                             "train/pred_inc_surface_std": pred_s_std,
                             "train/pred_inc_rootzone_std": pred_r_std,
                             "train/gpu_memory_gb": gpu_alloc,
+                            "train/gpu_peak_reserved_gb": gpu_peak_res,
+                            "train/region_forward_count": int(batch_stats["region_forward_count"]),
+                            "train/logical_batch_size": int(batch_stats["logical_batch_size"]),
                             "train/skipped_steps": self._skipped_steps,
                         }
                         self.wandb_logger.log_step(wandb_data)

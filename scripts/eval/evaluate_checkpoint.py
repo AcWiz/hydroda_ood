@@ -47,6 +47,7 @@ PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2
 _PREDICTOR_OUTPUT_DIRS = {
     "source_only": Path("artifacts/results/phase4_source_only"),
     "prompt_conditioned": Path("artifacts/results/phase4_prompt_conditioned"),
+    "hyperda_target_adapt": Path("artifacts/results/phase5_hyperda_target_adapt"),
 }
 
 
@@ -92,7 +93,7 @@ def main():
     parser.add_argument("--require_gpu", action="store_true",
         help="Exit with error if CUDA unavailable")
     parser.add_argument("--predictor_type", type=str, default="source_only",
-        choices=["source_only", "prompt_conditioned"],
+        choices=["source_only", "prompt_conditioned", "hyperda_target_adapt"],
         help="Type of predictor to load")
     parser.add_argument("--output_dir", type=str, default=None,
         help="Override output directory")
@@ -110,8 +111,9 @@ def main():
         args.K = 0
 
     if (
-        args.predictor_type == "prompt_conditioned"
+        args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt")
         and args.split_type in ("target_eval", "target_query")
+        and args.predictor_type != "hyperda_target_adapt"
         and not args.no_target_prompt_from_target_train
     ):
         args.target_prompt_from_target_train = True
@@ -129,7 +131,12 @@ def main():
         region_output_dir = base_dir / args.target_region
     region_output_dir.mkdir(parents=True, exist_ok=True)
 
-    phase_label = "Phase 4A" if args.predictor_type == "source_only" else "Phase 4B"
+    if args.predictor_type == "source_only":
+        phase_label = "Phase 4A"
+    elif args.predictor_type == "hyperda_target_adapt":
+        phase_label = "Phase 5"
+    else:
+        phase_label = "Phase 4B"
     print("=" * 60)
     print(f"{phase_label}: Neural Backbone Evaluation")
     print(f"  predictor_type={args.predictor_type}")
@@ -159,7 +166,7 @@ def main():
 
     # Load predictor
     print(f"\nLoading checkpoint...")
-    if args.predictor_type == "prompt_conditioned":
+    if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt"):
         from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
 
         predictor = PromptConditionedBackbonePredictor(
@@ -264,7 +271,7 @@ def main():
     }
     rows = []
     n_samples_effective = n_samples
-    if args.predictor_type == "prompt_conditioned" and args.split_type == "source_test":
+    if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt") and args.split_type == "source_test":
         source_regions = getattr(predictor, "source_regions", [])
         if not source_regions:
             raise ValueError("Prompt-conditioned source_test requires source_regions metadata in checkpoint")
@@ -323,7 +330,7 @@ def main():
         "protocol_freeze_id": PROTOCOL_FREEZE_ID,
         "split_manifest_sha256": split_manifest_sha256,
         "target_prompt": getattr(predictor, "_target_prompt_metadata", {}),
-        "target_train_residual_gain_calibration": target_train_calibration if args.predictor_type == "prompt_conditioned" else {},
+        "target_train_residual_gain_calibration": target_train_calibration if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt") else {},
         "surface": metric_summary.get("surface", {}),
         "rootzone": metric_summary.get("rootzone", {}),
         "eval_time_s": elapsed,

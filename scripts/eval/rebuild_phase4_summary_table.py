@@ -69,6 +69,68 @@ def _fmt(v) -> str:
     return str(v)
 
 
+def _summary_wrmse(summary: dict, variable: str) -> float:
+    """Extract the preferred latitude-weighted WRMSE from a summary dict."""
+    metrics = summary.get(variable, {})
+    value = metrics.get(
+        "analysis_rmse_latw_mean",
+        metrics.get("increment_rmse_latw_mean", metrics.get("rmse_latw_mean", float("nan"))),
+    )
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _region_split_wrmse(results: dict, region: str, variable: str, split_type: str = "target_eval") -> float:
+    return _summary_wrmse(results.get(region, {}).get(split_type, {}), variable)
+
+
+def all_region_wrmse_win_gate(
+    candidate_results: dict,
+    all_regions_baseline: dict,
+    region_specific_baseline: dict,
+    *,
+    regions: list[str] | None = None,
+) -> dict:
+    """Require every region x variable WRMSE to beat AR and RS baselines.
+
+    The gate is strict: the candidate must have finite target_eval WRMSE lower
+    than both the all-regions baseline and the region-specific baseline for
+    each requested region and for both Surface and RootZone.
+    """
+    regions = REGIONS if regions is None else list(regions)
+    failures = []
+    n_checks = 0
+    for region in regions:
+        for variable in ["surface", "rootzone"]:
+            n_checks += 1
+            candidate = _region_split_wrmse(candidate_results, region, variable)
+            all_regions = _region_split_wrmse(all_regions_baseline, region, variable)
+            region_specific = _region_split_wrmse(region_specific_baseline, region, variable)
+            if not (
+                math.isfinite(candidate)
+                and math.isfinite(all_regions)
+                and math.isfinite(region_specific)
+                and candidate < all_regions
+                and candidate < region_specific
+            ):
+                failures.append(
+                    {
+                        "region": region,
+                        "variable": variable,
+                        "candidate_wrmse": candidate,
+                        "all_regions_wrmse": all_regions,
+                        "region_specific_wrmse": region_specific,
+                    }
+                )
+    return {
+        "pass": len(failures) == 0,
+        "n_checks": n_checks,
+        "failures": failures,
+    }
+
+
 # ── Summary computation from metrics_long.csv ──────────────────────────────────
 
 # Metrics we track (from metrics_long.csv)
@@ -190,6 +252,38 @@ def compute_summary_from_csv(csv_path: Path) -> dict:
     return _compute_summary_from_df(df)
 
 
+def _rows_for_regions(df: pd.DataFrame, regions: list[str]) -> pd.DataFrame:
+    """Return per-sample rows plus matching region-labeled global rows."""
+    region_set = set(regions)
+    sample_region = df["sample_region_id"].astype(str)
+    per_sample = df[(df["query_date"] != "global") & sample_region.isin(region_set)]
+    labeled_global = df[(df["query_date"] == "global") & sample_region.isin(region_set)]
+    if labeled_global.empty:
+        unlabeled_global = df[
+            (df["query_date"] == "global")
+            & (df["sample_region_id"].isna() | (sample_region == ""))
+        ]
+        labeled_global = unlabeled_global
+    return pd.concat([per_sample, labeled_global], ignore_index=True)
+
+
+def _compute_per_region_summary_from_df(df: pd.DataFrame, regions: list[str]) -> dict[str, dict]:
+    """Compute per-region summaries from a combined metrics_long DataFrame.
+
+    This keeps all-region baselines on the same paper-facing metric contract as
+    region-specific runs: lat-weighted WRMSE is computed from per-region rows
+    and global skill rows are kept as aggregate-then-sqrt values, not
+    per-sample skill means from per_region_summary.json.
+    """
+    results: dict[str, dict] = {}
+    for region in regions:
+        region_df = _rows_for_regions(df, [region])
+        if region_df.empty:
+            continue
+        results[region] = _compute_summary_from_df(region_df, regions=[region])
+    return results
+
+
 # ── Main table builder ─────────────────────────────────────────────────────────
 
 def _compute_cross_region_src_rs(target_region: str) -> dict:
@@ -225,13 +319,50 @@ def _compute_cross_region_src_rs(target_region: str) -> dict:
     return summary
 
 
+def _compute_in_domain_src_rs(target_region: str) -> dict:
+    """Compute Src_RS_ID for a target region by aggregating other models' in-domain results.
+
+    For target region X, reads each Y model's (Y != X) evaluation on Y's OWN target_eval data.
+    Each model only does inference on the region it was trained on — no cross-region inference.
+    All 5 in-domain results are concatenated and summarized.
+
+    This ensures Src_RS_ID represents "how well models perform on their own domains"
+    rather than cross-region generalization.
+    """
+    dfs = []
+    source_regions = []
+    for src_region in REGIONS:
+        if src_region == target_region:
+            continue
+        src_run = _find_latest_run(REGION_SPECIFIC_BASE, src_region)
+        if not src_run:
+            continue
+        ckpt_name = _find_best_checkpoint_name(src_run)
+        # KEY DIFFERENCE: reads src_region's OWN data, not target_region's
+        csv_path = src_run / "results" / ckpt_name / "target_eval" / src_region / "metrics_long.csv"
+        if csv_path.exists():
+            dfs.append(pd.read_csv(str(csv_path)))
+            source_regions.append(src_region)
+
+    if not dfs:
+        print(f"  WARNING: No in-domain source results found for {target_region}")
+        return {}
+
+    combined = pd.concat(dfs, ignore_index=True)
+    summary = _compute_summary_from_df(combined, regions=source_regions)
+    summary["source_region_ids"] = source_regions
+    return summary
+
+
 def collect_region_specific_results() -> dict[str, dict]:
     """Collect region-specific model results. Returns {region: {split_type: summary}}.
 
     For each region X:
-      - target_eval: X's own model evaluated on X's test data (Tgt_RS) — unchanged.
+      - target_eval: X's own model evaluated on X's test data (Tgt_RS).
       - source_test: cross-region aggregate — other models Y (Y != X) evaluated on X's
         target_eval data, concatenated and summarized (Src_RS).
+      - source_in_domain: in-domain aggregate — other models Y (Y != X) each evaluated
+        on Y's OWN target_eval data, concatenated (Src_RS_ID).
     """
     results = {}
     for region in REGIONS:
@@ -282,6 +413,11 @@ def collect_region_specific_results() -> dict[str, dict]:
         if src_rs_summary:
             region_results["source_test"] = src_rs_summary
 
+        # Src_RS_ID: other models each evaluated on their OWN in-domain data
+        src_id_summary = _compute_in_domain_src_rs(region)
+        if src_id_summary:
+            region_results["source_in_domain"] = src_id_summary
+
         if region_results:
             results[region] = region_results
 
@@ -291,9 +427,9 @@ def collect_region_specific_results() -> dict[str, dict]:
 def collect_all_regions_results() -> dict[str, dict]:
     """Collect all-regions model results. {region: {split_type: summary}}.
 
-    Reads per_region_summary.json (from target_eval) and correctly separates:
-      - Tgt_AR = region's own entry
-      - Src_AR = weighted aggregate of the other 5 regions
+    Prefer metrics_long.csv so paper-facing skill uses the aggregate global
+    rows produced by the evaluation harness. per_region_summary.json remains a
+    legacy fallback, but it only contains per-sample metric means.
     """
     run_dir = _find_latest_run(ALL_REGIONS_BASE)
     if not run_dir:
@@ -301,6 +437,30 @@ def collect_all_regions_results() -> dict[str, dict]:
 
     ckpt_name = _find_best_checkpoint_name(run_dir)
     results_dir = run_dir / "results" / ckpt_name
+
+    csv_path = results_dir / "target_eval" / "metrics_long.csv"
+    if not csv_path.exists():
+        csv_path = results_dir / "source_test" / "metrics_long.csv"
+    if not csv_path.exists():
+        for legacy_split in ["target_query", "source_val"]:
+            lp = results_dir / legacy_split / "metrics_long.csv"
+            if lp.exists():
+                csv_path = lp
+                break
+    if csv_path.exists():
+        df = pd.read_csv(str(csv_path))
+        target_by_region = _compute_per_region_summary_from_df(df, REGIONS)
+        results: dict[str, dict] = {}
+        for region in REGIONS:
+            if region not in target_by_region:
+                continue
+            results.setdefault(region, {})["target_eval"] = target_by_region[region]
+
+            src_ids = [r for r in REGIONS if r != region]
+            source_df = _rows_for_regions(df, src_ids)
+            if not source_df.empty:
+                results[region]["source_test"] = _compute_summary_from_df(source_df, regions=src_ids)
+        return results
 
     # Read per_region_summary.json (target_eval and source_test are identical for AR)
     ps_path = results_dir / "target_eval" / "per_region_summary.json"
@@ -361,10 +521,10 @@ def build_summary_table(
 
     header_cols = [
         "Region",
-        "Surf_WRMSE(Tgt_RS)", "Surf_WRMSE(Src_RS)",
+        "Surf_WRMSE(Tgt_RS)", "Surf_WRMSE(Src_RS_ID)",
         "Surf_WRMSE(Tgt_AR)", "Surf_WRMSE(Src_AR)",
         "Surf_WRMSE(Tgt_FO)", "Surf_WRMSE(Src_FO)",
-        "RZ_WRMSE(Tgt_RS)", "RZ_WRMSE(Src_RS)",
+        "RZ_WRMSE(Tgt_RS)", "RZ_WRMSE(Src_RS_ID)",
         "RZ_WRMSE(Tgt_AR)", "RZ_WRMSE(Src_AR)",
         "RZ_WRMSE(Tgt_FO)", "RZ_WRMSE(Src_FO)",
     ]
@@ -392,7 +552,8 @@ def build_summary_table(
 
         # Surface WRMSE: for each method × split_type
         for method_results, method_name in [(rs, "RS"), (ar, "AR"), (fo, "FO")]:
-            for split_type in ["target_eval", "source_test"]:
+            splits = ["target_eval", "source_in_domain"] if method_name == "RS" else ["target_eval", "source_test"]
+            for split_type in splits:
                 s = method_results.get(split_type, {})
                 surf = s.get("surface", {})
                 val = surf.get("analysis_rmse_latw_mean",
@@ -402,7 +563,8 @@ def build_summary_table(
 
         # Rootzone WRMSE
         for method_results, method_name in [(rs, "RS"), (ar, "AR"), (fo, "FO")]:
-            for split_type in ["target_eval", "source_test"]:
+            splits = ["target_eval", "source_in_domain"] if method_name == "RS" else ["target_eval", "source_test"]
+            for split_type in splits:
                 s = method_results.get(split_type, {})
                 rz = s.get("rootzone", {})
                 val = rz.get("analysis_rmse_latw_mean",
@@ -419,10 +581,10 @@ def build_summary_table(
 
     skill_cols = [
         "Region",
-        "Surf_Skill(Tgt_RS)", "Surf_Skill(Src_RS)",
+        "Surf_Skill(Tgt_RS)", "Surf_Skill(Src_RS_ID)",
         "Surf_Skill(Tgt_AR)", "Surf_Skill(Src_AR)",
         "Surf_Skill(Tgt_FO)", "Surf_Skill(Src_FO)",
-        "RZ_Skill(Tgt_RS)", "RZ_Skill(Src_RS)",
+        "RZ_Skill(Tgt_RS)", "RZ_Skill(Src_RS_ID)",
         "RZ_Skill(Tgt_AR)", "RZ_Skill(Src_AR)",
         "RZ_Skill(Tgt_FO)", "RZ_Skill(Src_FO)",
     ]
@@ -438,7 +600,8 @@ def build_summary_table(
         row = [region]
 
         for method_results, method_name in [(rs, "RS"), (ar, "AR"), (fo, "FO")]:
-            for split_type in ["target_eval", "source_test"]:
+            splits = ["target_eval", "source_in_domain"] if method_name == "RS" else ["target_eval", "source_test"]
+            for split_type in splits:
                 s = method_results.get(split_type, {})
                 surf = s.get("surface", {})
                 # Skill: prefer latw_global (aggregate-then-sqrt), fall back to per-sample latw mean
@@ -449,7 +612,8 @@ def build_summary_table(
                 row.append(_fmt(val))
 
         for method_results, method_name in [(rs, "RS"), (ar, "AR"), (fo, "FO")]:
-            for split_type in ["target_eval", "source_test"]:
+            splits = ["target_eval", "source_in_domain"] if method_name == "RS" else ["target_eval", "source_test"]
+            for split_type in splits:
                 s = method_results.get(split_type, {})
                 rz = s.get("rootzone", {})
                 val = rz.get("analysis_skill_vs_forecast_latw_global",
@@ -467,10 +631,10 @@ def build_summary_table(
 
     corr_cols = [
         "Region",
-        "Surf_Corr(Tgt_RS)", "Surf_Corr(Src_RS)",
+        "Surf_Corr(Tgt_RS)", "Surf_Corr(Src_RS_ID)",
         "Surf_Corr(Tgt_AR)", "Surf_Corr(Src_AR)",
         "Surf_Corr(Tgt_FO)", "Surf_Corr(Src_FO)",
-        "RZ_Corr(Tgt_RS)", "RZ_Corr(Src_RS)",
+        "RZ_Corr(Tgt_RS)", "RZ_Corr(Src_RS_ID)",
         "RZ_Corr(Tgt_AR)", "RZ_Corr(Src_AR)",
         "RZ_Corr(Tgt_FO)", "RZ_Corr(Src_FO)",
     ]
@@ -486,7 +650,8 @@ def build_summary_table(
         row = [region]
 
         for method_results, method_name in [(rs, "RS"), (ar, "AR"), (fo, "FO")]:
-            for split_type in ["target_eval", "source_test"]:
+            splits = ["target_eval", "source_in_domain"] if method_name == "RS" else ["target_eval", "source_test"]
+            for split_type in splits:
                 s = method_results.get(split_type, {})
                 surf = s.get("surface", {})
                 val = surf.get("increment_corr_latw_mean",
@@ -494,7 +659,8 @@ def build_summary_table(
                 row.append(_fmt(val))
 
         for method_results, method_name in [(rs, "RS"), (ar, "AR"), (fo, "FO")]:
-            for split_type in ["target_eval", "source_test"]:
+            splits = ["target_eval", "source_in_domain"] if method_name == "RS" else ["target_eval", "source_test"]
+            for split_type in splits:
                 s = method_results.get(split_type, {})
                 rz = s.get("rootzone", {})
                 val = rz.get("increment_corr_latw_mean",
@@ -507,6 +673,63 @@ def build_summary_table(
     md_path.write_text("\n".join(lines) + "\n")
 
     return "\n".join(lines)
+
+
+def build_combined_summary_payload(
+    *,
+    rs_results: dict,
+    ar_results: dict,
+    fo_results: dict,
+) -> dict:
+    """Build machine-readable Phase 4 summary with paper-facing baseline names."""
+    return {
+        "generated": datetime.now().isoformat(),
+        "regions": REGIONS,
+        "baselines": {
+            "region_specific": {
+                "paper_name": "RS-Scratch",
+                "description": "One backbone per region trained from scratch on that region's 2015-2021 labels.",
+            },
+            "all_regions": {
+                "paper_name": "Pooled Global",
+                "description": "One shared backbone trained on all US regions' 2015-2021 labels.",
+            },
+            "forecast_only": {
+                "paper_name": "Forecast-Only",
+                "description": "No learned increment; predicted analysis equals forecast.",
+            },
+        },
+        "region_specific": {
+            r: {
+                st: {
+                    "surface": rs_results.get(r, {}).get(st, {}).get("surface", {}),
+                    "rootzone": rs_results.get(r, {}).get(st, {}).get("rootzone", {}),
+                }
+                for st in SPLIT_TYPES + ["source_in_domain"]
+            }
+            for r in REGIONS
+        },
+        "all_regions": {
+            r: {
+                st: {
+                    "surface": ar_results.get(r, {}).get(st, {}).get("surface", {}),
+                    "rootzone": ar_results.get(r, {}).get(st, {}).get("rootzone", {}),
+                }
+                for st in SPLIT_TYPES
+            }
+            for r in REGIONS
+        },
+        "forecast_only": {
+            r: {
+                st: {
+                    "surface": fo_results.get(r, {}).get(st, {}).get("surface", {}),
+                    "rootzone": fo_results.get(r, {}).get(st, {}).get("rootzone", {}),
+                }
+                for st in SPLIT_TYPES
+            }
+            for r in REGIONS
+        },
+    }
 
 
 def main():
@@ -548,30 +771,11 @@ def main():
     print(f"\nSummary table saved to {output_dir / 'summary_table.md'}")
 
     # Save a JSON version too
-    combined = {
-        "generated": datetime.now().isoformat(),
-        "regions": REGIONS,
-        "region_specific": {
-            r: {
-                st: {
-                    "surface": rs_results.get(r, {}).get(st, {}).get("surface", {}),
-                    "rootzone": rs_results.get(r, {}).get(st, {}).get("rootzone", {}),
-                }
-                for st in SPLIT_TYPES
-            }
-            for r in REGIONS
-        },
-        "all_regions": {
-            r: {
-                st: {
-                    "surface": ar_results.get(r, {}).get(st, {}).get("surface", {}),
-                    "rootzone": ar_results.get(r, {}).get(st, {}).get("rootzone", {}),
-                }
-                for st in SPLIT_TYPES
-            }
-            for r in REGIONS
-        },
-    }
+    combined = build_combined_summary_payload(
+        rs_results=rs_results,
+        ar_results=ar_results,
+        fo_results=fo_results,
+    )
     json_path = output_dir / "combined_summary.json"
     with open(json_path, "w") as f:
         json.dump(combined, f, indent=2)

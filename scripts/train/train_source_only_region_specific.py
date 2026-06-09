@@ -124,6 +124,8 @@ def parse_args():
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--resume_from", type=str, default=None,
         help="Path to checkpoint.pt to resume from (last.pt or best.pt).")
+    parser.add_argument("--init_from_checkpoint", type=str, default=None,
+        help="Initialize model weights from a pooled/global checkpoint, then train a fresh region-specific run.")
     # Lat-weighted loss and gain calibration
     parser.add_argument("--use_lat_weighted_loss", action="store_true", default=True,
         help="Use WeightedMaskedHuberLoss with latitude weighting (default: True)")
@@ -215,6 +217,15 @@ def parse_args():
             print(f"  [target_normalization_mode] none -> "
                   f"target_increment_normalization=False, zero_raw_increment_init=False")
 
+    args.requested_zero_raw_increment_init = bool(args.zero_raw_increment_init)
+    if args.init_from_checkpoint:
+        args.model_zero_raw_increment_init = False
+        args.trainer_zero_raw_increment_init = False
+        args.zero_raw_increment_init = False
+    else:
+        args.model_zero_raw_increment_init = bool(args.zero_raw_increment_init)
+        args.trainer_zero_raw_increment_init = bool(args.zero_raw_increment_init)
+
     return args
 
 
@@ -222,6 +233,23 @@ def load_config(config_path: str) -> dict:
     """Load YAML config file."""
     with open(config_path) as f:
         return yaml.safe_load(f)
+
+
+def load_init_checkpoint_into_model(
+    *,
+    model: torch.nn.Module,
+    checkpoint_path: str | Path,
+    device: str,
+) -> dict:
+    """Load model weights from a checkpoint without restoring optimizer state."""
+    init_path = Path(checkpoint_path)
+    if not init_path.exists():
+        raise FileNotFoundError(f"--init_from_checkpoint not found: {init_path}")
+    checkpoint = torch.load(init_path, map_location=device, weights_only=False)
+    if "model_state_dict" not in checkpoint:
+        raise KeyError(f"checkpoint missing model_state_dict: {init_path}")
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    return checkpoint
 
 
 def _run_post_train_evaluation(
@@ -363,6 +391,9 @@ def main():
         "device": str(device),
         "use_amp": args.amp,
         "zero_raw_increment_init": args.zero_raw_increment_init,
+        "requested_zero_raw_increment_init": args.requested_zero_raw_increment_init,
+        "model_zero_raw_increment_init": args.model_zero_raw_increment_init,
+        "trainer_zero_raw_increment_init": args.trainer_zero_raw_increment_init,
         "target_increment_normalization": args.target_increment_normalization,
         "target_normalization_mode": args.target_normalization_mode or (
             "per_variable_increment_std" if args.target_increment_normalization else "none"
@@ -374,6 +405,7 @@ def main():
         "selection_metric": args.selection_metric,
         "apply_source_val_residual_gain": args.apply_source_val_residual_gain,
         "lambda_amp": args.lambda_amp,
+        "init_from_checkpoint": args.init_from_checkpoint,
         "skip_post_train_eval": args.skip_post_train_eval,
         "wandb_mode": args.wandb_mode,
         "wandb_project": args.wandb_project,
@@ -507,8 +539,22 @@ def main():
         in_channels=12,
         out_channels=2,
         width=args.width,
-        zero_raw_increment_init=args.zero_raw_increment_init,
+        zero_raw_increment_init=args.model_zero_raw_increment_init,
     )
+
+    if args.init_from_checkpoint:
+        init_checkpoint = load_init_checkpoint_into_model(
+            model=model,
+            checkpoint_path=args.init_from_checkpoint,
+            device=str(device),
+        )
+        init_config = init_checkpoint.get("config", {})
+        init_width = init_config.get("width")
+        print(f"  initialized model weights from: {args.init_from_checkpoint}")
+        if init_width is not None:
+            print(f"  init checkpoint width={init_width}")
+        if args.requested_zero_raw_increment_init:
+            print("  zero_raw_increment_init disabled after checkpoint init to preserve loaded head weights")
 
     # Get checkpoint dir from run_manager
     checkpoint_dir = args.checkpoint_dir or str(run_manager.get_checkpoint_dir())
@@ -545,7 +591,7 @@ def main():
         grad_clip=args.grad_clip,
         model_width=args.width,
         target_increment_normalization=args.target_increment_normalization,
-        zero_raw_increment_init=args.zero_raw_increment_init,
+        zero_raw_increment_init=args.trainer_zero_raw_increment_init,
         accum_steps=args.accum_steps,
         run_manager=run_manager,
         use_amp=args.amp,
