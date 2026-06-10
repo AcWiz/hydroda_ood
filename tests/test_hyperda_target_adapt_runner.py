@@ -750,6 +750,93 @@ def test_prompt_predictor_loads_hydro_msr_gain_lite_target_adapt_checkpoint(tmp_
     np.testing.assert_allclose(pred["pred_analysis_surface"], sample["forecast_surface"])
 
 
+def test_prompt_predictor_loads_anchor_soup_target_adapt_checkpoint(tmp_path):
+    from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=2,
+        enable_target_adaptation=True,
+        target_latent_dim=4,
+        enable_target_spatial_refine=True,
+        target_spatial_refine_hidden=4,
+        target_spatial_refine_rootzone=True,
+        target_spatial_refine_input="raw",
+        target_spatial_refine_type="hydro_msr_gain_lite",
+        target_spatial_refine_gain_span=0.20,
+        zero_raw_increment_init=True,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=5, input_channels=12, hidden_dim=8)
+    ckpt_path = tmp_path / "checkpoint_best_target_val_anchor_soup.pt"
+    torch.save(
+        {
+            "tag": "best_target_val_anchor_soup",
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "config": {
+                "model_type": "hyperda_basis_adapter_target_adapt",
+                "method": "hyperda_target_adapt",
+                "target_latent_dim": 4,
+                "enable_target_spatial_refine": True,
+                "target_spatial_refine_hidden": 4,
+                "target_spatial_refine_rootzone": True,
+                "target_spatial_refine_input": "raw",
+                "target_spatial_refine_type": "hydro_msr_gain_lite",
+                "target_spatial_refine_gain_span": 0.20,
+                "hydro_msr_hidden": 4,
+                "enable_adapter_anchor_soup": True,
+                "adapter_anchor_soup_selection_metric": "surface_val_wrmse_plus_0.25_rootzone_val_wrmse",
+                "adapter_anchor_soup_no_leakage": "target_val_2022_only_no_target_eval_labels",
+                "target_region": "US-R1",
+                "adaptation_setting": "target_full_train",
+            },
+            "source_checkpoint_config": {
+                "model_type": "hyperda_basis_adapter",
+                "width": 4,
+                "prompt_dim": 8,
+                "hyper_n_basis": 3,
+                "hyper_adapter_bottleneck": 2,
+                "hyper_adapter_scale": 1.0,
+                "zero_raw_increment_init": True,
+                "num_regions": 5,
+                "ch_mean": [0.0] * 12,
+                "ch_std": [1.0] * 12,
+                "inc_mean": [0.0, 0.0],
+                "inc_std": [1.0, 1.0],
+                "source_region_global_indices": [1, 2, 3, 4, 5],
+                "target_region": "US-R1",
+                "adaptation_setting": "target_full_train",
+            },
+        },
+        ckpt_path,
+    )
+
+    predictor = PromptConditionedBackbonePredictor(
+        checkpoint_path=str(ckpt_path),
+        device="cpu",
+        target_region="US-R1",
+    )
+
+    sample = {
+        "x": np.zeros((12, 16, 16), dtype=np.float32),
+        "forecast_surface": np.ones((16, 16), dtype=np.float32),
+        "forecast_rootzone": np.ones((16, 16), dtype=np.float32),
+        "target_region_id": "US-R1",
+        "split_role": "target_eval",
+        "month": 7,
+    }
+    pred = predictor.predict(sample)
+
+    assert predictor.model_type == "hyperda_basis_adapter_target_adapt"
+    assert predictor.method_name == "hyperda_target_adapt"
+    assert predictor.model.target_spatial_refine_type == "hydro_msr_gain_lite"
+    assert pred["pred_increment_surface"].shape == (16, 16)
+
+
 def test_prompt_predictor_loads_hydro_msr_rose_target_adapt_checkpoint(tmp_path):
     from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
     from hydroda.models.target_adaptation import HydroMSRROSEOutputAdapter
@@ -1056,6 +1143,27 @@ def test_phase5_da_gain_adapter_script_forwards_gain_and_stage_flags():
     assert 'RUN_NAME="${RUN_NAME:-phase5_hydro_msr_gain_${TARGET_REGION}_s${SEED}}"' in text
 
 
+def test_phase5_anchor_soup_gain_adapter_script_forwards_anchor_soup_defaults():
+    script = Path("run/phase5_anchor_soup_gain_adapter.sh")
+
+    text = script.read_text()
+
+    assert 'export CUDA_VISIBLE_DEVICES="${4:-${CUDA_VISIBLE_DEVICES:-0}}"' in text
+    assert 'TARGET_SPATIAL_REFINE_TYPE="${TARGET_SPATIAL_REFINE_TYPE:-hydro_msr_gain_lite}"' in text
+    assert 'TARGET_SPATIAL_REFINE_GAIN_SPAN="${TARGET_SPATIAL_REFINE_GAIN_SPAN:-0.20}"' in text
+    assert 'STAGE1_EPOCHS="${STAGE1_EPOCHS:-0}"' in text
+    assert 'MAX_EPOCHS="${MAX_EPOCHS:-60}"' in text
+    assert 'LR="${LR:-7.5e-4}"' in text
+    assert 'SURFACE_WEIGHT="${SURFACE_WEIGHT:-4.0}"' in text
+    assert 'ROOTZONE_WEIGHT="${ROOTZONE_WEIGHT:-0.75}"' in text
+    assert 'LAMBDA_ANALYSIS="${LAMBDA_ANALYSIS:-0.35}"' in text
+    assert 'TARGET_SELECTION_METRIC="${TARGET_SELECTION_METRIC:-combined_val_wrmse}"' in text
+    assert 'SELECTION_ROOTZONE_WEIGHT="${SELECTION_ROOTZONE_WEIGHT:-0.25}"' in text
+    assert 'ENABLE_ADAPTER_ANCHOR_SOUP="${ENABLE_ADAPTER_ANCHOR_SOUP:-1}"' in text
+    assert "--enable_adapter_anchor_soup" in text
+    assert 'RUN_NAME="${RUN_NAME:-phase5_anchor_soup_gain_${TARGET_REGION}_s${SEED}}"' in text
+
+
 def test_phase5_hydro_msr_rose_script_forwards_rose_flags():
     script = Path("run/phase5_hydro_msr_rose.sh")
 
@@ -1197,6 +1305,147 @@ def test_best_checkpoint_names_include_all_preregistered_validation_metrics():
     assert names["surface_val_wrmse"] == "checkpoint_best_target_val_surface_wrmse.pt"
     assert names["rootzone_val_wrmse"] == "checkpoint_best_target_val_rootzone_wrmse.pt"
     assert names["combined_val_wrmse"] == "checkpoint_best_target_val_combined_wrmse.pt"
+
+
+def test_target_adapter_state_extraction_is_target_only():
+    from scripts.train.train_hyperda_target_adapt import extract_target_adapter_state
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=2,
+        enable_target_adaptation=True,
+        target_latent_dim=4,
+        enable_target_spatial_refine=True,
+        target_spatial_refine_hidden=4,
+        target_spatial_refine_rootzone=True,
+        target_spatial_refine_type="hydro_msr_gain_lite",
+    )
+
+    state = extract_target_adapter_state(model)
+
+    assert state
+    assert any(name.startswith("target_prompt.") for name in state)
+    assert any(name.startswith("target_spatial_refine.") for name in state)
+    assert any(name.startswith("residual_gain.") for name in state)
+    assert all(
+        name.startswith("target_")
+        or name.startswith("residual_gain.")
+        or "target_adapter_coefficient_residual" in name
+        for name in state
+    )
+    assert not any(name.startswith("enc") for name in state)
+    assert not any(name.startswith("hyper_adapter") for name in state)
+
+
+def test_apply_target_adapter_state_preserves_source_prior_and_interpolates_from_anchor():
+    from scripts.train.train_hyperda_target_adapt import (
+        apply_target_adapter_state,
+        extract_target_adapter_state,
+        interpolate_target_adapter_state,
+    )
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=2,
+        enable_target_adaptation=True,
+        target_latent_dim=4,
+        enable_target_spatial_refine=True,
+        target_spatial_refine_hidden=4,
+    )
+    anchor = extract_target_adapter_state(model)
+    epoch_state = {name: tensor + 2.0 for name, tensor in anchor.items()}
+    source_before = {
+        name: tensor.detach().clone()
+        for name, tensor in model.state_dict().items()
+        if name not in anchor
+    }
+
+    interpolated = interpolate_target_adapter_state(anchor, epoch_state, alpha=0.25)
+    apply_target_adapter_state(model, interpolated)
+
+    after = model.state_dict()
+    for name, tensor in interpolated.items():
+        assert torch.allclose(after[name].cpu(), tensor)
+    for name, tensor in source_before.items():
+        assert torch.allclose(after[name].cpu(), tensor)
+
+
+def test_interpolate_target_adapter_state_uses_source_anchor_alpha():
+    from scripts.train.train_hyperda_target_adapt import interpolate_target_adapter_state
+
+    anchor = {"target_prompt.latent": torch.tensor([0.0, 2.0])}
+    adapted = {"target_prompt.latent": torch.tensor([4.0, 6.0])}
+
+    interpolated = interpolate_target_adapter_state(anchor, adapted, alpha=0.25)
+
+    assert torch.allclose(interpolated["target_prompt.latent"], torch.tensor([1.0, 3.0]))
+    assert torch.allclose(anchor["target_prompt.latent"], torch.tensor([0.0, 2.0]))
+    assert torch.allclose(adapted["target_prompt.latent"], torch.tensor([4.0, 6.0]))
+
+
+def test_greedy_anchor_soup_accepts_only_target_val_improvements():
+    from scripts.train.train_hyperda_target_adapt import (
+        AdapterAnchorSoupCandidate,
+        greedy_select_adapter_anchor_soup,
+    )
+
+    def evaluate_state(state):
+        marker = float(state["target_prompt.latent"][0])
+        metric_by_marker = {
+            1.0: (0.8, 1.0),
+            2.0: (0.7, 0.9),
+            3.0: (1.0, 1.0),
+            5.0: (1.1, 0.8),
+        }
+        surface, rootzone = metric_by_marker[marker]
+        return {
+            "target_val_surface_wrmse_latw": surface,
+            "target_val_rootzone_wrmse_latw": rootzone,
+        }
+
+    candidates = [
+        AdapterAnchorSoupCandidate(
+            candidate_id="epoch010_alpha0.40",
+            epoch=10,
+            alpha=0.40,
+            state={"target_prompt.latent": torch.tensor([1.0])},
+        ),
+        AdapterAnchorSoupCandidate(
+            candidate_id="epoch015_alpha0.40",
+            epoch=15,
+            alpha=0.40,
+            state={"target_prompt.latent": torch.tensor([3.0])},
+        ),
+        AdapterAnchorSoupCandidate(
+            candidate_id="epoch020_alpha0.40",
+            epoch=20,
+            alpha=0.40,
+            state={"target_prompt.latent": torch.tensor([5.0])},
+        ),
+    ]
+
+    result = greedy_select_adapter_anchor_soup(
+        candidates,
+        evaluate_state=evaluate_state,
+        selection_rootzone_weight=0.25,
+        rootzone_guard=True,
+    )
+
+    assert result.selected_metric == pytest.approx(0.925)
+    assert [candidate.candidate_id for candidate in result.accepted_candidates] == [
+        "epoch010_alpha0.40",
+        "epoch015_alpha0.40",
+    ]
+    assert torch.allclose(result.selected_state["target_prompt.latent"], torch.tensor([2.0]))
+    assert any(row["decision"] == "reject" for row in result.trace_rows)
 
 
 def test_stage_schedule_freezes_global_then_spatial_modules():

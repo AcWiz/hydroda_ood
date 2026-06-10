@@ -1,15 +1,16 @@
 #!/bin/bash
-# Phase 5: Regime-aware DA gain adapter target historical adaptation.
+# Phase 5: source-anchored adapter-soup DA gain adaptation.
 #
-# This wrapper uses the Hydro-MSR candidate residual and learns a soft
-# DA-evidence-conditioned gain for selective residual updates.
+# This wrapper keeps the frozen HyperDA source prior fixed, trains target
+# adapters on target_train, then selects a source-anchored adapter-weight soup
+# using target_val only.
 
 set -euo pipefail
 
 SOURCE_CHECKPOINT="${1:-}"
 TARGET_REGION="${2:-US-R1}"
 SEED="${3:-0}"
-export CUDA_VISIBLE_DEVICES="${4:-1}"
+export CUDA_VISIBLE_DEVICES="${4:-${CUDA_VISIBLE_DEVICES:-0}}"
 EXTRA_ARGS=()
 if [[ "$#" -gt 4 ]]; then
     EXTRA_ARGS=("${@:5}")
@@ -26,13 +27,13 @@ fi
 if [[ -z "${SOURCE_CHECKPOINT}" || ! -f "${SOURCE_CHECKPOINT}" ]]; then
     echo "ERROR: source HyperDA checkpoint not found." >&2
     echo "Provide it explicitly:" >&2
-    echo "  bash run/phase5_da_gain_adapter.sh <source_checkpoint> ${TARGET_REGION} ${SEED} ${CUDA_VISIBLE_DEVICES}" >&2
+    echo "  bash run/phase5_anchor_soup_gain_adapter.sh <source_checkpoint> ${TARGET_REGION} ${SEED} ${CUDA_VISIBLE_DEVICES}" >&2
     exit 2
 fi
 
-MAX_EPOCHS="${MAX_EPOCHS:-50}"
+MAX_EPOCHS="${MAX_EPOCHS:-60}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
-LR="${LR:-1e-3}"
+LR="${LR:-7.5e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
 GRAD_CLIP="${GRAD_CLIP:-1.0}"
 TARGET_LATENT_DIM="${TARGET_LATENT_DIM:-32}"
@@ -40,28 +41,33 @@ ENABLE_TARGET_SPATIAL_REFINE="${ENABLE_TARGET_SPATIAL_REFINE:-1}"
 TARGET_SPATIAL_REFINE_HIDDEN="${TARGET_SPATIAL_REFINE_HIDDEN:-16}"
 TARGET_SPATIAL_REFINE_ROOTZONE="${TARGET_SPATIAL_REFINE_ROOTZONE:-1}"
 TARGET_SPATIAL_REFINE_INPUT="${TARGET_SPATIAL_REFINE_INPUT:-normalized}"
-TARGET_SPATIAL_REFINE_TYPE="${TARGET_SPATIAL_REFINE_TYPE:-hydro_msr_gain}"
-TARGET_SPATIAL_REFINE_GAIN_SPAN="${TARGET_SPATIAL_REFINE_GAIN_SPAN:-0.25}"
+TARGET_SPATIAL_REFINE_TYPE="${TARGET_SPATIAL_REFINE_TYPE:-hydro_msr_gain_lite}"
+TARGET_SPATIAL_REFINE_GAIN_SPAN="${TARGET_SPATIAL_REFINE_GAIN_SPAN:-0.20}"
 HYDRO_MSR_HIDDEN="${HYDRO_MSR_HIDDEN:-16}"
 ENABLE_HYDRO_MSR_DA_FILM="${ENABLE_HYDRO_MSR_DA_FILM:-0}"
 ENABLE_DA_REGIME_GAIN_MIXER="${ENABLE_DA_REGIME_GAIN_MIXER:-1}"
-STAGE1_EPOCHS="${STAGE1_EPOCHS:-10}"
+STAGE1_EPOCHS="${STAGE1_EPOCHS:-0}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 DEVICE="${DEVICE:-cuda}"
 LAMBDA_PRIOR="${LAMBDA_PRIOR:-1e-4}"
 LAMBDA_LATENT="${LAMBDA_LATENT:-1e-4}"
 LAMBDA_GAIN="${LAMBDA_GAIN:-1e-3}"
 LAMBDA_GAIN_SMOOTH="${LAMBDA_GAIN_SMOOTH:-1e-3}"
-LAMBDA_ANALYSIS="${LAMBDA_ANALYSIS:-0.25}"
-SURFACE_WEIGHT="${SURFACE_WEIGHT:-3.0}"
-ROOTZONE_WEIGHT="${ROOTZONE_WEIGHT:-1.0}"
-SELECTION_ROOTZONE_WEIGHT="${SELECTION_ROOTZONE_WEIGHT:-1.0}"
+LAMBDA_ANALYSIS="${LAMBDA_ANALYSIS:-0.35}"
+SURFACE_WEIGHT="${SURFACE_WEIGHT:-4.0}"
+ROOTZONE_WEIGHT="${ROOTZONE_WEIGHT:-0.75}"
+SELECTION_ROOTZONE_WEIGHT="${SELECTION_ROOTZONE_WEIGHT:-0.25}"
 TARGET_SELECTION_METRIC="${TARGET_SELECTION_METRIC:-combined_val_wrmse}"
+ENABLE_ADAPTER_ANCHOR_SOUP="${ENABLE_ADAPTER_ANCHOR_SOUP:-1}"
+ADAPTER_SOUP_EVERY="${ADAPTER_SOUP_EVERY:-5}"
+ADAPTER_SOUP_START_EPOCH="${ADAPTER_SOUP_START_EPOCH:-10}"
+ADAPTER_SOUP_ALPHA_GRID="${ADAPTER_SOUP_ALPHA_GRID:-0.40,0.55,0.70,0.85,1.00}"
+ADAPTER_SOUP_ROOTZONE_GUARD="${ADAPTER_SOUP_ROOTZONE_GUARD:-1}"
 MAX_TRAIN_BATCHES="${MAX_TRAIN_BATCHES:-0}"
 MAX_VAL_BATCHES="${MAX_VAL_BATCHES:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 RESUME_FROM="${RESUME_FROM:-}"
-RUN_NAME="${RUN_NAME:-phase5_hydro_msr_gain_${TARGET_REGION}_s${SEED}}"
+RUN_NAME="${RUN_NAME:-phase5_anchor_soup_gain_${TARGET_REGION}_s${SEED}}"
 
 RESUME_ARGS=()
 HAS_RESUME_ARG=0
@@ -79,7 +85,7 @@ if [[ -z "${RESUME_LABEL}" && "${HAS_RESUME_ARG}" == "1" ]]; then
 fi
 
 echo "============================================"
-echo "Phase 5 Regime-aware DA Gain Adapter"
+echo "Phase 5 Anchor-Soup DA Gain Adapter"
 echo "  source_checkpoint=${SOURCE_CHECKPOINT}"
 echo "  target_region=${TARGET_REGION}"
 echo "  seed=${SEED}"
@@ -88,15 +94,18 @@ echo "  target_train=2015-2021"
 echo "  target_val=2022"
 echo "  target_eval=2023-2025"
 echo "  freeze_hypernetwork=true"
-echo "  staged_schedule=global_target_modules:${STAGE1_EPOCHS},spatial_gain:remaining"
-echo "  target_eval labels are never used for adaptation"
+echo "  stage_schedule=joint_target_modules:${STAGE1_EPOCHS}"
+echo "  target_eval labels are never used for adaptation or soup selection"
 echo "  max_epochs=${MAX_EPOCHS} batch_size=${BATCH_SIZE} lr=${LR}"
-echo "  device=${DEVICE}"
+echo "  device=${DEVICE} cuda_visible_devices=${CUDA_VISIBLE_DEVICES}"
 echo "  target_spatial_refine_type=${TARGET_SPATIAL_REFINE_TYPE} refine_input=${TARGET_SPATIAL_REFINE_INPUT}"
 echo "  target_spatial_refine_gain_span=${TARGET_SPATIAL_REFINE_GAIN_SPAN}"
 echo "  hydro_msr_hidden=${HYDRO_MSR_HIDDEN} enable_hydro_msr_da_film=${ENABLE_HYDRO_MSR_DA_FILM}"
 echo "  enable_da_regime_gain_mixer=${ENABLE_DA_REGIME_GAIN_MIXER} stage1_epochs=${STAGE1_EPOCHS}"
 echo "  target_selection_metric=${TARGET_SELECTION_METRIC} selection_rootzone_weight=${SELECTION_ROOTZONE_WEIGHT}"
+echo "  enable_adapter_anchor_soup=${ENABLE_ADAPTER_ANCHOR_SOUP}"
+echo "  adapter_soup_start_epoch=${ADAPTER_SOUP_START_EPOCH} adapter_soup_every=${ADAPTER_SOUP_EVERY}"
+echo "  adapter_soup_alpha_grid=${ADAPTER_SOUP_ALPHA_GRID} rootzone_guard=${ADAPTER_SOUP_ROOTZONE_GUARD}"
 echo "  run_name=${RUN_NAME}"
 echo "  output_dir=${OUTPUT_DIR:-auto}"
 echo "  resume_from=${RESUME_LABEL:-none}"
@@ -136,6 +145,11 @@ PYTHONPATH=. python scripts/train/train_hyperda_target_adapt.py \
     --rootzone_weight "${ROOTZONE_WEIGHT}" \
     --selection_rootzone_weight "${SELECTION_ROOTZONE_WEIGHT}" \
     --target_selection_metric "${TARGET_SELECTION_METRIC}" \
+    $(if [[ "${ENABLE_ADAPTER_ANCHOR_SOUP}" == "1" ]]; then echo "--enable_adapter_anchor_soup"; fi) \
+    --adapter_soup_every "${ADAPTER_SOUP_EVERY}" \
+    --adapter_soup_start_epoch "${ADAPTER_SOUP_START_EPOCH}" \
+    --adapter_soup_alpha_grid "${ADAPTER_SOUP_ALPHA_GRID}" \
+    $(if [[ "${ADAPTER_SOUP_ROOTZONE_GUARD}" != "1" ]]; then echo "--no_adapter_soup_rootzone_guard"; fi) \
     --log_every_steps 50 \
     --checkpoint_every 5 \
     --max_train_batches "${MAX_TRAIN_BATCHES}" \
