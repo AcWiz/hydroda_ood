@@ -7,7 +7,7 @@ valid pixels in the sample.
 
 Usage:
     PYTHONPATH=. python scripts/train/train_prompt_conditioned_shared.py \\
-        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --target_region US-R1 --adaptation_setting zero_shot_context --K 0 --seed 0 \\
         --max_epochs 5 --batch_size 1 --accum_steps 4 --lr 3e-4 \\
         --weight_decay 1e-4 --grad_clip 1.0 \\
         --width 32 --prompt_dim 64 \\
@@ -57,10 +57,10 @@ from hydroda.utils.runtime import gather_runtime_info, get_git_hash, get_timesta
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 CHECKPOINT_DIR = "artifacts/checkpoints/phase4_prompt_conditioned"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 PHASE = "phase4_prompt_conditioned"
 
 _ALL_US_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
@@ -278,7 +278,7 @@ class PromptConditionedTrainer:
         source_val_residual_gain: bool = True,
         cuda_sync_debug: bool = False,
         target_region: Optional[str] = None,
-        adaptation_setting: str = "target_full_train",
+        adaptation_setting: str = "zero_shot_context",
         K: Optional[int] = None,
         model_type: str = "prompt_conditioned",
         hyper_n_basis: int = 8,
@@ -332,7 +332,12 @@ class PromptConditionedTrainer:
         self.cuda_sync_debug = cuda_sync_debug
         self.target_region = target_region
         self.adaptation_setting = adaptation_setting
-        self.K = None if adaptation_setting == "target_full_train" else K
+        if adaptation_setting == "target_full_train":
+            self.K = None
+        elif K is None and adaptation_setting == "zero_shot_context":
+            self.K = 0
+        else:
+            self.K = K
         self.model_type = model_type
         self.hyper_n_basis = int(hyper_n_basis)
         self.hyper_adapter_bottleneck = hyper_adapter_bottleneck
@@ -1491,10 +1496,10 @@ class PromptConditionedTrainer:
 def parse_args():
     parser = argparse.ArgumentParser(description="Train prompt-conditioned or HyperDA shared backbone")
     parser.add_argument("--target_region", type=str, required=True)
-    parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
-        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+    parser.add_argument("--adaptation_setting", type=str, default="zero_shot_context",
+        help="Split adaptation setting (default: zero_shot_context; main examples: zero_shot_context, few_shot_k4, few_shot_k12)")
     parser.add_argument("--K", type=int, default=None,
-        help="Legacy few-shot K value. Ignored for target_full_train.")
+        help="Zero/few-shot K value for the main protocol.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--prompt_dim", type=int, default=64)

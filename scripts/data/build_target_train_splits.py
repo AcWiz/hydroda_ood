@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Canonical builder for V4.2 target_full_train split manifests.
+"""Legacy/internal builder for historical target_full_train split manifests.
 
 This module delegates to `build_kdate_splits.py`, which now contains the
-shared implementation for both the main full-target-train protocol and legacy
-few-shot K-date ablations. New workflows should call this script.
+shared implementation for historical reproduction paths.
+
+Paper-facing zero/few-shot workflows should call
+`scripts/data/build_zero_few_shot_splits.py` and write
+`artifacts/splits/US_loro_zero_few_shot_splits.json`.
 """
 
 from __future__ import annotations

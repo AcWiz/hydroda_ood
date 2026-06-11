@@ -13,7 +13,7 @@ Computes detailed diagnostics to understand model behavior:
 Usage:
     PYTHONPATH=. python scripts/analysis/diagnose_source_only_checkpoint.py \\
         --checkpoint artifacts/checkpoints/phase4_source_only/US-R1/best.pt \\
-        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --target_region US-R1 --adaptation_setting zero_shot_context --K 0 --seed 0 \\
         --max_samples 200
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from hydroda.utils.device import resolve_device
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 
 
@@ -172,7 +172,7 @@ def main():
     parser = argparse.ArgumentParser(description="Diagnostic analysis of source-only checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--target_region", type=str, required=True)
-    parser.add_argument("--adaptation_setting", type=str, default="target_full_train")
+    parser.add_argument("--adaptation_setting", type=str, default="zero_shot_context")
     parser.add_argument("--K", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split_type", type=str, default="target_eval")

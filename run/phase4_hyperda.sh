@@ -1,15 +1,14 @@
 #!/bin/bash
-# Phase 4C: HyperDA source-stage training for target historical adaptation.
+# Phase 4C: HyperDA source-stage training for zero/few-shot generalization.
 # One-region/one-seed default run for method development. This trains the
-# source-stage prior used before target-specific adaptation; it is not a
-# zero-label target protocol.
+# source-stage prior used before zero/few-shot target prompting/adaptation.
 #
 # Usage:
 #   bash run/phase4_hyperda.sh             # default: US-R1 seed=0 GPU1
 #   bash run/phase4_hyperda.sh US-R2 0 1   # custom region, seed, GPU
 #
 # Prerequisites:
-#   - Splits: artifacts/splits/US_loro_target_train_splits.json
+#   - Splits: artifacts/splits/US_loro_zero_few_shot_splits.json
 #   - DA.nc: /fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc
 #   - Region masks: artifacts/regions/US_region_masks.nc
 
@@ -26,15 +25,15 @@ echo "============================================"
 echo "Phase 4 HyperDA v2 FiLM + Basis Adapters"
 echo "  target_region=${TARGET_REGION}"
 echo "  seed=${SEED}"
-echo "  adaptation_setting=target_full_train"
+echo "  adaptation_setting=zero_shot_context  K=0"
 echo "  source_fit=2015-2021 source_val=2022"
-echo "  target_train=2015-2021"
-echo "  target_val=2022"
+echo "  target_context=2015-2021 input-side only"
+echo "  target_val=unused_in_main_protocol"
 echo "  target_eval=2023-2025"
-echo "  split_artifact=artifacts/splits/US_loro_target_train_splits.json"
+echo "  split_artifact=artifacts/splits/US_loro_zero_few_shot_splits.json"
 echo "  model_type=hyperda_basis_adapter width=32 prompt_dim=64"
 echo "  hyper_n_basis=8 hyper_adapter_bottleneck=32 hyper_adapter_scale=1.0"
-echo "  target_adaptation_stage=freeze H_psi, train target lightweight operator variables"
+echo "  target_adaptation_stage=phase5 zero/few-shot only"
 echo "  init_from_prompt_checkpoint=${INIT_FROM_PROMPT_CHECKPOINT:-none}"
 echo "  lr=3e-4 batch_size=16 accum_steps=4"
 echo "  lat_weighted_loss=True zero_init=True inc_norm=True amp=True"
@@ -42,7 +41,7 @@ echo "============================================"
 
 PYTHONPATH=. python scripts/train/train_prompt_conditioned_shared.py \
     --target_region "${TARGET_REGION}" \
-    --adaptation_setting target_full_train \
+    --adaptation_setting zero_shot_context --K 0 \
     --seed "${SEED}" \
     --device cuda \
     --amp \

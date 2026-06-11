@@ -42,7 +42,7 @@ DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = ProtocolConfig().protocol_freeze_id
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 PHASE = "phase5_hyperda_target_adapt"
 _REGION_TO_IDX = {f"US-R{i}": i - 1 for i in range(1, 7)}
 
@@ -183,7 +183,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_adapter_soup_rootzone_guard", action="store_false", dest="adapter_soup_rootzone_guard",
         help="Disable the RootZone non-worsening guard for anchor soup.")
     args = parser.parse_args()
-    ProtocolConfig().assert_supported_adaptation_setting(args.adaptation_setting)
+    ProtocolConfig().assert_supported_adaptation_setting(
+        args.adaptation_setting,
+        allow_legacy_full_target_train=args.adaptation_setting == "target_full_train",
+    )
     if args.adapter_soup_every <= 0:
         parser.error("--adapter_soup_every must be positive")
     if args.adapter_soup_start_epoch < 0:

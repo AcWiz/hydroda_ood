@@ -3,24 +3,25 @@
 Date: 2026-05-28
 
 This audit records the conservative cleanup policy for HydroDA-OOD after the
-protocol migration from legacy K-shot support adaptation to V4.2
-full-target-training-period adaptation.
+protocol migration to V4.4 zero/few-shot target generalization.
 
 ## Active Research Contract
 
 The active protocol is:
 
 ```text
-protocol_version: v4.2-full-target-train
-adaptation_setting: target_full_train
+protocol_version: v4.4-zero-few-shot-generalization
+adaptation_setting: zero_shot_context | few_shot_k4 | few_shot_k12
 source_fit/train: 2015-2021
 source_val:   2022
-target_train/adaptation: 2015-2021
+target_context: 2015-2021 input-side only
+target_support: K labeled cycles, K in {0,4,12}
+target_val: unused in main protocol
 target_eval: 2023-2025
 ```
 
-Any document, script, test, or report that treats `K=0/4/12`, `target_support`,
-or `target_context_k12` as the main protocol is historical or legacy.
+Any document, script, test, or report that treats `target_full_train` or
+target_val-based target selection as the main protocol is historical or legacy.
 
 ## File Classes
 
@@ -43,11 +44,10 @@ checklists/no_leakage_checklist.md
 Legacy but retained:
 
 ```text
-specs/kdate_protocol.yaml
-context/04_KDATE_SPLIT_PROTOCOL.md
 scripts/legacy/
 reports/forecast_only_latw_audit/target_context_k12/
 artifacts/splits/US_loro_kdate_splits.json
+artifacts/splits/US_loro_target_train_splits.json
 ```
 
 Generated or local-only:
@@ -78,13 +78,13 @@ tests. Revisit this only if the project moves to external artifact storage.
 
 ## Cleanup Decisions
 
-1. Keep old K-shot assets for secondary ablations, but rename references so
-   they cannot be mistaken for the main protocol.
+1. Keep old full-target and K-date assets for reproduction/ablations, but
+   rename references so they cannot be mistaken for the main protocol.
 2. Keep summary reports and small diagnostics; remove or ignore long metrics
    tables that can be regenerated from scripts.
 3. Remove Python bytecode and W&B run payloads from git tracking.
-4. Prefer `target_train` and `target_eval` in all new docs, scripts, result
-   schemas, and test names.
+4. Prefer `target_context`, `target_support`, and `target_eval` in all new docs,
+   scripts, result schemas, and test names.
 5. Leave compatibility aliases in code paths that must read old manifests.
 
 ## Risks To Monitor
@@ -96,12 +96,12 @@ They must not be used as main-protocol evidence.
 
 Artifact drift risk:
 
-The new target-train split file is not generated until
-`scripts/data/build_target_train_splits.py` is run. Tests that require this
+The new zero/few-shot split file is not generated until
+`scripts/data/build_zero_few_shot_splits.py` is run. Tests that require this
 artifact should skip or use synthetic manifests until the artifact is frozen.
 
 Review risk:
 
-Reviewers may object that full target-train adaptation is easier than few-shot.
-The response is to state the exact label budget, preserve held-out
-`target_eval`, and report legacy K-shot only as a secondary ablation.
+Reviewers may object that target-side labels leak into model selection. The
+response is to state the exact K-cycle label budget, preserve held-out
+`target_eval`, and keep target_val/full-target runs out of the main protocol.

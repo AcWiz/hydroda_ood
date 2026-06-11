@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 OUTPUT_JSON = "artifacts/experiments/phase3_simple_baselines/US/verification/leakage_audit.json"
 OUTPUT_DIR = Path(OUTPUT_JSON).parent
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

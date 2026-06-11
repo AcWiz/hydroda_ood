@@ -2,14 +2,17 @@
 
 ## 1. Baseline-first 原则
 
-在 Forecast-only、source-only、prompt-conditioned shared、adapter/LoRA 没跑通前，不要声称 HyperDA 有主表优势。mean increment、monthly mean、ridge 保留为 internal sanity。
+在 Forecast-only、source-only、prompt-conditioned shared 和 HyperDA K=0/4/12
+没有在同一 V4.4 zero/few-shot split 上跑通前，不要声称 HyperDA 有主表优势。
+mean increment、monthly mean、ridge 和 full-target/adapter/LoRA 结果保留为
+internal sanity 或 appendix ablation。
 
 顶会审稿人会先问：
 
 ```text
 这个任务是否比简单 bias correction 难？
-完整 target_train mean 是否已经足够？
-Ridge 是否能吃掉大部分收益？
+少量 target_support labels 是否已经足够？
+Ridge 或简单校准是否能吃掉大部分收益？
 ```
 
 ---
@@ -27,13 +30,15 @@ pred_analysis = forecast
 
 用 source fit regions 的平均 increment。
 
-### target_train_mean_increment
+### target_support_mean_increment
 
-Internal sanity only。用完整 2015-2021 target_train dates 的平均 increment。
+Internal sanity only。只允许使用当前 split 的 K 个 target_support labeled cycles。
+完整 2015-2021 target_train mean 属于 legacy/full-target reproduction，不进入主表。
 
-### target_monthly_train_increment
+### target_monthly_support_increment
 
-Internal sanity only。用完整 2015-2021 target_train dates 的 monthly increment mean。
+Internal sanity only。只允许使用当前 split 的 target_support labeled cycles；完整
+target_train monthly mean 属于 legacy/full-target reproduction。
 
 ### ridge
 
@@ -58,23 +63,47 @@ optional lat/lon or row/col encoding
 优先级：
 
 ```text
-small_conv_da_operator
-small_unet_da_operator
-source_only_neural
-full_finetune
-head_tuning
-bias_only
-AdaBN
-adapter
-LoRA
-pooled_sformer_wrapper
+forecast_only
+source_pooled_global_backbone  # paper-facing role: Source-only backbone
+prompt_conditioned_shared_backbone
+source_regime_specialist_bank  # final cross-continent same-regime specialist bank
+HyperDA_K0_zero_shot_context
+HyperDA_K4_lightweight_target_adaptation
+HyperDA_K12_lightweight_target_adaptation
+```
+
+`source_pooled_global_backbone` trains only source domains on 2015-2021 and
+uses source_val 2022 for checkpoint/model selection. In the final
+leave-one-continent-out protocol, source domains are the two non-target
+continents. In the current US-only transition, the existing leave-one-region-out
+source-only runner is the correct global baseline if it excludes the target US
+region from training.
+
+`source_regime_specialist_bank` is the region-specific baseline under the new
+protocol: for target continent C and regime Ri, train the Ri specialist only on
+source continents' Ri regions, then route by preregistered region/regime ID or
+input-only target_context. US-only has no cross-continent same-regime
+counterpart, so source-region expert routing/ensemble is internal sanity only.
+
+Legacy/internal neural baselines:
+
+```text
+legacy_all_regions_sanity:
+  previous wrapper: phase4_source_only_all_regions
+  trains all US-R1..R6, including the held-out target region's 2015-2021 labels;
+  do not report as OOD global.
+
+target_full_history_region_oracle:
+  previous wrapper: phase4_source_only_region_specific
+  trains each target region's own 2015-2021 labels; appendix/internal upper
+  bound only, not V4.4 zero/few-shot target generalization.
 ```
 
 Sformer 只能接入我们的 dataset/split/metric，不能沿用合作方 split 或 training logic。
 
 ---
 
-## 4. Phase 5 HyperDA target adaptation
+## 4. Phase 5 HyperDA zero/few-shot target generalization
 
 HyperDA 定义：
 
@@ -83,8 +112,9 @@ HyperDA 定义：
 pred_increment = f_{θ0, ζ_R}(x_R)
 ```
 
-其中 `P_R` 是 target prompt，可包含 input-side descriptor 和 target_train
-adaptation summaries，包括：
+其中 `P_R` 是 target-context monthly prompt prototypes，只能包含 2015-2021
+target_context input-side descriptor、target region embedding/fallback embedding
+和部署时已知的 month-of-year seasonal phase，例如：
 
 ```text
 forecast climatology
@@ -98,13 +128,23 @@ optional static covariates
 主协议：
 
 ```text
-使用完整 target_train=2015-2021 构造 target-specific operator / prompt / adapter。
+K=0: target-context monthly prompt prototypes from input-side context only, no target labels.
+K=4/12: fixed K labeled target_support cycles, fixed preregistered steps,
+        no target_val early stopping or selection.
 ```
 
-Legacy few-shot ablation：
+短期 few-shot adaptation 默认使用 source-anchor recipe：先在 support 上优化轻量
+target-specific variables，再保存固定
+`theta_init + alpha * (theta_adapt - theta_init)` 候选，不用 target_val 或
+target_eval 选择 alpha。当前保守默认值为 K4 `steps=100, lr=1e-3, alpha=0.75`，
+K12 `steps=80, lr=3e-4, alpha=0.25`；这些超参只允许来自 source-side episodic
+validation / preregistration，并必须写入 metadata。
+
+Legacy/internal reproduction：
 
 ```text
-K=0/4/12 只作为 secondary ablation，不进入主表。
+target_full_train / full target_train adapters / target_val selection 只作为
+explicit opt-in reproduction，不进入主表。
 ```
 
 ---

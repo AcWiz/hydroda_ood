@@ -1,4 +1,4 @@
-"""Tests for the full-target historical-adaptation protocol.
+"""Regression tests for legacy full-target historical adaptation.
 
 No-leakage declaration:
     - Target training/adaptation dates are limited to the 2015-2021 target train period.
@@ -21,18 +21,18 @@ from hydroda.splits.manifest import create_split_manifest, validate_no_leakage
 def test_protocol_main_adaptation_setting_replaces_main_k_shot():
     p = ProtocolConfig()
 
-    assert "historical_target_adapt" in p.protocol_freeze_id
+    assert "zero_few_shot_generalization" in p.protocol_freeze_id
     assert p.role_for_date("2021-06-01") == "source_fit"
     assert p.role_for_date("2022-06-01") == "source_val"
     assert p.role_for_date("2023-06-01") == "target_eval"
-    assert tuple(p.main_adaptation_settings) == ("target_full_train",)
-    assert tuple(p.legacy_few_shot_K_values) == (0, 4, 12)
+    assert tuple(p.main_adaptation_settings) == ("zero_shot_context", "few_shot_k4", "few_shot_k12")
+    assert tuple(p.main_K_values) == (0, 4, 12)
     p.assert_dates_within(["2019-06-01", "2021-12-31"], ["target_train"], "target_adaptation")
 
-    p.assert_supported_adaptation_setting("target_full_train")
-    p.assert_legacy_few_shot_K(4)
+    p.assert_supported_adaptation_setting("few_shot_k4")
+    p.assert_supported_adaptation_setting("target_full_train", allow_legacy_full_target_train=True)
     with pytest.raises(ValueError):
-        p.assert_supported_adaptation_setting("few_shot_k4")
+        p.assert_supported_adaptation_setting("target_full_train")
 
 
 def test_leakage_guard_allows_target_train_adaptation_but_not_selection():
@@ -43,7 +43,11 @@ def test_leakage_guard_allows_target_train_adaptation_but_not_selection():
         purpose="adapter_tuning",
         labels_allowed=True,
     )
-    guard.check_model_selection_scope(["2022-06-01"], purpose="checkpoint_selection")
+    guard.check_model_selection_scope(
+        ["2022-06-01"],
+        purpose="checkpoint_selection",
+        model_selection_source="source_val_preregistered",
+    )
 
     with pytest.raises(ValueError):
         guard.check_target_adaptation_scope(["2023-01-01"], purpose="adapter_tuning", labels_allowed=True)
@@ -72,9 +76,11 @@ def test_full_target_train_manifest_schema_and_validation():
         query_dates=[
             {"time_index": 30, "date_str": "2023-01-15", "datetime_str": "2023-01-15T00:00:00Z"},
         ],
+        allow_legacy_full_target_train=True,
     )
 
     assert manifest["adaptation_setting"] == "target_full_train"
+    assert manifest["adaptation_protocol"] == "legacy_full_target_train"
     assert manifest["target_train_cycle_count"] == 2
     assert manifest["target_adaptation_cycle_count"] == 2
     assert manifest["target_support_dates"] == manifest["target_train_dates"]
@@ -82,6 +88,7 @@ def test_full_target_train_manifest_schema_and_validation():
     assert manifest["K_legacy"] is None
     assert manifest["target_train_dates_hash"]
     assert manifest["target_eval_dates_hash"]
+    assert manifest["target_full_train_usage"] == "legacy_internal_only"
 
     results = validate_no_leakage(manifest)
     assert results["target_train_in_train_year"] is True
@@ -123,6 +130,9 @@ def test_evaluation_rows_include_adaptation_metadata():
                 "target_region_id": "US-R1",
                 "active_region_ids": ["US-R1"],
                 "adaptation_setting": "target_full_train",
+                "target_context_dates_hash": "contexthash",
+                "target_support_dates_hash": "supporthash",
+                "support_dates_hash": "supporthash",
                 "target_train_dates_hash": "trainhash",
                 "target_eval_dates_hash": "evalhash",
                 "split_manifest_sha256": "manifesthash",
@@ -142,7 +152,17 @@ def test_evaluation_rows_include_adaptation_metadata():
 
     first = rows[0]
     assert first["adaptation_setting"] == "target_full_train"
+    assert first["target_context_dates_hash"] == "contexthash"
+    assert first["target_support_dates_hash"] == "supporthash"
+    assert first["support_dates_hash"] == "supporthash"
     assert first["target_train_dates_hash"] == "trainhash"
     assert first["target_eval_dates_hash"] == "evalhash"
     assert first["split_manifest_sha256"] == "manifesthash"
     assert first["K"] == "legacy_none"
+
+    global_row = next(row for row in rows if row["query_date"] == "global")
+    assert global_row["target_context_dates_hash"] == "contexthash"
+    assert global_row["target_support_dates_hash"] == "supporthash"
+    assert global_row["support_dates_hash"] == "supporthash"
+    assert global_row["target_train_dates_hash"] == "trainhash"
+    assert global_row["target_eval_dates_hash"] == "evalhash"

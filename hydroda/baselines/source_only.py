@@ -24,7 +24,8 @@ class SourceOnlyBackbonePredictor:
     Loads checkpoint, sets to eval mode, and provides:
         predict(sample: dict) -> dict:
             - x = sample['x']  # [12, H, W] raw input
-            - pred_increment = model(x.unsqueeze(0))  # [1, 2, H, W]
+            - pred_increment = model(x.unsqueeze(0)), with residual gain applied
+              before reporting when calibration is enabled
             - forecast_surface = sample['forecast_surface']
             - forecast_rootzone = sample['forecast_rootzone']
             - pred_analysis_surface = forecast_surface + pred_increment[0, 0]
@@ -53,6 +54,7 @@ class SourceOnlyBackbonePredictor:
             weights_only=False,
         )
         saved_config = checkpoint.get("config", {})
+        self.method_name = str(saved_config.get("method", self.method_name))
         ch_mean = saved_config.get("ch_mean")
         ch_std = saved_config.get("ch_std")
 
@@ -117,17 +119,18 @@ class SourceOnlyBackbonePredictor:
         forecast_surface = np.asarray(sample["forecast_surface"], dtype=np.float32)
         forecast_rootzone = np.asarray(sample["forecast_rootzone"], dtype=np.float32)
 
-        # Denormalize increments back to raw m³/m³ if model was trained with increment normalization
+        # Denormalize increments back to raw m^3/m^3 if model was trained with increment normalization.
         if self._has_inc_norm:
             pred_inc_s = pred_inc_s * self._inc_std[0] + self._inc_mean[0]
             pred_inc_r = pred_inc_r * self._inc_std[1] + self._inc_mean[1]
 
         if self.apply_residual_gain:
-            pred_analysis_surface = (forecast_surface + self.alpha_surface * pred_inc_s).astype(np.float32)
-            pred_analysis_rootzone = (forecast_rootzone + self.alpha_rootzone * pred_inc_r).astype(np.float32)
-        else:
-            pred_analysis_surface = (forecast_surface + pred_inc_s).astype(np.float32)
-            pred_analysis_rootzone = (forecast_rootzone + pred_inc_r).astype(np.float32)
+            # Public outputs must satisfy pred_analysis = forecast + pred_increment.
+            pred_inc_s = (self.alpha_surface * pred_inc_s).astype(np.float32)
+            pred_inc_r = (self.alpha_rootzone * pred_inc_r).astype(np.float32)
+
+        pred_analysis_surface = (forecast_surface + pred_inc_s).astype(np.float32)
+        pred_analysis_rootzone = (forecast_rootzone + pred_inc_r).astype(np.float32)
 
         return {
             "pred_increment_surface": pred_inc_s,

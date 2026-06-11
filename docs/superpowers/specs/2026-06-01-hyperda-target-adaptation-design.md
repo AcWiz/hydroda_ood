@@ -1,8 +1,16 @@
 # HyperDA Target Adaptation Design
 
-## Goal
+> Superseded by Protocol V4.4 zero/few-shot generalization. This design is
+> retained for legacy/internal full-target reproduction context only. The active
+> paper-facing protocol freezes the source prior after source training, uses
+> `target_context=2015-2021` input-side prompt context, optional K-shot
+> `target_support` labels for K in {0,4,12}, no main `target_val`, and final
+> `target_eval=2023-2025`.
 
-Update the HyperDA experimental design from a zero-shot target-domain protocol to the V4.3 historical target adaptation protocol:
+## Historical Goal
+
+This document captured the V4.3 historical target adaptation protocol before
+the V4.4 zero/few-shot migration:
 
 ```text
 source_fit:    2015-2021 source domains
@@ -12,7 +20,8 @@ target_val:    2022 held-out target domain for preregistered adaptation selectio
 target_eval:   2023-2025 held-out target domain for final evaluation only
 ```
 
-The paper-facing claim is supervised target-domain historical adaptation under strict temporal holdout, not zero-shot transfer.
+This is no longer the paper-facing claim. The active claim is zero/few-shot
+target generalization with K in {0,4,12}.
 
 ## Method Position
 
@@ -31,7 +40,9 @@ frozen:    theta0, H_psi, adapter basis banks
 trainable: target latent, adapter coefficient residuals, lightweight operator residuals, output-head residual, residual gain
 ```
 
-This keeps the method distinct from ordinary full fine-tuning while using the complete labeled target training period.
+This kept the method distinct from ordinary full fine-tuning while using the
+complete labeled target training period in the legacy/internal reproduction
+path.
 
 ## Network Design
 
@@ -79,7 +90,7 @@ The first executable implementation can expose the regularization terms and use 
 
 ## Baselines and Ablations
 
-Main tables should compare:
+Legacy V4.3 tables compared:
 
 ```text
 Forecast-only
@@ -92,7 +103,9 @@ HyperDA-Adapt: target latent + coefficient residual + residual gain
 HyperDA-Refine: HyperDA-Adapt plus lightweight operator/head residual
 ```
 
-The generated-operator-only variant is an ablation, not the main zero-shot claim.
+Under V4.4, the main table is forecast-only, source-only, prompt-conditioned,
+and HyperDA K=0/4/12. Full-target variants from this document are
+secondary/internal reproduction results.
 
 ## Verification
 

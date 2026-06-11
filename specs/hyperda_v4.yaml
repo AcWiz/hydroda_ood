@@ -22,47 +22,70 @@ prompt:
   token_types:
     - STATIC
     - SPATIAL_OBS
-    - MONTHLY_TEMPORAL
+    - MONTH_OF_YEAR_SEASONAL_PHASE
     - CALIBRATION
     - NO_CALIBRATION
   forbidden_features:
     - continent_embedding_for_main
     - regime_id_for_main
     - target_eval_statistics
+    - target_eval_input_statistics_for_prompt_update
     - target_eval_labels
     - target_query_statistics  # deprecated alias
     - target_query_labels  # deprecated alias
+  target_context_policy:
+    main: target_context_monthly_prompt_prototypes
+    context_period: 2015-2021
+    input_usage: normalized_input_summary_only
+    label_usage: none
+    eval_input_usage: none_for_prompt_update
+    eval_month_usage: known_seasonal_phase_selector_only
+    missing_month_fallback: global_target_context_prototype
 
 variants:
-  HyperDA_FullTargetTrain:
-    labels: all_labeled_target_train_cycles_2015_2021
-    prompt: target_2015_2021_input_side_spatial_temporal_prompt_plus_full_train_summary_tokens
+  HyperDA_ZeroShot_Context:
+    K: 0
+    labels: none
+    prompt: target_context_monthly_prompt_prototypes_2015_2021_input_side_only
     generated_parameters: target_specific_lightweight_operator
-  HyperDA_Refine_FullTargetTrain:
-    initialization: HyperDA_generated_zeta_from_full_target_train_prompt
+    selection_data: source_val_2022_preregistered_only
+    final_eval_data: target_eval_2023_2025_offline_only
+  HyperDA_FewShot_K4:
+    K: 4
+    labels: up_to_4_labeled_target_support_cycles_2015_2021
+    prompt: target_context_monthly_prompt_prototypes_2015_2021_input_side_only
+    trainable:
+      - target_prompt
+      - adapter_coefficient_residuals
+      - monthly_residual_gain
+    steps: 100_fixed_preregistered
+    source_anchor_alpha: 0.75_fixed_from_source_side_episodic_validation
+    lr: 1e-3_fixed_preregistered
+    selection_data: source_val_2022_preregistered_only
+    target_val_usage: unused_in_main_protocol
+  HyperDA_FewShot_K12:
+    K: 12
+    labels: up_to_12_labeled_target_support_cycles_2015_2021
+    prompt: target_context_monthly_prompt_prototypes_2015_2021_input_side_only
     frozen:
-      - theta0
-      - H_psi
+      - source_backbone
+      - prompt_encoder
+      - hypernetwork
       - adapter_basis_bank
     trainable:
-      - target_latent
+      - target_prompt
       - adapter_coefficient_residuals
-      - lightweight_operator_residual
-      - output_head_residual
-      - residual_gain
-    adaptation_data: full_target_train_2015_2021
-    selection_data: target_val_2022_preregistered_adaptation_selection_only
+      - monthly_residual_gain
+    steps: 80_fixed_preregistered
+    source_anchor_alpha: 0.25_fixed_from_source_side_episodic_validation
+    lr: 3e-4_fixed_preregistered
+    selection_data: source_val_2022_preregistered_only
+    target_val_usage: unused_in_main_protocol
     final_eval_data: target_eval_2023_2025_offline_only
-    steps: fixed_pre_registered
-  legacy_HyperDA_Zero:
-    status: secondary_few_shot_ablation
-    labels: none
-    prompt: target_input_side_spatial_temporal_prompt
-  legacy_HyperDA_Calib:
-    status: secondary_few_shot_ablation
-    labels: K_labeled_target_train_calibration_cycles
-    K: [4, 12]
-    prompt: input_side_prompt_plus_calibration_summary_tokens
+  legacy_HyperDA_FullTargetTrain:
+    status: legacy_internal_explicit_opt_in_only
+    labels: all_labeled_target_train_cycles_2015_2021
+    prompt: legacy_target_2015_2021_input_side_summary_plus_full_train_tokens
 
 loss:
   DA_loss: masked_balanced_Huber

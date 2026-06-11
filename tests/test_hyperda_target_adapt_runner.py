@@ -314,6 +314,7 @@ def test_target_adaptation_checkpoint_metadata_records_protocol(tmp_path):
     saved = torch.load(out, map_location="cpu", weights_only=False)
     cfg = saved["config"]
     assert saved["tag"] == "best_target_val"
+    assert "historical_target_adapt" in saved["protocol_freeze_id"]
     assert saved["best_target_val_loss"] == 0.4
     assert cfg["target_train_period"] == "2015-2021"
     assert cfg["target_val_period"] == "2022"

@@ -34,7 +34,7 @@ from hydroda.splits.manifest import create_split_manifest, validate_no_leakage
 from hydroda.evaluation.harness import evaluate_split
 
 # ── Paths for data-dependent tests ──
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 MAIN_CONFIG = "configs/model_resunet_main.yaml"
 SMOKE_CONFIG = "configs/model_resunet_smoke.yaml"
 
@@ -90,14 +90,17 @@ class TestProtocolV4DateRanges:
         assert p.role_for_date("2024-12-01") == "target_eval"
         assert p.role_for_date("2014-01-01") == "outside_protocol"
 
-    def test_adaptation_setting_replaces_main_K_values(self):
+    def test_zero_few_shot_main_k_values_and_legacy_full_target_opt_in(self):
         p = ProtocolConfig()
-        p.assert_supported_adaptation_setting("target_full_train")
-        p.assert_legacy_few_shot_K(0)
-        p.assert_legacy_few_shot_K(4)
-        p.assert_legacy_few_shot_K(12)
+        p.assert_supported_adaptation_setting("zero_shot_context")
+        p.assert_supported_adaptation_setting("few_shot_k4")
+        p.assert_supported_adaptation_setting("few_shot_k12")
+        p.assert_supported_adaptation_setting("target_full_train", allow_legacy_full_target_train=True)
+        p.assert_supported_K(0)
+        p.assert_supported_K(4)
+        p.assert_supported_K(12)
         with pytest.raises(ValueError):
-            p.assert_supported_K(4)
+            p.assert_supported_adaptation_setting("target_full_train")
         with pytest.raises(ValueError):
             p.assert_legacy_few_shot_K(24)
 
@@ -185,16 +188,16 @@ class TestNoOverlapSupportQuery:
         manifest = create_split_manifest(
             target_region="US-R1",
             source_regions=["US-R2"],
-            K=1,
+            K=4,
             seed=0,
             source_train_dates=[
                 {"time_index": 0, "date_str": "2019-01-15", "datetime_str": "2019-01-15T00:00:00Z"},
             ],
             support_dates=[
-                {"time_index": 100, "date_str": "2022-06-15", "datetime_str": "2022-06-15T00:00:00Z"},
+                {"time_index": 100, "date_str": "2019-06-15", "datetime_str": "2019-06-15T00:00:00Z"},
             ],
             query_dates=[
-                {"time_index": 100, "date_str": "2022-06-15", "datetime_str": "2022-06-15T00:00:00Z"},
+                {"time_index": 100, "date_str": "2019-06-15", "datetime_str": "2019-06-15T00:00:00Z"},
                 {"time_index": 200, "date_str": "2023-01-15", "datetime_str": "2023-01-15T00:00:00Z"},
             ],
         )
@@ -205,13 +208,13 @@ class TestNoOverlapSupportQuery:
         manifest = create_split_manifest(
             target_region="US-R1",
             source_regions=["US-R2"],
-            K=1,
+            K=4,
             seed=0,
             source_train_dates=[
                 {"time_index": 0, "date_str": "2019-01-15", "datetime_str": "2019-01-15T00:00:00Z"},
             ],
             support_dates=[
-                {"time_index": 50, "date_str": "2022-06-15", "datetime_str": "2022-06-15T00:00:00Z"},
+                {"time_index": 50, "date_str": "2019-06-15", "datetime_str": "2019-06-15T00:00:00Z"},
             ],
             query_dates=[
                 {"time_index": 200, "date_str": "2023-01-15", "datetime_str": "2023-01-15T00:00:00Z"},

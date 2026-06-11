@@ -1,4 +1,4 @@
-# Smoke config: SmallResUNet with width=32, 1 epoch
+# Smoke config: SmallResUNet with width=16, 1 epoch
 # DEVELOPMENT ONLY — NOT paper-facing
 # Purpose: fast pipeline validation, CI smoke tests, debugging
 
@@ -6,7 +6,7 @@ model:
   name: SmallResUNet
   in_channels: 12
   out_channels: 2
-  width: 32
+  width: 16
   zero_raw_increment_init: true
   target_increment_normalization: false
 
@@ -31,5 +31,5 @@ output:
 
 notes: |
   DEVELOPMENT ONLY — NOT paper-facing.
-  width=32 smoke test — validates training loop without OOM before full 30-epoch runs.
+  width=16 smoke test — validates training loop quickly before full 30-epoch runs.
   Use configs/model_resunet_main.yaml (width=32, max_epochs=30) for all paper experiments.

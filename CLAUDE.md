@@ -1,4 +1,4 @@
-# CLAUDE.md — HydroDA-OOD / HyperDA V4.2 Executable Research System
+# CLAUDE.md — HydroDA-OOD / HyperDA V4.4 Executable Research System
 
 你正在参与 `hydroda_ood`。请把本仓库当成**论文级 Scientific ML / Geoscience ML / Data Assimilation 实验系统**，而不是一次性脚本项目。
 
@@ -121,9 +121,9 @@ pred_analysis_rootzone = forecast_rootzone + pred_increment_rootzone
 论文主问题固定为：
 
 ```text
-Can hydroclimatic spatio-temporal prompts and full target-training-period
-adaptation generate target-specific neural data assimilation increment operators
-that outperform shared conditional models under cross-continental hydroclimatic shift?
+Can hydroclimatic spatio-temporal prompts and source-trained HyperDA priors
+generate target-specific lightweight neural data assimilation increment
+operators under zero/few-shot cross-continental hydroclimatic shift?
 ```
 
 必须围绕以下可证伪比较组织实验：
@@ -132,11 +132,9 @@ that outperform shared conditional models under cross-continental hydroclimatic 
 1. Forecast-only
 2. Source-only backbone
 3. Prompt-conditioned shared backbone
-4. Adapter tuning
-5. LoRA tuning
-6. HyperDA generated operator from full target train
-7. HyperDA generated operator + full target train calibration
-8. HyperDA-Refine with full target train
+4. HyperDA K=0 target-context prompt
+5. HyperDA K=4 lightweight target adaptation
+6. HyperDA K=12 lightweight target adaptation
 ```
 
 论文主表**不再**包含以下无明确学术定位或容易分散主线的 heuristic baseline：
@@ -154,6 +152,9 @@ random-prompt HyperDA
 ```
 
 这些方法最多作为 internal sanity check，不进入论文主表，不作为当前工程优先级。
+
+`target_full_train` 仅作为 legacy/internal reproduction 路径，必须显式
+`allow_legacy_full_target_train` opt-in；不得作为默认脚本、论文主表或主叙事。
 
 ---
 
@@ -232,37 +233,38 @@ Source: CN + AU -> Target: US
 
 ---
 
-## 5. 时间协议与 target full-training-set adaptation
+## 5. 时间协议与 zero/few-shot target generalization
 
 冻结时间协议：
 
 ```text
 Source fit/train:             2015-01-01 to 2021-12-31
 Source validation:            2022-01-01 to 2022-12-31
-Target train/adaptation:      2015-01-01 to 2021-12-31
-Target validation:            2022-01-01 to 2022-12-31
+Target context:               2015-01-01 to 2021-12-31 input-side only
+Target support:               K labeled cycles, K in {0,4,12}
+Target validation:            unused in main protocol
 Target held-out evaluation:   2023-01-01 to 2025-12-31
 ```
 
-主协议不再是 few-shot / K-shot target adaptation。HyperDA / adapter / LoRA /
-prompt 构造在训练完成后，可以使用 target domain 的完整 2015-2021
-target training period 来构造 target-specific operator / prompt / adapter /
-generated parameters，然后只在严格 held-out 的 2023-2025 target evaluation
+主协议是 zero/few-shot target generalization。Source 阶段训练完成后，source
+backbone、prompt encoder、HyperDA basis bank / hypernetwork 冻结。K=0 只使用
+target domain 2015-2021 input-side `target_context` 构造
+target-context monthly prompt prototypes；K=4/12 只允许在 K 个 labeled target
+DA cycles 上更新轻量 target-specific 变量，forward 仍使用同一套 monthly
+context prototypes，然后只在严格 held-out 的 2023-2025 target evaluation
 period 上评估。
+
+`month` 只表示 deployment-known month-of-year seasonal phase，用于选择对应
+monthly prototype；它不是绝对日期标签，也不是 target_eval 模型选择信号。
 
 主实验适配设置：
 
 ```text
-adaptation_setting = target_full_train
+adaptation_setting ∈ {zero_shot_context, few_shot_k4, few_shot_k12}
+K ∈ {0,4,12}
 ```
 
-旧 K-cycle 设定仅保留为 secondary legacy ablation：
-
-```text
-legacy_few_shot_K ∈ {0, 4, 12}
-```
-
-旧 K 定义仍是：
+K 定义：
 
 ```text
 K = number of labeled target DA analysis cycles from target_train years 2015-2021
@@ -270,9 +272,10 @@ K = number of labeled target DA analysis cycles from target_train years 2015-202
 
 K 不是 patches、pixels 或 mini-batches 数。同一天切出多少 spatial patches，都只算一个 DA calibration cycle。
 
-主协议中不再单独保留 2022 support set；`target_support` 只作为旧代码 /
-legacy few-shot ablation 的别名。论文主表必须按 `adaptation_setting` 区分，
-不能把 `K` 作为主实验列。
+主协议不使用 `target_val=2022` 进行 checkpoint selection、early stopping 或
+gain calibration。论文主表必须按 `adaptation_setting` / K=0/4/12 区分。
+`target_full_train` 仅作为 legacy/internal reproduction 路径，必须显式
+`allow_legacy_full_target_train` opt-in。
 
 Source 覆盖范围主协议保持 `source_fit=2015-2021`、`source_val=2022`。
 不要把 2022 混入 source fit，因为它承担 checkpoint / early stopping /
@@ -322,9 +325,9 @@ Phase 1: Region cropping and region artifact contract
 Phase 2: HydroDADataset + ProtocolConfig + LeakageGuard
 Phase 3: Forecast-only + metrics/evaluation sanity
 Phase 4: Source-only backbone + prompt-conditioned shared backbone
-Phase 5: Source operator episode bank
-Phase 6: HyperDA target-full-train generation / calibration / refinement
-Phase 7: adapter and LoRA full-target-train comparison; K=0/4/12 only as legacy ablation
+Phase 5: HyperDA zero/few-shot target generalization
+Phase 6: adapter / LoRA K-shot ablations and reporting artifacts
+Phase 7: event/high-update analysis after final model selection
 Phase 8: US-only development report
 Phase 9: CN/AU expansion and leave-one-continent-out
 ```
@@ -342,7 +345,7 @@ HyperDA 包含：
 ```text
 1. Shared DA increment backbone
 2. Source operator episode bank
-3. Hydroclimatic spatio-temporal prompt encoder
+3. Hydroclimatic prompt encoder with month-of-year seasonal phase
 4. Basis-factorized hypernetwork parameter generator
 ```
 

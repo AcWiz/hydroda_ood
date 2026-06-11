@@ -1,7 +1,7 @@
 #!/bin/bash
-# Phase 4 Source-Only Region-Specific Re-Evaluation
+# Phase 4 Target-History Region Oracle Re-Evaluation
 #
-# Re-evaluates each region-specific checkpoint with fixed latw metrics.
+# Re-evaluates each target_full_history_region_oracle checkpoint with fixed latw metrics.
 # Uses evaluate_checkpoint.py for each region × split_type combination.
 #
 # Usage:
@@ -20,7 +20,9 @@ SPLIT_TYPES=("source_test" "target_eval")
 BASE_DIR="artifacts/runs/phase4_source_only_region_specific"
 
 echo "================================================================"
-echo "Phase 4 Region-Specific Re-Evaluation"
+echo "Phase 4 Target-History Region Oracle Re-Evaluation"
+echo "method=target_full_history_region_oracle"
+echo "status=oracle_upper_bound_internal_only"
 echo "Base directory: ${BASE_DIR}"
 echo "Regions: ${REGIONS[*]}"
 echo "Split types: ${SPLIT_TYPES[*]}"
@@ -29,7 +31,10 @@ echo "================================================================"
 
 for region in "${REGIONS[@]}"; do
     # Find the run directory for this region
-    RUN_DIR=$(ls -td ${BASE_DIR}/phase4_source_only_region_specific_source_only_${region}_* 2>/dev/null | head -1)
+    RUN_DIR=$(ls -td \
+        ${BASE_DIR}/phase4_source_only_region_specific_target_full_history_region_oracle_${region}_* \
+        ${BASE_DIR}/phase4_source_only_region_specific_source_only_${region}_* \
+        2>/dev/null | head -1)
     if [[ -z "$RUN_DIR" ]]; then
         echo "WARNING: No run found for ${region}, skipping."
         continue
@@ -58,7 +63,7 @@ for region in "${REGIONS[@]}"; do
         PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \
             --checkpoint "$CHECKPOINT" \
             --target_region "${region}" \
-            --adaptation_setting target_full_train \
+            --adaptation_setting zero_shot_context --K 0 \
             --seed 0 \
             --split_type "${split_type}" \
             --predictor_type source_only \

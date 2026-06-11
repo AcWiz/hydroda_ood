@@ -1,10 +1,24 @@
 # HyperDA Target Adaptation Implementation Plan
 
+> Superseded by Protocol V4.4 zero/few-shot generalization. This plan is
+> retained for legacy/internal full-target reproduction context only. The active
+> paper-facing HyperDA path is `run/phase5_hyperda_zero_few_shot.sh`, where
+> target labels are limited to `target_support` with K in {0,4,12}, target_val is
+> unused in the main protocol, and final evaluation is `target_eval=2023-2025`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the executable foundation for HyperDA target historical adaptation with frozen source-trained hypernetwork/operator priors and trainable target-specific latent, adapter coefficient residuals, and monthly residual gain.
+**Historical goal:** Implement the executable foundation for HyperDA target
+historical adaptation with frozen source-trained hypernetwork/operator priors
+and trainable target-specific latent, adapter coefficient residuals, and monthly
+residual gain. In V4.4 this is legacy/internal reproduction context; the active
+main path is zero/few-shot K=0/4/12.
 
-**Architecture:** Extend the current HyperDA ResUNet with small target-adaptation modules instead of full-backbone fine-tuning. Keep all temporal protocol metadata explicit in run scripts and tests: target 2015-2021 trains adaptation, target 2022 selects adaptation, target 2023-2025 is final evaluation only.
+**Architecture:** Extend the current HyperDA ResUNet with small target-adaptation
+modules instead of full-backbone fine-tuning. For this legacy path, keep all
+temporal protocol metadata explicit in run scripts and tests: target 2015-2021
+trains adaptation, target 2022 selects adaptation, target 2023-2025 is final
+evaluation only.
 
 **Tech Stack:** Python, PyTorch, pytest, existing HydroDA model/training/protocol modules.
 

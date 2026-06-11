@@ -66,10 +66,19 @@ sanity_tests:
 required_protocol_metadata:
   - protocol_freeze_id
   - adaptation_setting
-  - target_train_dates_hash
+  - method
+  - target_context_dates_hash
+  - target_support_dates_hash
   - target_eval_dates_hash
   - split_manifest_sha256
+  - target_context_prompt_state
+  - trainable_parameter_count
+  - adaptation_steps
+  - normalization_source
+  - model_selection_source
+  - target_val_usage
 legacy_optional_metadata:
+  - target_train_dates_hash
   - K
   - K_legacy
   - support_dates_hash

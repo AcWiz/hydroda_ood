@@ -1,38 +1,38 @@
-version: Legacy K-date Few-Shot Ablation V4.3
-protocol_freeze_id: hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025
-status: secondary_ablation_not_main_protocol
+version: Zero/Few-Shot Split Protocol V4.4
+protocol_freeze_id: hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025
+status: main_protocol_split_contract
 
 main_protocol_pointer: specs/protocol_v4.yaml
-main_adaptation_setting: target_full_train
+main_adaptation_settings: [zero_shot_context, few_shot_k4, few_shot_k12]
 
 source_fit_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021]
 source_val_year: 2022
-target_train_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021]
-target_val_year: 2022
+target_context_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021]
+target_support_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021]
+target_val_usage: unused_in_main_protocol
 target_eval_years: [2023, 2024, 2025]
 
 definitions_cn:
-  main_protocol: 目标域使用完整 historical target_train period 进行快速泛化/适配，不再把 K 作为主实验变量
-  target_train: held-out target continent 的 2015-2021 完整训练/适配期
-  target_val: held-out target continent 的 2022 年验证期，是否用于 adaptation selection 必须预注册
+  main_protocol: 目标域使用 2015-2021 input-side context 和 K 个 labeled support cycles 进行 zero/few-shot generalization
+  target_context: held-out target continent 的 2015-2021 input-side monthly prompt prototype context
+  target_support: held-out target continent 的 K 个 labeled DA analysis cycles, K in {0,4,12}
+  target_val: 主协议不使用 target_val 做 checkpoint selection、early stopping 或 gain calibration
   target_eval: held-out target continent 的 2023-2025 年严格最终评估期
-  K: legacy few-shot ablation 中，从 2015-2021 target_train 采样的 labeled DA analysis dates/cycles 数量
+  K: 从 2015-2021 target_support 候选中采样的 labeled DA analysis dates/cycles 数量
   not_K: 不是 patch 数，也不是 pixel 数，也不是 mini-batch 数
   source_val: 只能来自 source continents，用于 checkpoint / hyperparameter / architecture selection
 
-legacy_K_values: [0, 4, 12]
-legacy_K_values_supported_internal: [0, 4, 12, 24]
+main_K_values: [0, 4, 12]
+legacy_K_values_supported_internal: [24]
 K24_status: optional_internal_ablation_not_main_table
 
 selection:
-  target_full_train:
-    target_analysis_labels_allowed: true
-    selection_rule: all_available_labeled_target_train_cycles_in_2015_2021
-    seed_role: run_seed_not_support_sampling_seed
-  legacy_K0:
+  K0:
     target_analysis_labels_allowed: false
     target_input_only_allowed: true
-  legacy_K4:
+    adaptation_setting: zero_shot_context
+  K4:
+    adaptation_setting: few_shot_k4
     northern_hemisphere_bins:
       - [1, 2, 3]
       - [4, 5, 6]
@@ -44,7 +44,8 @@ selection:
       - [1, 2, 3]
       - [4, 5, 6]
     dates_per_bin: 1
-  legacy_K12:
+  K12:
+    adaptation_setting: few_shot_k12
     dates_per_month: 1
   legacy_K24_optional_internal:
     dates_per_month_half:
@@ -54,8 +55,8 @@ selection:
 
 rules_cn:
   no_target_eval_labels_for_adaptation: target_eval labels 不能用于 prompt、normalization、训练、early stopping、model selection 或超参数选择
-  no_target_eval_for_selection: target_eval 不能用于选择 target_train/adaptation samples
+  no_target_eval_for_selection: target_eval 不能用于选择 target_support/adaptation samples
   no_target_train_for_global_normalization: 主协议 normalization 仍使用 source_fit_only，除非明确注册方法变体
   source_scope_main: 主协议使用 source_fit=2015-2021、source_val=2022
-  legacy_same_support_dates_across_methods: legacy few-shot ablation 中，同一 continent/region/K/seed 下所有方法必须使用相同 support dates
-  log_effective_target_budget: 必须记录 target_train dates × patches/date × valid pixels
+  same_support_dates_across_methods: 同一 continent/region/K/seed 下所有方法必须使用相同 support dates
+  log_effective_target_budget: 必须记录 target_support dates × patches/date × valid pixels

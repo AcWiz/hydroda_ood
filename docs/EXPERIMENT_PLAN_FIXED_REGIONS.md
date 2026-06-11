@@ -61,10 +61,14 @@ source regions = other five US regions
 target region  = held-out US region
 source fit     = 2015-01 to 2021-12
 source val      = 2022
-target train    = 2015-2021
-target val      = 2022
+target context  = 2015-2021 input-side only
+target support  = K labeled cycles from 2015-2021, K in {0,4,12}
+target val      = unused in main protocol
 target eval     = 2023-2025
 ```
+
+旧 full-target `target_train=2015-2021` / `target_val=2022` 路径只作为
+legacy/internal reproduction。
 
 ### CN/AU stage
 

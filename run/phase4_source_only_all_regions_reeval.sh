@@ -53,7 +53,7 @@ echo ">>> [1/2] Evaluating source_test (all 6 regions)..."
 PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
     --checkpoint "$CHECKPOINT_PATH" \
     --split_type source_test \
-    --adaptation_setting target_full_train \
+    --adaptation_setting zero_shot_context --K 0 \
     --seed 0 \
     --device cuda \
     --output_dir "${OUTPUT_BASE}" \
@@ -65,7 +65,7 @@ echo ">>> [2/2] Evaluating target_eval (all 6 regions)..."
 PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
     --checkpoint "$CHECKPOINT_PATH" \
     --split_type target_eval \
-    --adaptation_setting target_full_train \
+    --adaptation_setting zero_shot_context --K 0 \
     --seed 0 \
     --device cuda \
     --output_dir "${OUTPUT_BASE}" \

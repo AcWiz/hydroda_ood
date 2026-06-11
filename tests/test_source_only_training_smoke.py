@@ -110,6 +110,9 @@ def test_source_only_training_smoke():
 
 def test_tiny_overfit():
     """Test that model can overfit a single repeated sample."""
+    np.random.seed(0)
+    torch.manual_seed(0)
+
     # Single sample repeated 50 times
     x = np.random.randn(12, 32, 48).astype(np.float32)
     inc_s = np.random.randn(32, 48).astype(np.float32) * 0.01
@@ -214,6 +217,27 @@ def test_source_only_predictor_output_contract():
         print(f"  SourceOnlyBackbonePredictor contract test passed.")
     finally:
         os.unlink(tmp_path)
+
+
+def test_source_only_predictor_uses_checkpoint_method_metadata(tmp_path):
+    from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
+
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+    ckpt_path = tmp_path / "global.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": {
+                "width": 8,
+                "method": "source_pooled_global_backbone",
+            },
+        },
+        ckpt_path,
+    )
+
+    predictor = SourceOnlyBackbonePredictor(checkpoint_path=str(ckpt_path), device="cpu")
+
+    assert predictor.method_name == "source_pooled_global_backbone"
 
 
 def test_checkpoint_every_5_epochs_smoke():
@@ -331,14 +355,16 @@ def test_source_only_wrapper_uses_netcdf_only_training_path():
     assert "--batch_size 16" in script
 
 
-def test_paper_facing_source_only_baseline_wrappers_share_strong_recipe():
+def test_source_only_baseline_wrappers_share_strong_recipe_and_protocol():
     wrappers = [
         Path("run/phase4_source_only_all_regions.sh").read_text(encoding="utf-8"),
         Path("run/phase4_source_only_region_specific.sh").read_text(encoding="utf-8"),
     ]
 
     for script in wrappers:
-        assert "--adaptation_setting target_full_train" in script
+        assert "US_loro_zero_few_shot_splits.json" in script
+        assert "ADAPTATION_SETTING=" in script
+        assert '--adaptation_setting "${ADAPTATION_SETTING}"' in script
         assert "--zero_raw_increment_init" in script
         assert "--target_increment_normalization" in script
         assert "--use_lat_weighted_loss" in script
@@ -350,6 +376,50 @@ def test_paper_facing_source_only_baseline_wrappers_share_strong_recipe():
         assert "--accum_steps 4" in script
         assert "--checkpoint_every 10" in script
         assert "--selection_metric source_val_loss" in script
+
+
+def test_region_specific_wrappers_are_marked_secondary_internal():
+    for script_path in [
+        "run/phase4_source_only_region_specific.sh",
+        "run/phase4_source_only_region_specific_finetune.sh",
+    ]:
+        script = Path(script_path).read_text(encoding="utf-8")
+        assert "secondary_internal_not_paper_main" in script
+
+
+def test_source_only_wrapper_declares_loro_transition_global_baseline():
+    script = Path("run/phase4_source_only.sh").read_text(encoding="utf-8")
+    runner = Path("scripts/train/train_source_only_backbone.py").read_text(encoding="utf-8")
+
+    assert "source_pooled_global_backbone" in script
+    assert "source_pooled_global_backbone" in runner
+    assert "US-only transition global" in script
+    assert 'target_region=args.target_region' in runner
+    assert 'split_type="source_fit"' in runner
+    assert 'METHOD = "source_pooled_global_backbone"' in runner
+    assert "method=METHOD" in runner
+
+
+def test_all_regions_wrapper_declares_legacy_sanity_not_global():
+    script = Path("run/phase4_source_only_all_regions.sh").read_text(encoding="utf-8")
+    runner = Path("scripts/train/train_source_only_all_regions.py").read_text(encoding="utf-8")
+
+    assert "legacy_all_regions_sanity" in script
+    assert "legacy_all_regions_sanity" in runner
+    assert "not_paper_facing_ood_global" in script
+    assert 'METHOD = "legacy_all_regions_sanity"' in runner
+    assert "method=METHOD" in runner
+
+
+def test_region_specific_runner_declares_target_full_history_oracle():
+    runner = Path("scripts/train/train_source_only_region_specific.py").read_text(encoding="utf-8")
+    wrapper = Path("run/phase4_source_only_region_specific.sh").read_text(encoding="utf-8")
+
+    assert "target_full_history_region_oracle" in runner
+    assert "target_full_history_region_oracle" in wrapper
+    assert "oracle_upper_bound" in runner
+    assert 'METHOD = "target_full_history_region_oracle"' in runner
+    assert "method=METHOD" in runner
 
 
 def test_region_specific_runner_init_from_checkpoint_loads_model_weights(tmp_path):
@@ -388,7 +458,8 @@ def test_region_specific_finetune_wrapper_initializes_from_pooled_global():
 
     assert "phase4_source_only_all_regions" in script
     assert "--init_from_checkpoint" in script
-    assert "--adaptation_setting target_full_train" in script
+    assert '--adaptation_setting "${ADAPTATION_SETTING}"' in script
+    assert '--K "${K}"' in script
     assert "--zero_raw_increment_init" in script
     assert "--target_increment_normalization" in script
     assert "--use_lat_weighted_loss" in script
@@ -432,7 +503,7 @@ def test_run_readme_lists_region_specific_finetune_baseline():
 
     assert "phase4_source_only_region_specific_finetune.sh" in readme
     assert "train_source_only_region_specific.py" in readme
-    assert "pooled global checkpoint" in readme
+    assert "legacy all-regions checkpoint" in readme
 
 
 def test_main_method_wrappers_use_netcdf_only_training_path():
@@ -646,6 +717,64 @@ def test_source_only_predictor_applies_residual_gain():
         assert result_ng["residual_gain_alpha_surface"] == 0.3  # still reports alpha from ckpt
 
         print(f"  test_source_only_predictor_applies_residual_gain passed.")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_source_only_predictor_reports_gain_adjusted_increment_for_reconstruction():
+    """Reported pred_increment must reconstruct pred_analysis under residual gain."""
+    from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
+    from hydroda.models.resunet import SmallResUNet
+    import tempfile
+    import os
+
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "config": {
+            "width": 8,
+            "ch_mean": [0.0] * 12,
+            "ch_std": [1.0] * 12,
+        },
+        "residual_gain_alpha_surface": 0.25,
+        "residual_gain_alpha_rootzone": 0.0,
+    }
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp_path = f.name
+        torch.save(checkpoint, tmp_path)
+
+    try:
+        predictor = SourceOnlyBackbonePredictor(checkpoint_path=tmp_path, device="cpu")
+
+        def fixed_forward(_x):
+            return torch.stack(
+                [
+                    torch.full((1, 4, 4), 2.0, dtype=torch.float32),
+                    torch.full((1, 4, 4), 3.0, dtype=torch.float32),
+                ],
+                dim=1,
+            )
+
+        predictor.model.forward = fixed_forward
+        sample = {
+            "x": np.zeros((12, 4, 4), dtype=np.float32),
+            "forecast_surface": np.ones((4, 4), dtype=np.float32),
+            "forecast_rootzone": np.ones((4, 4), dtype=np.float32) * 10.0,
+        }
+
+        result = predictor.predict(sample)
+
+        np.testing.assert_allclose(result["pred_increment_surface"], 0.5)
+        np.testing.assert_allclose(result["pred_increment_rootzone"], 0.0)
+        np.testing.assert_allclose(
+            result["pred_analysis_surface"],
+            sample["forecast_surface"] + result["pred_increment_surface"],
+        )
+        np.testing.assert_allclose(
+            result["pred_analysis_rootzone"],
+            sample["forecast_rootzone"] + result["pred_increment_rootzone"],
+        )
     finally:
         os.unlink(tmp_path)
 

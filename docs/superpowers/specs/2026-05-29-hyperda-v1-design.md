@@ -1,5 +1,12 @@
 # HyperDA v1 Design
 
+> Superseded by Protocol V4.4 zero/few-shot generalization. This document is
+> retained as historical design context; statements below that name
+> `target_full_train` as the current protocol are legacy/internal only. The
+> active paper-facing protocol uses `zero_shot_context`, `few_shot_k4`, and
+> `few_shot_k12` with `target_context/support=2015-2021`, `source_val=2022`,
+> and final `target_eval=2023-2025`.
+
 ## Goal
 
 Build the first executable HyperDA method for the Phase 4 target-region protocol. The first run is intentionally small: one target region and one seed, using the same no-leakage split protocol and source-val checkpoint selection as the prompt-conditioned baseline.
@@ -15,7 +22,7 @@ Build the first executable HyperDA method for the Phase 4 target-region protocol
 - model: `RegionPromptEncoder` plus `FiLMConditionalResUNet`
 - selection metric: `source_val_transfer_safe_score`
 
-The observed local result for `US-R1`, seed `0`, shows prompt-conditioned improvement over the older source-only result. Because those artifacts used different historical naming/freeze ids in places, the reusable experiment record should always compare methods under the current `target_full_train` protocol.
+The observed local result for `US-R1`, seed `0`, shows prompt-conditioned improvement over the older source-only result. Because those artifacts used different historical naming/freeze ids in places, reusable experiment records should compare methods under the current V4.4 zero/few-shot protocol.
 
 ## HyperDA v1 Architecture
 
@@ -73,9 +80,9 @@ The first HyperDA run should mirror `phase4_prompt_conditioned`:
 - wrapper: `run/phase4_hyperda.sh`
 - default target region: `US-R1`
 - default seed: `0`
-- adaptation setting: `target_full_train`
-- split artifact: `artifacts/splits/US_loro_target_train_splits.json`
-- no `--K` argument
+- adaptation setting: `zero_shot_context`
+- split artifact: `artifacts/splits/US_loro_zero_few_shot_splits.json`
+- `--K 0`
 - training uses `source_fit`
 - checkpoint selection uses `source_val`
 - default selection metric: `source_val_transfer_safe_score`
@@ -99,7 +106,7 @@ New or modified files:
 
 - Unit tests verify adapter coefficient shape, output shape, and parameter gradients.
 - Smoke tests verify trainer summary/checkpoint metadata records `model_type=hyperda_basis_adapter`.
-- Protocol text tests verify `run/phase4_hyperda.sh` uses `target_full_train`, `source_val_transfer_safe_score`, current split JSON, and no `--K`.
+- Protocol text tests verify `run/phase4_hyperda.sh` uses `zero_shot_context`, `--K 0`, `source_val_transfer_safe_score`, and the V4.4 zero/few-shot split JSON.
 - Compile checks pass for the changed Python modules.
 
 ## Initial Experiment Record

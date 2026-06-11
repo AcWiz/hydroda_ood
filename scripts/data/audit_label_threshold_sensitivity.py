@@ -37,7 +37,7 @@ _BASE_VALID_MASK_IDX = 11
 # Data paths
 DA_NC_PATH = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 LABEL_AVAIL_JSON = "artifacts/audits/label_availability_US.json"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 LATLON_NC = "artifacts/geolocation/US_latlon.nc"
 REGIONS_YAML = "specs/regions_v2.yaml"
 OUTPUT_JSON = "artifacts/audits/label_threshold_sensitivity_US.json"

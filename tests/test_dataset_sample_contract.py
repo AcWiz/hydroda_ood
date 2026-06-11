@@ -10,7 +10,7 @@ class TestDatasetSampleContract:
 
     DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
     REGION_MASKS = "artifacts/regions/US_region_masks.nc"
-    SPLITS_JSON = "artifacts/splits/US_loro_kdate_splits.json"
+    SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
     MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 
     @pytest.fixture

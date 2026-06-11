@@ -1,4 +1,4 @@
-"""Test dataset split loading for target-full-train split manifests."""
+"""Test dataset split loading for zero/few-shot split manifests."""
 
 import json
 from pathlib import Path
@@ -9,7 +9,7 @@ from hydroda.data.dataset import HydroDADataset
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
@@ -41,7 +41,7 @@ class TestDatasetSplitLoading:
                     f"{date_list_key} has non-integer time_index"
                 )
                 # source_train_dates may have duplicate time_indices (multiple obs/day at different times)
-                # target_support_dates and target_query_dates should have no duplicates
+                # target_support_dates and target_eval dates should have no duplicates.
                 if date_list_key in ("target_train_dates", "target_eval_dates"):
                     assert len(indices) == len(set(indices)), (
                         f"Split {split['target_region_id']}-{split.get('adaptation_setting')}-S{split['seed']} "
@@ -62,11 +62,14 @@ class TestDatasetSplitLoading:
                 f"has target_eval_cycle_count=0"
             )
 
-    def test_target_full_train_has_target_train_dates(self, splits_data):
+    def test_zero_few_shot_has_context_support_and_eval_dates(self, splits_data):
         for split in splits_data["splits"]:
-            if split.get("adaptation_setting") == "target_full_train":
-                assert split.get("K") is None
-                assert len(split["target_train_dates"]) > 0
+            if split.get("adaptation_protocol") == "zero_few_shot_generalization":
+                assert split["adaptation_setting"] in {"zero_shot_context", "few_shot_k4", "few_shot_k12"}
+                assert split.get("K") in {0, 4, 12}
+                assert len(split["target_context_dates"]) > 0
+                assert len(split["target_support_dates"]) <= split["K"]
+                assert len(split["target_eval_dates"]) > 0
 
     @pytest.mark.parametrize("seed", SEEDS)
     def test_smoke_load_all_combinations(self, seed, splits_data):
@@ -78,9 +81,9 @@ class TestDatasetSplitLoading:
                 splits_json=SPLITS_JSON,
                 target_region=target_region,
                 split_type="source_train",
-                K=None,
+                K=0,
                 seed=seed,
-                adaptation_setting="target_full_train",
+                adaptation_setting="zero_shot_context",
                 freeze_manifest=MANIFEST,
             )
             assert len(ds) > 0

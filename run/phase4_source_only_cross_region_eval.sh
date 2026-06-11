@@ -1,12 +1,12 @@
 #!/bin/bash
-# Phase 4 Source-Only Cross-Region Evaluation
+# Phase 4 Target-History Oracle Cross-Region Evaluation
 #
 # For each pair (model trained on Y, evaluate on X where X != Y):
 #   Runs evaluate_checkpoint.py with --target_region X --split_type target_eval
 #   Output: <Y_run>/results/<ckpt>/target_eval/US-R{X}/
 #
-# This enables fair Src_RS computation: for target region X,
-# Src_RS = weighted aggregate of models Y1..Y5 each evaluated on X's test data.
+# Historical/internal only. These models are target_full_history_region_oracle
+# experts, not the V4.4 source_regime_specialist_bank.
 #
 # Usage:
 #   bash run/phase4_source_only_cross_region_eval.sh
@@ -23,7 +23,9 @@ REGIONS=("US-R1" "US-R2" "US-R3" "US-R4" "US-R5" "US-R6")
 BASE_DIR="artifacts/runs/phase4_source_only_region_specific"
 
 echo "================================================================"
-echo "Phase 4 Cross-Region Evaluation"
+echo "Phase 4 Target-History Oracle Cross-Region Evaluation"
+echo "method=target_full_history_region_oracle"
+echo "status=oracle_upper_bound_internal_only"
 echo "Base directory: ${BASE_DIR}"
 echo "Source model regions: ${REGIONS[*]}"
 echo "Started at $(date)"
@@ -34,7 +36,10 @@ SKIPPED=0
 
 for src_region in "${REGIONS[@]}"; do
     # Find the run directory for this source region model
-    RUN_DIR=$(ls -td ${BASE_DIR}/phase4_source_only_region_specific_source_only_${src_region}_* 2>/dev/null | head -1)
+    RUN_DIR=$(ls -td \
+        ${BASE_DIR}/phase4_source_only_region_specific_target_full_history_region_oracle_${src_region}_* \
+        ${BASE_DIR}/phase4_source_only_region_specific_source_only_${src_region}_* \
+        2>/dev/null | head -1)
     if [[ -z "$RUN_DIR" ]]; then
         echo "WARNING: No run found for ${src_region}, skipping all cross-region evals from this model."
         continue
@@ -76,7 +81,7 @@ for src_region in "${REGIONS[@]}"; do
         PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \
             --checkpoint "$CHECKPOINT" \
             --target_region "${tgt_region}" \
-            --adaptation_setting target_full_train \
+            --adaptation_setting zero_shot_context --K 0 \
             --seed 0 \
             --split_type target_eval \
             --predictor_type source_only \

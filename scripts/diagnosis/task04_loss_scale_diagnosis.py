@@ -24,7 +24,7 @@ ARTIFACTS_DIR = REPO_ROOT / "artifacts" / "source_only_rootzone_diagnosis"
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = str(REPO_ROOT / "artifacts" / "regions" / "US_region_masks.nc")
-SPLITS_JSON = str(REPO_ROOT / "artifacts" / "splits" / "US_loro_target_train_splits.json")
+SPLITS_JSON = str(REPO_ROOT / "artifacts" / "splits" / "US_loro_zero_few_shot_splits.json")
 FREEZE_MANIFEST = str(REPO_ROOT / "artifacts" / "protocol" / "US_region_split_freeze_manifest.json")
 
 CHECKPOINT = str(REPO_ROOT / "artifacts" / "runs" / "phase4_source_only"

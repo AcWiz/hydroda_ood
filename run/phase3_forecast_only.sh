@@ -20,7 +20,7 @@ from datetime import datetime
 
 DATA_DIR = '/fastersharefiles2/fenglonghan/dataset/SMAP'
 REGION_MASKS = 'artifacts/regions/US_region_masks.nc'
-SPLITS_JSON = 'artifacts/splits/US_loro_target_train_splits.json'
+SPLITS_JSON = 'artifacts/splits/US_loro_zero_few_shot_splits.json'
 MANIFEST = 'artifacts/protocol/US_region_split_freeze_manifest.json'
 
 region = '${TARGET_REGION}'
@@ -42,7 +42,7 @@ rows = evaluate_split(
     predictor=predictor,
     split_role='target_eval',
     experiment_id=f'phase3A_{region}',
-    protocol_freeze_id='hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025',
+    protocol_freeze_id='hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025',
     method='forecast_only',
     split_file=SPLITS_JSON,
     mask_file=REGION_MASKS,

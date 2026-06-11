@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Build US Leave-One-Region-Out historical target-adaptation splits.
+"""Build legacy US Leave-One-Region-Out historical target-adaptation splits.
 
-This file is retained as a backward-compatible entrypoint. New main-protocol
-workflows should call `scripts/data/build_target_train_splits.py`.
+This file is retained as a backward-compatible internal entrypoint for
+historical full-target and legacy K-date ablations. Paper-facing V4.4
+zero/few-shot workflows should call `scripts/data/build_zero_few_shot_splits.py`.
+Use `scripts/data/build_target_train_splits.py` only for historical
+target_full_train reproduction artifacts.
 
 Usage:
     python scripts/data/build_target_train_splits.py \
@@ -12,7 +15,7 @@ Usage:
         --out-md reports/splits/US_loro_target_train_split_summary.md
 
 No-leakage declaration:
-    Main target adaptation uses the full historical target training period:
+    Legacy target adaptation uses the full historical target training period:
     - Source fit / target train-adaptation: 2015-2021
     - Source validation / target validation: 2022
     - Target eval/query: 2023-2025
@@ -65,7 +68,7 @@ def parse_args():
         nargs="+",
         default=["target_full_train"],
         choices=["target_full_train"],
-        help="Main adaptation settings to generate (default: target_full_train)",
+        help="Legacy/internal adaptation settings to generate (default: target_full_train)",
     )
     parser.add_argument(
         "--include-legacy-few-shot",
@@ -104,7 +107,7 @@ def main():
     print(f"  Source train (2015-2021): {source_mask.sum()} cycles")
     print(f"  Source val (2022): {val_mask.sum()} cycles")
     print(f"  Source test (2023-2025): {source_test_mask.sum()} cycles")
-    print(f"  Target train/adaptation (2015-2021): {target_train_mask.sum()} cycles")
+    print(f"  Legacy target train/adaptation (2015-2021): {target_train_mask.sum()} cycles")
     print(f"  Target eval/query (2023-2025): {query_mask.sum()} cycles")
 
     # Load region masks
@@ -261,7 +264,7 @@ def main():
         query_dates = get_target_dates(target_idx, query_mask, require_valid=False)
         print(f"  Target query cycles: {len(query_dates)}")
 
-        # Generate main full-target-train splits. Seeds are retained as run seeds.
+        # Generate legacy full-target-train splits. Seeds are retained as run seeds.
         if "target_full_train" in args.adaptation_settings:
             target_train_selected = select_target_full_train_dates(target_train_available)
             for seed in seeds:
@@ -276,6 +279,7 @@ def main():
                     target_train_dates=dates_to_serializable(target_train_selected),
                     query_dates=dates_to_serializable(query_dates),
                     adaptation_setting="target_full_train",
+                    allow_legacy_full_target_train=True,
                 )
 
                 splits.append(manifest)

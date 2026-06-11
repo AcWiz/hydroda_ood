@@ -1,4 +1,4 @@
-"""Leakage guard utilities for HydroDA-OOD / HyperDA V4 full-target-training protocol."""
+"""Leakage guard utilities for HydroDA-OOD / HyperDA V4.4 zero/few-shot protocol."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,7 +26,7 @@ class LeakageGuard:
     protocol: ProtocolConfig
 
     def check_prompt_times(self, times: Iterable, *, allow_target_query_inputs: bool = False) -> None:
-        roles = ["source_train", "source_fit", "source_val", "target_train"]
+        roles = ["source_train", "source_fit", "source_val", "target_context"]
         if allow_target_query_inputs:
             # Only for explicitly marked transductive input-only ablation, never main protocol.
             roles.append("target_eval")
@@ -46,12 +46,8 @@ class LeakageGuard:
         self.protocol.assert_dates_within(times, allowed_roles, "normalization")
 
     def check_support_dates(self, times: Iterable) -> None:
-        """Legacy few-shot support-date guard.
-
-        2022 target support dates are now an alias of target_train dates and
-        should only appear in explicitly marked few-shot ablations.
-        """
-        self.protocol.assert_dates_within(times, ["target_train"], "support_selection")
+        """Validate labeled target support cycles for K-shot adaptation."""
+        self.protocol.assert_dates_within(times, ["target_support"], "support_selection")
 
     def check_target_adaptation_scope(
         self,
@@ -62,15 +58,16 @@ class LeakageGuard:
     ) -> None:
         """Validate target-domain adaptation/generalization data access.
 
-        Main target adaptation may use target_train labels (the full 2015-2021
-        historical target training period) but must never touch target_eval/query dates.
+        Main target adaptation may use only preregistered target_support cycles
+        from 2015-2021 and must never touch target_val/target_eval for
+        selection, early stopping, or gain calibration.
         """
         if purpose in {"early_stopping", "model_selection", "hyperparameter_selection", "checkpoint_selection"}:
             raise ValueError(
-                f"{purpose} must not be driven by target_train labels in the main protocol. "
-                "Use source_val or a pre-registered target-train internal validation rule."
+                f"{purpose} must not be driven by target labels in the main protocol. "
+                "Use source_val_preregistered only."
             )
-        self.protocol.assert_dates_within(times, ["target_train"], purpose)
+        self.protocol.assert_dates_within(times, ["target_support"], purpose)
         if not labels_allowed:
             self.check_label_access(times, purpose=purpose)
 
@@ -80,12 +77,35 @@ class LeakageGuard:
         *,
         purpose: str,
         allow_target_train: bool = False,
+        model_selection_source: str = "source_val_preregistered",
     ) -> None:
         """Validate checkpoint/early-stopping/hyperparameter selection dates."""
+        if model_selection_source != "source_val_preregistered":
+            raise ValueError(
+                "Main zero/few-shot protocol requires model_selection_source="
+                f"'source_val_preregistered'; got {model_selection_source!r}. "
+                "target_val is unused in the main protocol."
+            )
         roles = ["source_val"]
         if allow_target_train:
-            roles.append("target_train")
+            roles.append("target_support")
         self.protocol.assert_dates_within(times, roles, purpose)
+
+    def check_target_side_selection_scope(self, times: Iterable, *, purpose: str) -> None:
+        """Reject target-side validation/early-stopping/model selection in the main protocol."""
+        self.protocol.assert_dates_within(times, ["target_val"], purpose)
+        raise ValueError(
+            f"{purpose} cannot use target_val in the main zero/few-shot protocol; "
+            "target_val_usage=unused_in_main_protocol."
+        )
+
+    def check_target_residual_gain_calibration_scope(self, times: Iterable, *, purpose: str) -> None:
+        """Reject target-label residual-gain calibration in the paper-facing protocol."""
+        self.protocol.assert_dates_within(times, ["target_support", "target_context"], purpose)
+        raise ValueError(
+            f"target-label residual gain calibration is legacy/internal only for {purpose}; "
+            "main protocol uses fixed preregistered source_val selection."
+        )
 
     def check_query_evaluation_only(self, times: Iterable) -> None:
         self.protocol.assert_dates_within(times, ["target_eval"], "final_evaluation")

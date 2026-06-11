@@ -1,13 +1,13 @@
-# Phase 2 — Region Masks and Target-Train Splits
+# Phase 2 — Region Masks and Zero/Few-Shot Splits
 
 ## 目标
 
-构建 region masks，生成 leave-one-region-out target_train/target_eval split manifests。
+构建 region masks，生成 leave-one-region-out zero/few-shot split manifests。
 
 Phase 2 分成两个可分离部分：
 
 ```text
-Phase 2A: temporal target-train split manifests
+Phase 2A: temporal target_context/target_support/target_eval split manifests
 Phase 2B: spatial region masks
 ```
 
@@ -31,15 +31,16 @@ checklists/no_leakage_checklist.md
 
 ## Gate rules
 
-### Temporal target-train splits
+### Temporal zero/few-shot splits
 
 可以在 Phase 1 dataset contract 完成后实现：
 
 ```text
 source_val:   2022
-target_train: 2015-2021
+target_context: 2015-2021 input-side only
+target_support: K labeled cycles from 2015-2021, K in {0,4,12}
 target_eval: 2023–2025
-adaptation_setting: target_full_train
+adaptation_setting: zero_shot_context | few_shot_k4 | few_shot_k12
 ```
 
 但 split manifest 中的 region_id 可以先处于 pending 状态，或使用 development-only grid region id。
@@ -124,7 +125,7 @@ artifacts/splits/hydroda_ood_us_grid_dev/US/{region}/K{K}_seed{seed}.json
 ```text
 target_region: US-R1..US-R6 if scientific geolocation is available
 fallback_target_region: US-GRID-R1..US-GRID-R6 if only grid split is available
-adaptation_setting: target_full_train
+adaptation_setting: zero_shot_context | few_shot_k4 | few_shot_k12
 seed: 0..4 initially
 ```
 
@@ -135,11 +136,11 @@ seed: 0..4 initially
 ```text
 1. 每个 region 有 mask 和 quality stats。
 2. 每个 target_region/adaptation_setting/seed 有 split manifest。
-3. legacy K=0 没有 support labels，且只作为 secondary ablation。
+3. K=0 没有 support labels。
 4. source_val dates 全部在 2022。
-5. target_train dates 全部在 2015-2021。
+5. target_context/target_support dates 全部在 2015-2021。
 6. target_eval dates 全部在 2023–2025。
-6. target_train 和 target_eval 无重叠。
+6. target_context/target_support 和 target_eval 无重叠。
 7. split selection flags 显示没有使用 target_eval/query labels。
 8. scientific region masks 只有在 geolocation gate 通过后才生成。
 9. development-only grid regions 不得被报告为 hydroclimatic regimes。

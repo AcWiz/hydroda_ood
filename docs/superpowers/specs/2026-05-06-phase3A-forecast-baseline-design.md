@@ -1,5 +1,10 @@
 # Phase 3A — Forecast-Only Baseline and Metrics Harness
 
+> Historical implementation design. Under the active V4.4 protocol, forecast-only
+> evaluation uses the zero/few-shot split artifact and `target_eval` as the
+> paper-facing final evaluation role; `target_query` is retained only as a
+> compatibility alias.
+
 **Date:** 2026-05-06
 **Author:** Claude
 **Status:** Approved
@@ -38,7 +43,7 @@ Iterates all samples in `dataset`, calls `predictor.predict(sample)`, computes p
 
 ### `scripts/run_phase3A.py`
 Entry point script that:
-1. Builds 240 `HydroDADataset` instances across all 6 regions × 4 K values × 10 seeds, for all 3 split roles
+1. Historically built `HydroDADataset` instances across the old K-date grid; current V4.4 runs use 6 regions × K in {0,4,12} × preregistered seeds
 2. Evaluates each with `ForecastBaseline`
 3. Aggregates results into `artifacts/metrics/phase3A_forecast_only_US/metrics_long.csv`
 
@@ -49,7 +54,7 @@ Entry point script that:
 3. `test_forecast_skill_is_zero` — `analysis_skill ≈ 0` (rtol=0.1, atol=0.05)
 4. `test_metrics_respect_metric_mask` — values zero outside mask
 5. `test_metrics_long_schema` — CSV columns match spec exactly
-6. `test_no_target_query_training_in_baseline` — no fitting, no target_query labels
+6. `test_no_target_eval_training_in_baseline` — no fitting, no target_query labels
 7. `test_region_balanced_aggregation` — per-region mean weighted equally
 
 ## Output

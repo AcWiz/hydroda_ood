@@ -1,5 +1,10 @@
 # Phase 3A — Forecast-Only Baseline and Metrics Harness
 
+> Historical implementation plan. Under the active V4.4 protocol, use
+> `artifacts/splits/US_loro_zero_few_shot_splits.json`, K in {0,4,12}, and
+> `target_eval` as the paper-facing name. `target_query` remains only a
+> backward-compatible alias for final evaluation samples.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement forecast-only baseline (`pred_increment = 0`) and reusable metrics/evaluation harness for Phase 3–5.
@@ -458,7 +463,7 @@ METRICS_DIR.mkdir(parents=True, exist_ok=True)
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = str(ARTIFACTS / "regions" / "US_region_masks.nc")
-SPLITS_JSON = str(ARTIFACTS / "splits" / "US_loro_kdate_splits.json")
+SPLITS_JSON = str(ARTIFACTS / "splits" / "US_loro_zero_few_shot_splits.json")
 FREEZE_MANIFEST = str(ARTIFACTS / "protocol" / "US_region_split_freeze_manifest.json")
 
 with open(FREEZE_MANIFEST) as f:
@@ -466,9 +471,9 @@ with open(FREEZE_MANIFEST) as f:
 PROTOCOL_FREEZE_ID = freeze["freeze_id"]
 
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
-K_VALUES = [0, 4, 12, 24]
-SEEDS = list(range(10))
-SPLIT_ROLES = ["source_train", "target_support", "target_query"]
+K_VALUES = [0, 4, 12]
+SEEDS = [0, 1, 2]
+SPLIT_ROLES = ["source_train", "target_support", "target_eval"]
 
 EXPERIMENT_ID = "phase3A_forecast_only_US"
 METHOD = ForecastBaseline()
@@ -532,15 +537,15 @@ with open('artifacts/protocol/US_region_split_freeze_manifest.json') as f:
 ds = HydroDADataset(
     da_nc_path='/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc',
     region_masks_nc='artifacts/regions/US_region_masks.nc',
-    splits_json='artifacts/splits/US_loro_kdate_splits.json',
+    splits_json='artifacts/splits/US_loro_zero_few_shot_splits.json',
     target_region='US-R1',
-    split_type='target_query',
+    split_type='target_eval',
     K=0,
     seed=0,
     freeze_manifest='artifacts/protocol/US_region_split_freeze_manifest.json',
 )
 baseline = ForecastBaseline()
-results = evaluate_split(ds, baseline, 'target_query', 'phase3A_forecast_only_US', freeze['freeze_id'])
+results = evaluate_split(ds, baseline, 'target_eval', 'phase3A_forecast_only_US', freeze['freeze_id'])
 print(f'Got {len(results)} result rows for one split')
 ds.close()
 "
@@ -581,8 +586,8 @@ def test_metrics_long_schema():
     assert df.columns.tolist() == expected_cols, f"Got {df.columns.tolist()}"
 
 
-def test_no_target_query_training_in_baseline():
-    """ForecastBaseline uses no target_query data for fitting."""
+def test_no_target_eval_training_in_baseline():
+    """ForecastBaseline uses no target_eval data for fitting."""
     baseline = ForecastBaseline()
     assert baseline.method_id == "forecast_only"
     # Verify no training whatsoever
@@ -655,7 +660,7 @@ with open(STATS_JSON) as f:
     region_stats = json.load(f)
 
 df = pd.read_csv(METRICS_CSV)
-QUERY_DF = df[df["split_role"] == "target_query"]
+QUERY_DF = df[df["split_role"] == "target_eval"]
 
 REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 VARIABLES = ["surface", "rootzone"]
@@ -669,10 +674,10 @@ lines = [
     "## No-Leakage Statement",
     "",
     "The forecast-only baseline uses **no training data**. Predicted increment = 0 for all pixels.",
-    "No target_query labels, analysis increments, or model errors were used in model selection or normalization.",
+    "No target_eval labels, analysis increments, or model errors were used in model selection or normalization.",
     "Metric masking uses `base_valid_mask` + `active_region_mask` + finite check only.",
     "",
-    "## Per-Region RMSE — Target Query (m³/m³)",
+    "## Per-Region RMSE — Target Eval (m³/m³)",
     "",
     "| Region | Regime | Surface RMSE | Rootzone RMSE | Valid Coverage % |",
     "|--------|--------|-------------|--------------|-----------------|",
@@ -712,7 +717,7 @@ for region in REGIONS:
     )
 
 # True increment RMSE table
-lines += ["", "## Per-Region True Increment RMSE — Target Query (m³/m³)", ""]
+lines += ["", "## Per-Region True Increment RMSE — Target Eval (m³/m³)", ""]
 lines.append("| Region | Surface Incr RMSE | Rootzone Incr RMSE |")
 lines.append("|--------|------------------|-------------------|")
 
