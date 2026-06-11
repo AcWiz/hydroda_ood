@@ -5,14 +5,17 @@ Usage:
     # Source-only backbone
     PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \\
         --checkpoint artifacts/checkpoints/phase4_source_only/US-R1/best.pt \\
-        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --target_region US-R1 --adaptation_setting zero_shot_context --K 0 --seed 0 \\
         --split_type target_eval --predictor_type source_only
 
     # Prompt-conditioned shared backbone
     PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \\
         --checkpoint artifacts/checkpoints/phase4_prompt_conditioned/US-R1/best.pt \\
-        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --target_region US-R1 --adaptation_setting zero_shot_context --K 0 --seed 0 \\
         --split_type target_eval --predictor_type prompt_conditioned
+
+    # Legacy/internal full-target reproduction remains explicit:
+    #   --adaptation_setting target_full_train
 
 No-leakage declaration:
     - Evaluation uses target_eval split (target_query alias accepted; post-prediction label use only)
@@ -40,15 +43,31 @@ from hydroda.utils.device import resolve_device
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+ZERO_FEW_SHOT_SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
+LEGACY_TARGET_TRAIN_SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = ZERO_FEW_SHOT_SPLITS_JSON
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+ZERO_FEW_SHOT_PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
+LEGACY_TARGET_TRAIN_PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = ZERO_FEW_SHOT_PROTOCOL_FREEZE_ID
 
 _PREDICTOR_OUTPUT_DIRS = {
     "source_only": Path("artifacts/results/phase4_source_only"),
     "prompt_conditioned": Path("artifacts/results/phase4_prompt_conditioned"),
     "hyperda_target_adapt": Path("artifacts/results/phase5_hyperda_target_adapt"),
 }
+
+
+def resolve_split_protocol_for_adaptation(adaptation_setting: str) -> tuple[str, str]:
+    """Return split manifest and freeze id for the requested adaptation setting."""
+    if adaptation_setting == "target_full_train":
+        return LEGACY_TARGET_TRAIN_SPLITS_JSON, LEGACY_TARGET_TRAIN_PROTOCOL_FREEZE_ID
+    return ZERO_FEW_SHOT_SPLITS_JSON, ZERO_FEW_SHOT_PROTOCOL_FREEZE_ID
+
+
+def dataset_date_hash(dataset: HydroDADataset, key: str) -> str:
+    """Return a split-date hash recorded on the dataset manifest entry."""
+    return str(getattr(dataset, "_split_entry", {}).get(key, ""))
 
 
 def aggregate_results(rows):
@@ -81,10 +100,10 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate neural backbone checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint")
     parser.add_argument("--target_region", type=str, required=True)
-    parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
-        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
-    parser.add_argument("--K", type=int, default=None,
-        help="Legacy few-shot K value. Ignored for target_full_train.")
+    parser.add_argument("--adaptation_setting", type=str, default=None,
+        help="Split adaptation setting. Defaults from K: zero_shot_context/few_shot_k4/few_shot_k12.")
+    parser.add_argument("--K", type=int, default=0,
+        help="Zero/few-shot K value for the main protocol.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split_type", type=str, default="target_eval")
     parser.add_argument("--max_samples", type=int, default=0,
@@ -97,26 +116,42 @@ def main():
         help="Type of predictor to load")
     parser.add_argument("--output_dir", type=str, default=None,
         help="Override output directory")
+    parser.add_argument("--target_context_prompt", action="store_true",
+        help="Legacy path for older checkpoints: build target-context monthly prompt prototypes from 2015-2021 input-side fields")
     parser.add_argument("--target_prompt_from_target_train", action="store_true",
-        help="For prompt-conditioned target_eval, build a fixed prompt from target_train input-side fields only")
+        help="Legacy alias for --target_context_prompt")
+    parser.add_argument("--no_target_context_prompt", action="store_true",
+        help="Ablation: keep checkpoint prompt state/fallback without on-the-fly context construction")
     parser.add_argument("--no_target_prompt_from_target_train", action="store_true",
-        help="Ablation: for prompt-conditioned target_eval, keep the checkpoint fallback/mean target prompt")
+        help="Legacy alias for --no_target_context_prompt")
     parser.add_argument("--target_train_residual_gain_calibration", action="store_true",
-        help="For prompt-conditioned target_eval, calibrate residual gain on target_train labels only")
+        help="Legacy/internal: calibrate residual gain on target support/train labels")
+    parser.add_argument("--allow_legacy_target_label_calibration", action="store_true",
+        help="Required with --target_train_residual_gain_calibration.")
     args = parser.parse_args()
 
+    if args.adaptation_setting is None:
+        args.adaptation_setting = "zero_shot_context" if int(args.K) == 0 else f"few_shot_k{int(args.K)}"
     if args.adaptation_setting == "target_full_train":
         args.K = None
-    elif args.K is None:
-        args.K = 0
+    splits_json, protocol_freeze_id = resolve_split_protocol_for_adaptation(args.adaptation_setting)
+    if args.target_prompt_from_target_train:
+        args.target_context_prompt = True
+    if args.no_target_prompt_from_target_train:
+        args.no_target_context_prompt = True
+    if args.target_train_residual_gain_calibration and not args.allow_legacy_target_label_calibration:
+        raise ValueError(
+            "--target_train_residual_gain_calibration is legacy/internal. "
+            "Pass --allow_legacy_target_label_calibration to opt in explicitly."
+        )
 
     if (
         args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt")
         and args.split_type in ("target_eval", "target_query")
         and args.predictor_type != "hyperda_target_adapt"
-        and not args.no_target_prompt_from_target_train
+        and not args.no_target_context_prompt
     ):
-        args.target_prompt_from_target_train = True
+        args.target_context_prompt = True
 
     # Resolve device
     device = resolve_device(args.device, require_gpu=args.require_gpu)
@@ -151,7 +186,7 @@ def main():
     dataset = HydroDADataset(
         da_nc_path=f"{DATA_DIR}/DA.nc",
         region_masks_nc=REGION_MASKS_NC,
-        splits_json=SPLITS_JSON,
+        splits_json=splits_json,
         target_region=args.target_region,
         split_type=args.split_type,
         K=args.K,
@@ -174,32 +209,49 @@ def main():
             device=str(device),
             target_region=args.target_region,
         )
+        target_context_dataset = None
         target_train_dataset = None
-        if args.target_prompt_from_target_train or args.target_train_residual_gain_calibration:
+        if args.target_context_prompt:
             if args.split_type not in ("target_eval", "target_query"):
                 raise ValueError(
-                    "--target_prompt_from_target_train and "
-                    "--target_train_residual_gain_calibration are only valid for target_eval/target_query"
+                    "--target_context_prompt is only valid for target_eval/target_query"
+                )
+            target_context_dataset = HydroDADataset(
+                da_nc_path=f"{DATA_DIR}/DA.nc",
+                region_masks_nc=REGION_MASKS_NC,
+                splits_json=splits_json,
+                target_region=args.target_region,
+                split_type="target_context",
+                K=args.K,
+                seed=args.seed,
+                adaptation_setting=args.adaptation_setting,
+                freeze_manifest=FREEZE_MANIFEST,
+            )
+        if args.target_train_residual_gain_calibration:
+            if args.split_type not in ("target_eval", "target_query"):
+                raise ValueError(
+                    "--target_train_residual_gain_calibration is only valid for target_eval/target_query"
                 )
             target_train_dataset = HydroDADataset(
                 da_nc_path=f"{DATA_DIR}/DA.nc",
                 region_masks_nc=REGION_MASKS_NC,
-                splits_json=SPLITS_JSON,
+                splits_json=splits_json,
                 target_region=args.target_region,
-                split_type="target_train",
+                split_type="target_support",
                 K=args.K,
                 seed=args.seed,
                 adaptation_setting=args.adaptation_setting,
                 freeze_manifest=FREEZE_MANIFEST,
             )
 
-        if args.target_prompt_from_target_train:
-            print("  Building fixed target prompt from target_train inputs...")
-            prompt_metadata = predictor.set_target_prompt_from_samples(
-                target_train_dataset[i] for i in range(len(target_train_dataset))
+        if args.target_context_prompt:
+            print("  Building target-context monthly prompt prototypes from target_context inputs...")
+            prompt_metadata = predictor.set_target_context_prompt_from_samples(
+                target_context_dataset.get_input_side_sample(i)
+                for i in range(len(target_context_dataset))
             )
             print(
-                "  target prompt: "
+                "  target-context prompt state: "
                 f"n={prompt_metadata['n_samples']} "
                 f"dates={prompt_metadata['date_start']}..{prompt_metadata['date_end']} "
                 f"labels={prompt_metadata['label_usage']}"
@@ -207,7 +259,7 @@ def main():
 
         target_train_calibration = {}
         if args.target_train_residual_gain_calibration:
-            print("  Calibrating residual gain on target_train labels...")
+            print("  Calibrating residual gain on legacy target support labels...")
             samples_s = []
             samples_r = []
             alpha_grid = [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -243,6 +295,8 @@ def main():
                     f"rootzone={predictor.alpha_rootzone:.3f}"
                 )
 
+        if target_context_dataset is not None:
+            target_context_dataset.close()
         if target_train_dataset is not None:
             target_train_dataset.close()
     else:
@@ -256,15 +310,20 @@ def main():
     print(f"\nRunning evaluation...")
     start_time = time.time()
 
-    split_manifest_sha256 = compute_sha256(SPLITS_JSON) if Path(SPLITS_JSON).exists() else ""
+    split_manifest_sha256 = compute_sha256(splits_json) if Path(splits_json).exists() else ""
     experiment_suffix = args.adaptation_setting if args.K is None else f"{args.adaptation_setting}_K{args.K}"
     eval_kwargs = {
         "split_role": args.split_type,
         "experiment_id": f"phase4_{args.predictor_type}_{args.target_region}_{experiment_suffix}_S{args.seed}",
-        "protocol_freeze_id": PROTOCOL_FREEZE_ID,
+        "protocol_freeze_id": protocol_freeze_id,
         "method": predictor.method_name,
-        "split_file": SPLITS_JSON,
+        "split_file": splits_json,
         "mask_file": REGION_MASKS_NC,
+        "target_context_dates_hash": dataset_date_hash(dataset, "target_context_dates_hash"),
+        "target_support_dates_hash": dataset_date_hash(dataset, "target_support_dates_hash"),
+        "support_dates_hash": dataset_date_hash(dataset, "support_dates_hash"),
+        "target_train_dates_hash": dataset_date_hash(dataset, "target_train_dates_hash"),
+        "target_eval_dates_hash": dataset_date_hash(dataset, "target_eval_dates_hash"),
         "split_manifest_sha256": split_manifest_sha256,
         "preloaded": False,
         "max_samples": args.max_samples if args.max_samples > 0 else None,
@@ -327,8 +386,13 @@ def main():
         "split_type": args.split_type,
         "n_samples_evaluated": n_samples_effective,
         "n_metric_rows": len(rows),
-        "protocol_freeze_id": PROTOCOL_FREEZE_ID,
+        "protocol_freeze_id": protocol_freeze_id,
         "split_manifest_sha256": split_manifest_sha256,
+        "target_context_dates_hash": dataset_date_hash(dataset, "target_context_dates_hash"),
+        "target_support_dates_hash": dataset_date_hash(dataset, "target_support_dates_hash"),
+        "support_dates_hash": dataset_date_hash(dataset, "support_dates_hash"),
+        "target_train_dates_hash": dataset_date_hash(dataset, "target_train_dates_hash"),
+        "target_eval_dates_hash": dataset_date_hash(dataset, "target_eval_dates_hash"),
         "target_prompt": getattr(predictor, "_target_prompt_metadata", {}),
         "target_train_residual_gain_calibration": target_train_calibration if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt") else {},
         "surface": metric_summary.get("surface", {}),
@@ -362,6 +426,10 @@ def main():
         "n_samples_total": total_samples,
         "n_samples_evaluated": n_samples_effective,
         "n_metric_rows": len(rows),
+        "target_context_dates_hash": dataset_date_hash(dataset, "target_context_dates_hash"),
+        "target_support_dates_hash": dataset_date_hash(dataset, "target_support_dates_hash"),
+        "target_eval_dates_hash": dataset_date_hash(dataset, "target_eval_dates_hash"),
+        "split_manifest_sha256": split_manifest_sha256,
         "metrics_computed": sorted(df["metric"].unique().tolist()),
         "variables": sorted(df["variable"].unique().tolist()),
         "seasonal_breakdown": sorted(df["season"].unique().tolist()) if "season" in df.columns else [],

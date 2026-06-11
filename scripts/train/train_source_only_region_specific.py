@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Train region-specific source-only SmallResUNet backbone.
+"""Train target full-history region oracle SmallResUNet sanity baseline.
 
 Each region (R1-R6) gets its own model trained ONLY on that region's source_fit
 data (2015-2021). After training, auto-evaluates on source_val (2022) and
 target_eval (2023-2025) for that specific region.
 
-This is NOT a LORO (leave-one-region-out) model — the model sees only the
-target region's own data, providing a region-specific baseline.
+This is NOT a LORO (leave-one-region-out) model and NOT the V4.4
+source-trained same-regime specialist bank. The model sees the target region's
+own 2015-2021 labels, so it is a target_full_history_region_oracle upper bound
+for appendix/internal diagnostics only.
 
 Usage:
     PYTHONPATH=. python scripts/train/train_source_only_region_specific.py \\
-        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --target_region US-R1 --adaptation_setting zero_shot_context --K 0 --seed 0 \\
         --max_epochs 30 --batch_size 2 --lr 1e-3 \\
         --device cuda --amp \\
         --config configs/model_resunet_main.yaml
 
 No-leakage declaration:
-    - Only source_fit split used for training
+    - Oracle/internal only: target region 2015-2021 labels are used for training
+    - Only source_fit-era labels are used for training
     - Normalization stats from source_fit only
     - No target_eval/target_query labels used in training/normalization/early_stopping
     - No target prompt used
@@ -47,10 +50,11 @@ from hydroda.utils.runtime import gather_runtime_info
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 PHASE = "phase4_source_only_region_specific"
+METHOD = "target_full_history_region_oracle"
 
 # Use US-R1 for split manifest lookup (has the most date coverage).
 # The region mask is overridden post-construction via set_active_region().
@@ -58,14 +62,14 @@ _SPLIT_LOOKUP_REGION = "US-R1"
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train region-specific source-only backbone")
+    parser = argparse.ArgumentParser(description="Train secondary/internal region-specific source-only backbone")
     # Data
     parser.add_argument("--target_region", type=str, required=True,
         help="Target region, e.g. US-R1")
     parser.add_argument("--adaptation_setting", type=str, default=None,
-        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+        help="Split adaptation setting (default: zero_shot_context; main examples: zero_shot_context, few_shot_k4, few_shot_k12)")
     parser.add_argument("--K", type=int, default=None,
-        help="Legacy few-shot K value. Ignored for target_full_train.")
+        help="Zero/few-shot K value for the main protocol.")
     parser.add_argument("--seed", type=int, default=None,
         help="Seed for split (default from YAML or 0)")
     # Model
@@ -179,7 +183,7 @@ def parse_args():
 
     # Set hard-coded fallback defaults for required params not in YAML
     if parser.get_default("adaptation_setting") is None:
-        parser.set_defaults(adaptation_setting="target_full_train")
+        parser.set_defaults(adaptation_setting="zero_shot_context")
     if parser.get_default("seed") is None:
         parser.set_defaults(seed=0)
     if parser.get_default("width") is None:
@@ -321,7 +325,7 @@ def _run_post_train_evaluation(
         split_role=split_type,
         experiment_id=run_manager.get_run_name(),
         protocol_freeze_id=PROTOCOL_FREEZE_ID,
-        method="source_only_region_specific",
+        method=METHOD,
         split_file=SPLITS_JSON,
         mask_file=REGION_MASKS_NC,
     )
@@ -361,8 +365,10 @@ def main():
     region_id = args.target_region
 
     print("=" * 60)
-    print("Phase 4: Region-Specific Source-Only Baseline")
+    print("Phase 4: Target Full-History Region Oracle [INTERNAL]")
+    print("  method=target_full_history_region_oracle")
     print(f"  training ONLY on {region_id} data")
+    print("  status=oracle_upper_bound_internal_only")
     print(f"  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
     print(f"  device={device}  width={args.width}  amp={args.amp}")
@@ -411,12 +417,18 @@ def main():
         "wandb_project": args.wandb_project,
         "wandb_entity": args.wandb_entity,
         "wandb_tags": args.wandb_tags,
+        "method": METHOD,
+        "baseline_role": "target_full_history_region_oracle",
+        "baseline_status": "oracle_upper_bound_internal_only",
+        "training_domain_policy": "target_region_full_history_2015_2021",
+        "train_domains_exclude_target": False,
+        "paper_table_eligible": False,
     }
 
     # Create RunManager
     run_manager = RunManager(
         phase=PHASE,
-        method="source_only",
+        method=METHOD,
         target_region=region_id,
         config=run_config,
         output_dir=args.output_dir,
@@ -437,6 +449,12 @@ def main():
     run_manager.save_protocol({
         "protocol_freeze_id": PROTOCOL_FREEZE_ID,
         "split_manifest": FREEZE_MANIFEST,
+        "method": METHOD,
+        "baseline_role": "target_full_history_region_oracle",
+        "baseline_status": "oracle_upper_bound_internal_only",
+        "training_domain_policy": "target_region_full_history_2015_2021",
+        "normalization_source": "target_region_source_fit_2015_2021_oracle",
+        "model_selection_source": "target_region_source_val_2022_oracle",
     })
 
     # Setup logging

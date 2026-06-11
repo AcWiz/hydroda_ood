@@ -55,7 +55,7 @@ def main():
     parser.add_argument(
         "--splits-json",
         type=str,
-        default="artifacts/splits/US_loro_target_train_splits.json",
+        default="artifacts/splits/US_loro_zero_few_shot_splits.json",
         help="Path to frozen splits JSON",
     )
     parser.add_argument(

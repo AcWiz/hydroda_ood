@@ -6,11 +6,11 @@
 
 防御：任务明确是 reference DA analysis-increment emulation，不声称自然真值。
 
-### R2. “目标域用了完整训练集，是否还叫泛化？”
+### R2. “目标域标签预算是否真的受限？”
 
-防御：明确部署设定是 train/eval temporal holdout under target-domain shift：
-2015-2021 target_train 可用于构造 target-specific operator，2023-2025 target_eval
-严格 held out。旧 K-shot 只作为 secondary ablation。
+防御：主协议是 zero/few-shot；K=0 不使用 target labels，K=4/12 只使用 K 个
+labeled target DA cycles 更新轻量变量。Target 2015-2021 input-side context 可用于
+prompt，2023-2025 target_eval 严格 held out。
 
 ### R3. “是否有 query leakage？”
 
@@ -36,7 +36,7 @@ target-train mean/monthly/ridge 只作为 internal sanity 或附录。
 ```text
 audit reports
 region quality reports
-split manifests
+zero/few-shot split manifests
 normalization provenance logs
 support date lists
 metric long-form csv
@@ -52,9 +52,9 @@ seed variance tables
 
 ```text
 1. Define the deployment problem.
-2. Introduce HydroDA-OOD target_train/target_eval protocol.
+2. Introduce HydroDA-OOD target_context/target_support/target_eval protocol.
 3. Show forecast/source-only OOD gap.
-4. Compare target_full_train adaptation mechanisms.
+4. Compare HyperDA K=0/4/12 zero/few-shot generalization.
 5. Introduce HyperDA parameter generation.
-6. Analyze legacy K-shot ablation and high-update events after model selection.
+6. Analyze lightweight adaptation ablations and high-update events after model selection.
 ```

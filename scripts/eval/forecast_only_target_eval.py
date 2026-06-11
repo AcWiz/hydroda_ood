@@ -27,16 +27,16 @@ import pandas as pd
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 
 
 def run_forecast_only_for_region(
     region: str,
     split_type: str = "target_eval",
-    adaptation_setting: str = "target_full_train",
-    K: int | None = None,
+    adaptation_setting: str = "zero_shot_context",
+    K: int | None = 0,
     seed: int = 0,
     max_samples: int = 0,
 ) -> tuple[list, dict]:
@@ -145,12 +145,12 @@ def main():
         help="Split type (default: target_eval)"
     )
     parser.add_argument(
-        "--adaptation_setting", type=str, default="target_full_train",
-        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)"
+        "--adaptation_setting", type=str, default="zero_shot_context",
+        help="Split adaptation setting (default: zero_shot_context; main examples: zero_shot_context, few_shot_k4, few_shot_k12)"
     )
     parser.add_argument(
-        "--K", type=int, default=None,
-        help="Legacy few-shot K value. Ignored for target_full_train."
+        "--K", type=int, default=0,
+        help="Zero/few-shot K value for the main protocol."
     )
     parser.add_argument(
         "--seed", type=int, default=0,

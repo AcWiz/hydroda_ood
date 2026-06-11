@@ -2,7 +2,7 @@
 
 Creates a 4-panel figure showing:
 1. US 6-region geographic distribution with cartopy map projection
-2. Temporal split timeline (source_train / target_train / target_eval)
+2. Temporal split timeline (source_fit / target_context / target_support / target_eval)
 3. LORO cross-validation structure
 4. Legacy K-date support sampling strategy (secondary ablation)
 
@@ -379,8 +379,8 @@ def main():
     )
     parser.add_argument(
         "--splits-json",
-        default="artifacts/splits/US_loro_target_train_splits.json",
-        help="Path to US_loro_target_train_splits.json",
+        default="artifacts/splits/US_loro_zero_few_shot_splits.json",
+        help="Path to US_loro_zero_few_shot_splits.json",
     )
     parser.add_argument(
         "--out-png",

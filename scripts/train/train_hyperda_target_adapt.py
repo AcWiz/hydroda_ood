@@ -14,13 +14,14 @@ No-leakage declaration:
 from __future__ import annotations
 
 import argparse
+import csv
 import inspect
 import json
 import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
@@ -41,7 +42,7 @@ DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = ProtocolConfig().protocol_freeze_id
+PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 PHASE = "phase5_hyperda_target_adapt"
 _REGION_TO_IDX = {f"US-R{i}": i - 1 for i in range(1, 7)}
 
@@ -64,6 +65,32 @@ class ResumeTrainingState:
     best_epochs_by_metric: Dict[str, int]
     train_history: List[Dict[str, Any]]
     val_history: List[Dict[str, Any]]
+
+
+@dataclass
+class AdapterAnchorSoupSnapshot:
+    epoch: int
+    state: Dict[str, torch.Tensor]
+    metrics: Dict[str, float]
+
+
+@dataclass
+class AdapterAnchorSoupCandidate:
+    candidate_id: str
+    epoch: int
+    alpha: float
+    state: Dict[str, torch.Tensor]
+    metrics: Optional[Dict[str, float]] = None
+    selected_metric: Optional[float] = None
+
+
+@dataclass
+class AdapterAnchorSoupResult:
+    selected_state: Dict[str, torch.Tensor]
+    selected_metric: float
+    selected_metrics: Dict[str, float]
+    accepted_candidates: List[AdapterAnchorSoupCandidate]
+    trace_rows: List[Dict[str, Any]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -143,15 +170,229 @@ def parse_args() -> argparse.Namespace:
         ],
         help="Validation metric used to save the best target-val checkpoint.",
     )
+    parser.add_argument("--enable_adapter_anchor_soup", action="store_true",
+        help="After training, select a source-anchored greedy adapter-weight soup on target_val only.")
+    parser.add_argument("--adapter_soup_every", type=int, default=5,
+        help="Capture target-adapter snapshots every N epochs for anchor soup.")
+    parser.add_argument("--adapter_soup_start_epoch", type=int, default=10,
+        help="First zero-based epoch eligible for anchor-soup snapshots.")
+    parser.add_argument("--adapter_soup_alpha_grid", type=str, default="0.40,0.55,0.70,0.85,1.00",
+        help="Comma-separated source-anchor interpolation alpha grid.")
+    parser.add_argument("--adapter_soup_rootzone_guard", action="store_true", default=True,
+        help="Require greedy soup additions not to worsen RootZone target-val WRMSE.")
+    parser.add_argument("--no_adapter_soup_rootzone_guard", action="store_false", dest="adapter_soup_rootzone_guard",
+        help="Disable the RootZone non-worsening guard for anchor soup.")
     args = parser.parse_args()
-    ProtocolConfig().assert_supported_adaptation_setting(args.adaptation_setting)
+    ProtocolConfig().assert_supported_adaptation_setting(
+        args.adaptation_setting,
+        allow_legacy_full_target_train=args.adaptation_setting == "target_full_train",
+    )
+    if args.adapter_soup_every <= 0:
+        parser.error("--adapter_soup_every must be positive")
+    if args.adapter_soup_start_epoch < 0:
+        parser.error("--adapter_soup_start_epoch must be non-negative")
+    try:
+        _parse_adapter_soup_alpha_grid(args.adapter_soup_alpha_grid)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
+
+
+def _parse_adapter_soup_alpha_grid(value: str) -> List[float]:
+    try:
+        alphas = [float(part.strip()) for part in str(value).split(",") if part.strip()]
+    except ValueError as exc:
+        raise ValueError(f"invalid adapter soup alpha grid: {value!r}") from exc
+    if not alphas:
+        raise ValueError("adapter soup alpha grid must contain at least one value")
+    for alpha in alphas:
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"adapter soup alpha must be in [0, 1], got {alpha}")
+    return alphas
 
 
 def _as_list(value: Any, n: int, fill: float) -> List[float]:
     if value is None:
         return [fill] * n
     return [float(x) for x in value]
+
+
+def _is_target_adapter_state_key(name: str) -> bool:
+    return name.startswith("target_") or name.startswith("residual_gain.")
+
+
+def extract_target_adapter_state(model: nn.Module) -> Dict[str, torch.Tensor]:
+    """Return a CPU copy of target-adaptation parameters and buffers only."""
+    return {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in model.state_dict().items()
+        if _is_target_adapter_state_key(name)
+    }
+
+
+def apply_target_adapter_state(model: nn.Module, adapter_state: Dict[str, torch.Tensor]) -> None:
+    """Copy target-adaptation state into ``model`` without touching source-prior keys."""
+    model_state = model.state_dict()
+    for name, tensor in adapter_state.items():
+        if not _is_target_adapter_state_key(name):
+            raise ValueError(f"non-target adapter key cannot be applied: {name}")
+        if name not in model_state:
+            raise KeyError(f"target adapter key not found in model: {name}")
+        target = model_state[name]
+        if tuple(target.shape) != tuple(tensor.shape):
+            raise ValueError(f"shape mismatch for {name}: checkpoint={tuple(tensor.shape)} model={tuple(target.shape)}")
+        target.copy_(tensor.to(device=target.device, dtype=target.dtype))
+
+
+def interpolate_target_adapter_state(
+    anchor_state: Dict[str, torch.Tensor],
+    adapted_state: Dict[str, torch.Tensor],
+    alpha: float,
+) -> Dict[str, torch.Tensor]:
+    """Build ``theta_init + alpha * (theta_epoch - theta_init)`` for target adapters."""
+    if set(anchor_state) != set(adapted_state):
+        missing = sorted(set(anchor_state) - set(adapted_state))
+        extra = sorted(set(adapted_state) - set(anchor_state))
+        raise ValueError(f"adapter state keys differ; missing={missing[:5]} extra={extra[:5]}")
+    result: Dict[str, torch.Tensor] = {}
+    for name, anchor_tensor in anchor_state.items():
+        adapted_tensor = adapted_state[name]
+        if tuple(anchor_tensor.shape) != tuple(adapted_tensor.shape):
+            raise ValueError(
+                f"shape mismatch for {name}: anchor={tuple(anchor_tensor.shape)} adapted={tuple(adapted_tensor.shape)}"
+            )
+        anchor_cpu = anchor_tensor.detach().cpu()
+        adapted_cpu = adapted_tensor.detach().cpu()
+        result[name] = anchor_cpu + float(alpha) * (adapted_cpu - anchor_cpu)
+    return result
+
+
+def average_target_adapter_states(states: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    if not states:
+        raise ValueError("cannot average zero adapter states")
+    keys = set(states[0])
+    for state in states[1:]:
+        if set(state) != keys:
+            raise ValueError("all adapter states must have identical keys")
+    return {
+        name: torch.stack([state[name].detach().cpu() for state in states], dim=0).mean(dim=0)
+        for name in sorted(keys)
+    }
+
+
+def _adapter_anchor_soup_selection_metric(metrics: Dict[str, float], selection_rootzone_weight: float) -> float:
+    return float(metrics["target_val_surface_wrmse_latw"]) + float(selection_rootzone_weight) * float(
+        metrics["target_val_rootzone_wrmse_latw"]
+    )
+
+
+def build_adapter_anchor_soup_candidates(
+    anchor_state: Dict[str, torch.Tensor],
+    snapshots: List[AdapterAnchorSoupSnapshot],
+    alpha_grid: List[float],
+) -> List[AdapterAnchorSoupCandidate]:
+    candidates: List[AdapterAnchorSoupCandidate] = []
+    for snapshot in snapshots:
+        for alpha in alpha_grid:
+            candidates.append(
+                AdapterAnchorSoupCandidate(
+                    candidate_id=f"epoch{snapshot.epoch:03d}_alpha{alpha:.2f}",
+                    epoch=snapshot.epoch,
+                    alpha=float(alpha),
+                    state=interpolate_target_adapter_state(anchor_state, snapshot.state, alpha),
+                )
+            )
+    return candidates
+
+
+def greedy_select_adapter_anchor_soup(
+    candidates: List[AdapterAnchorSoupCandidate],
+    evaluate_state: Callable[[Dict[str, torch.Tensor]], Dict[str, float]],
+    selection_rootzone_weight: float,
+    rootzone_guard: bool = True,
+) -> AdapterAnchorSoupResult:
+    """Greedily average target-adapter candidates, selecting with target_val metrics only."""
+    evaluated: List[AdapterAnchorSoupCandidate] = []
+    trace_rows: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        metrics = evaluate_state(candidate.state)
+        candidate.metrics = dict(metrics)
+        candidate.selected_metric = _adapter_anchor_soup_selection_metric(metrics, selection_rootzone_weight)
+        evaluated.append(candidate)
+
+    selected_state: Dict[str, torch.Tensor] = {}
+    selected_metric = float("inf")
+    selected_metrics: Dict[str, float] = {}
+    selected_rootzone = float("inf")
+    accepted: List[AdapterAnchorSoupCandidate] = []
+
+    for order, candidate in enumerate(
+        sorted(evaluated, key=lambda item: (float(item.selected_metric), item.epoch, item.alpha))
+    ):
+        trial_states = [item.state for item in accepted] + [candidate.state]
+        trial_state = average_target_adapter_states(trial_states)
+        trial_metrics = evaluate_state(trial_state)
+        trial_metric = _adapter_anchor_soup_selection_metric(trial_metrics, selection_rootzone_weight)
+        trial_rootzone = float(trial_metrics["target_val_rootzone_wrmse_latw"])
+        rootzone_guard_pass = (not rootzone_guard) or not accepted or trial_rootzone <= selected_rootzone + 1e-12
+        metric_improved = trial_metric < selected_metric - 1e-12
+        decision = "accept" if metric_improved and rootzone_guard_pass else "reject"
+        trace_rows.append(
+            {
+                "order": order,
+                "candidate_id": candidate.candidate_id,
+                "epoch": candidate.epoch,
+                "alpha": candidate.alpha,
+                "candidate_selection_metric": candidate.selected_metric,
+                "candidate_surface_val_wrmse": candidate.metrics["target_val_surface_wrmse_latw"] if candidate.metrics else None,
+                "candidate_rootzone_val_wrmse": candidate.metrics["target_val_rootzone_wrmse_latw"] if candidate.metrics else None,
+                "trial_selection_metric": trial_metric,
+                "trial_surface_val_wrmse": trial_metrics["target_val_surface_wrmse_latw"],
+                "trial_rootzone_val_wrmse": trial_rootzone,
+                "rootzone_guard_pass": rootzone_guard_pass,
+                "accepted_count_before": len(accepted),
+                "decision": decision,
+            }
+        )
+        if decision != "accept":
+            continue
+        accepted.append(candidate)
+        selected_state = trial_state
+        selected_metric = trial_metric
+        selected_metrics = dict(trial_metrics)
+        selected_rootzone = trial_rootzone
+
+    return AdapterAnchorSoupResult(
+        selected_state=selected_state,
+        selected_metric=selected_metric,
+        selected_metrics=selected_metrics,
+        accepted_candidates=accepted,
+        trace_rows=trace_rows,
+    )
+
+
+def write_adapter_anchor_soup_trace(path: Path, rows: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "order",
+        "candidate_id",
+        "epoch",
+        "alpha",
+        "candidate_selection_metric",
+        "candidate_surface_val_wrmse",
+        "candidate_rootzone_val_wrmse",
+        "trial_selection_metric",
+        "trial_surface_val_wrmse",
+        "trial_rootzone_val_wrmse",
+        "rootzone_guard_pass",
+        "accepted_count_before",
+        "decision",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({name: row.get(name, "") for name in fieldnames})
 
 
 def load_source_checkpoint_for_target_adaptation(
@@ -863,6 +1104,122 @@ def _safe_len(dataset: HydroDADataset) -> int:
     return int(len(dataset))
 
 
+def _select_and_save_adapter_anchor_soup(
+    state: TargetAdaptationState,
+    val_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    args: argparse.Namespace,
+    run_manager: RunManager,
+    run_config: Dict[str, Any],
+    train_history: List[Dict[str, Any]],
+    val_history: List[Dict[str, Any]],
+    anchor_state: Dict[str, torch.Tensor],
+    snapshots: List[AdapterAnchorSoupSnapshot],
+    best_metrics: Dict[str, float],
+    best_epochs_by_metric: Dict[str, int],
+    normalize_increment: bool,
+    loss_fn: nn.Module,
+    active_stage_parameters: List[str],
+) -> Optional[AdapterAnchorSoupResult]:
+    if not snapshots:
+        print(
+            "adapter_anchor_soup=enabled but no eligible snapshots were captured; "
+            "skipping soup checkpoint",
+            flush=True,
+        )
+        return None
+
+    alpha_grid = _parse_adapter_soup_alpha_grid(args.adapter_soup_alpha_grid)
+    candidates = build_adapter_anchor_soup_candidates(anchor_state, snapshots, alpha_grid)
+    original_state = extract_target_adapter_state(state.model)
+
+    def evaluate_candidate(adapter_state: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        apply_target_adapter_state(state.model, adapter_state)
+        return evaluate_loss(
+            state,
+            val_loader,
+            device,
+            args.target_region,
+            loss_fn,
+            normalize_increment,
+            lambda_analysis=args.lambda_analysis,
+            max_batches=args.max_val_batches,
+        )
+
+    try:
+        result = greedy_select_adapter_anchor_soup(
+            candidates,
+            evaluate_state=evaluate_candidate,
+            selection_rootzone_weight=args.selection_rootzone_weight,
+            rootzone_guard=args.adapter_soup_rootzone_guard,
+        )
+    finally:
+        apply_target_adapter_state(state.model, original_state)
+
+    trace_path = run_manager.get_checkpoint_dir() / "adapter_anchor_soup_trace.csv"
+    write_adapter_anchor_soup_trace(trace_path, result.trace_rows)
+    if not result.accepted_candidates:
+        print(
+            "adapter_anchor_soup=no accepted candidates; wrote trace but did not save soup checkpoint",
+            flush=True,
+        )
+        return result
+
+    apply_target_adapter_state(state.model, result.selected_state)
+    accepted_ids = [candidate.candidate_id for candidate in result.accepted_candidates]
+    soup_epoch = max(candidate.epoch for candidate in result.accepted_candidates)
+    soup_config = {
+        **run_config,
+        "enable_adapter_anchor_soup": True,
+        "adapter_anchor_soup_alpha_grid": alpha_grid,
+        "adapter_anchor_soup_start_epoch": args.adapter_soup_start_epoch,
+        "adapter_anchor_soup_every": args.adapter_soup_every,
+        "adapter_anchor_soup_selection_metric": (
+            f"surface_val_wrmse_plus_{args.selection_rootzone_weight:g}_rootzone_val_wrmse"
+        ),
+        "adapter_anchor_soup_selected_metric_value": result.selected_metric,
+        "adapter_anchor_soup_selected_metrics": result.selected_metrics,
+        "adapter_anchor_soup_accepted_candidates": accepted_ids,
+        "adapter_anchor_soup_accepted_count": len(result.accepted_candidates),
+        "adapter_anchor_soup_rootzone_guard": bool(args.adapter_soup_rootzone_guard),
+        "adapter_anchor_soup_trace_csv": str(trace_path),
+        "adapter_anchor_soup_no_leakage": "target_val_2022_only_no_target_eval_labels",
+        "selected_metric_name": "adapter_anchor_soup_combined_val_wrmse",
+        "selected_metric_value": result.selected_metric,
+        "checkpoint_metric": "adapter_anchor_soup",
+        "stage_trainable_parameter_names": active_stage_parameters,
+    }
+    save_target_adaptation_checkpoint(
+        run_manager.get_checkpoint_dir() / "checkpoint_best_target_val_anchor_soup.pt",
+        state,
+        optimizer.state_dict(),
+        soup_epoch,
+        "best_target_val_anchor_soup",
+        train_history,
+        val_history,
+        result.selected_metric,
+        soup_epoch,
+        soup_config,
+        best_metrics={
+            **best_metrics,
+            "adapter_anchor_soup": result.selected_metric,
+        },
+        best_epochs_by_metric={
+            **best_epochs_by_metric,
+            "adapter_anchor_soup": soup_epoch,
+        },
+    )
+    print(
+        "adapter_anchor_soup=saved "
+        f"accepted={len(result.accepted_candidates)} "
+        f"selection_metric={result.selected_metric:.6f} "
+        f"checkpoint={run_manager.get_checkpoint_dir() / 'checkpoint_best_target_val_anchor_soup.pt'}",
+        flush=True,
+    )
+    return result
+
+
 def run(args: argparse.Namespace) -> Path:
     device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
@@ -947,6 +1304,15 @@ def run(args: argparse.Namespace) -> Path:
         "surface_weight": args.surface_weight,
         "rootzone_weight": args.rootzone_weight,
         "selection_rootzone_weight": args.selection_rootzone_weight,
+        "enable_adapter_anchor_soup": args.enable_adapter_anchor_soup,
+        "adapter_anchor_soup_alpha_grid": _parse_adapter_soup_alpha_grid(args.adapter_soup_alpha_grid),
+        "adapter_anchor_soup_start_epoch": args.adapter_soup_start_epoch,
+        "adapter_anchor_soup_every": args.adapter_soup_every,
+        "adapter_anchor_soup_rootzone_guard": args.adapter_soup_rootzone_guard,
+        "adapter_anchor_soup_selection_metric": (
+            f"surface_val_wrmse_plus_{args.selection_rootzone_weight:g}_rootzone_val_wrmse"
+        ),
+        "adapter_anchor_soup_no_leakage": "target_val_2022_only_no_target_eval_labels",
         "split_manifest_path": args.splits_json,
         "split_manifest_sha256": split_sha,
         "target_train_dates_hash": _dataset_date_hash(train_dataset, "target_train_dates_hash"),
@@ -1006,6 +1372,8 @@ def run(args: argparse.Namespace) -> Path:
     best_epochs_by_metric = {metric: -1 for metric in best_metrics}
     train_history: List[Dict[str, Any]] = []
     val_history: List[Dict[str, Any]] = []
+    adapter_anchor_state = extract_target_adapter_state(state.model)
+    adapter_soup_snapshots: List[AdapterAnchorSoupSnapshot] = []
     if args.resume_from:
         resume_state = restore_target_adaptation_resume(
             resume_from=args.resume_from,
@@ -1047,6 +1415,7 @@ def run(args: argparse.Namespace) -> Path:
     run_manager.save_data_manifest(run_config)
 
     start = time.time()
+    soup_result: Optional[AdapterAnchorSoupResult] = None
     try:
         for epoch in range(start_epoch_idx, args.max_epochs):
             active_stage_parameters = apply_target_adaptation_stage(state.model, epoch, args.stage1_epochs)
@@ -1085,6 +1454,21 @@ def run(args: argparse.Namespace) -> Path:
                 if args.stage1_epochs > 0 and epoch >= args.stage1_epochs
                 else "stage1_global_target"
             )
+            if (
+                args.enable_adapter_anchor_soup
+                and epoch >= args.adapter_soup_start_epoch
+                and (epoch - args.adapter_soup_start_epoch) % args.adapter_soup_every == 0
+            ):
+                adapter_soup_snapshots.append(
+                    AdapterAnchorSoupSnapshot(
+                        epoch=epoch,
+                        state=extract_target_adapter_state(state.model),
+                        metrics=dict(val_metrics),
+                    )
+                )
+                val_row["adapter_anchor_soup_snapshot"] = True
+            else:
+                val_row["adapter_anchor_soup_snapshot"] = False
             print(
                 f"epoch={epoch:03d} target_train_loss={train_metrics['total_loss']:.6f} "
                 f"target_val_loss={val_metrics['target_val_loss']:.6f} "
@@ -1187,12 +1571,50 @@ def run(args: argparse.Namespace) -> Path:
                     best_metrics=best_metrics,
                     best_epochs_by_metric=best_epochs_by_metric,
                 )
+        if args.enable_adapter_anchor_soup:
+            soup_result = _select_and_save_adapter_anchor_soup(
+                state=state,
+                val_loader=val_loader,
+                optimizer=optimizer,
+                device=device,
+                args=args,
+                run_manager=run_manager,
+                run_config=run_config,
+                train_history=train_history,
+                val_history=val_history,
+                anchor_state=adapter_anchor_state,
+                snapshots=adapter_soup_snapshots,
+                best_metrics=best_metrics,
+                best_epochs_by_metric=best_epochs_by_metric,
+                normalize_increment=normalize_increment,
+                loss_fn=loss_fn,
+                active_stage_parameters=active_stage_parameters,
+            )
     finally:
         train_dataset.close()
         val_dataset.close()
 
+    soup_summary = {}
+    if soup_result is not None:
+        soup_summary = {
+            "adapter_anchor_soup_selected_metric_value": (
+                soup_result.selected_metric if math.isfinite(soup_result.selected_metric) else None
+            ),
+            "adapter_anchor_soup_selected_metrics": soup_result.selected_metrics,
+            "adapter_anchor_soup_accepted_candidates": [
+                candidate.candidate_id for candidate in soup_result.accepted_candidates
+            ],
+            "adapter_anchor_soup_accepted_count": len(soup_result.accepted_candidates),
+            "adapter_anchor_soup_trace_csv": str(run_manager.get_checkpoint_dir() / "adapter_anchor_soup_trace.csv"),
+            "adapter_anchor_soup_checkpoint": str(
+                run_manager.get_checkpoint_dir() / "checkpoint_best_target_val_anchor_soup.pt"
+            )
+            if soup_result.accepted_candidates
+            else None,
+        }
     summary = {
         **run_config,
+        **soup_summary,
         "best_target_val_loss": best_val,
         "best_metrics": best_metrics,
         "best_epochs_by_metric": best_epochs_by_metric,

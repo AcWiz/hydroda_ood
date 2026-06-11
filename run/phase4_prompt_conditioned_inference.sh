@@ -16,7 +16,7 @@ TARGET_REGION="${2:-US-R1}"
 SEED="${3:-0}"
 export CUDA_VISIBLE_DEVICES="${4:-${CUDA_VISIBLE_DEVICES:-1}}"
 OUTPUT_DIR_OVERRIDE="${5:-}"
-TARGET_PROMPT_FROM_TARGET_TRAIN="${TARGET_PROMPT_FROM_TARGET_TRAIN:-1}"
+TARGET_CONTEXT_PROMPT="${TARGET_CONTEXT_PROMPT:-1}"
 
 cd "$(dirname "$0")/.."
 
@@ -49,15 +49,15 @@ if [[ -n "$OUTPUT_DIR_OVERRIDE" ]]; then
 else
     OUTPUT_BASE="${RUN_DIR}/results/${CHECKPOINT_NAME}"
 fi
-PROTOCOL_ID="hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_ID="hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 
 echo "============================================"
 echo "Phase 4B Prompt-Conditioned Inference"
 echo "  checkpoint=${CHECKPOINT_PATH}"
-echo "  target_region=${TARGET_REGION}  adaptation_setting=target_full_train  seed=${SEED}"
+echo "  target_region=${TARGET_REGION}  adaptation_setting=zero_shot_context  K=0  seed=${SEED}"
 echo "  protocol=${PROTOCOL_ID}"
 echo "  output_base=${OUTPUT_BASE}"
-echo "  target_prompt_from_target_train=${TARGET_PROMPT_FROM_TARGET_TRAIN}"
+echo "  target_context_prompt=${TARGET_CONTEXT_PROMPT}"
 echo "  device=gpu:${CUDA_VISIBLE_DEVICES}"
 echo "============================================"
 
@@ -69,7 +69,7 @@ EVAL_SOURCE_DIR="${OUTPUT_BASE}/source_test"
 PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \
     --checkpoint "$CHECKPOINT_PATH" \
     --target_region "${TARGET_REGION}" \
-    --adaptation_setting target_full_train \
+    --adaptation_setting zero_shot_context --K 0 \
     --seed "${SEED}" \
     --split_type source_test \
     --predictor_type prompt_conditioned \
@@ -83,13 +83,13 @@ EVAL_TARGET_DIR="${OUTPUT_BASE}/target_eval"
 PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \
     --checkpoint "$CHECKPOINT_PATH" \
     --target_region "${TARGET_REGION}" \
-    --adaptation_setting target_full_train \
+    --adaptation_setting zero_shot_context --K 0 \
     --seed "${SEED}" \
     --split_type target_eval \
     --predictor_type prompt_conditioned \
     --device cuda \
     --output_dir "${EVAL_TARGET_DIR}" \
-    $(if [[ "${TARGET_PROMPT_FROM_TARGET_TRAIN}" == "1" ]]; then echo "--target_prompt_from_target_train"; fi) \
+    $(if [[ "${TARGET_CONTEXT_PROMPT}" == "1" ]]; then echo "--target_context_prompt"; fi) \
     2>&1 | tee "${OUTPUT_BASE}/log_target_eval.txt"
 
 echo ""
@@ -125,7 +125,7 @@ print(f"Run ID:      {run_dir.name}")
 print("Method:      prompt_conditioned_shared_backbone")
 print(f"Checkpoint: {src['checkpoint'] if src else tgt['checkpoint'] if tgt else 'N/A'}")
 print(f"Protocol:    {protocol_id}")
-print(f"Target:      {target_region}  adaptation_setting=target_full_train")
+print(f"Target:      {target_region}  adaptation_setting=zero_shot_context  K=0")
 print("```")
 print()
 

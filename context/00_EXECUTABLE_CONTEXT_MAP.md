@@ -11,9 +11,15 @@
 ```text
 CLAUDE.md
 docs/COAUTHOR_CONTEXT.md
+docs/CODEX_RESEARCH_OPERATING_PROTOCOL.md
 context/00_EXECUTABLE_CONTEXT_MAP.md
 context/01_RESEARCH_CONTRACT.md
 ```
+
+Codex sessions should use `docs/CODEX_RESEARCH_OPERATING_PROTOCOL.md` as the
+operating runbook for start checks, evidence hierarchy, leakage review,
+session summaries, and experiment cards. It does not override the scientific
+contracts listed below.
 
 如果任务涉及数据、split、metric、baseline、region 或 geolocation，还必须读取：
 
@@ -100,10 +106,10 @@ artifacts/geolocation/US_latlon.nc
 checklists/no_leakage_checklist.md
 ```
 
-目标：生成 masks、quality report、target_train/target_eval split manifest。
-主入口脚本应使用 `scripts/data/build_target_train_splits.py`；旧
-`scripts/data/build_kdate_splits.py` 仅作为 legacy alias / secondary
-few-shot ablation 入口。
+目标：生成 masks、quality report、zero/few-shot target_context/target_support/target_eval split manifest。
+主入口脚本应使用 `scripts/data/build_zero_few_shot_splits.py`；旧
+`scripts/data/build_target_train_splits.py` 和 `scripts/data/build_kdate_splits.py`
+仅作为 legacy/internal reproduction 入口。
 
 **Artifacts**（Phase 2A 完成后冻结）：
 
@@ -189,7 +195,7 @@ templates/experiment_card_template.md
 checklists/reproducibility_checklist.md
 ```
 
-目标：paper-ready tables、target_full_train comparisons、legacy K-shot ablation curves、event maps、risk notes。
+目标：paper-ready zero/few-shot K=0/4/12 tables、legacy full-target reproduction notes、event maps、risk notes。
 
 ---
 
@@ -241,8 +247,8 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 
 **不要**将 data/artifact 文件放入 conda environment。
 
-## Protocol V4.3 historical-target-adaptation update
+## Protocol V4.4 zero/few-shot generalization update
 
-- `context/12_PROTOCOL_V4_FINAL_UPDATE.md`：冻结新时间协议 `source_fit=2015-2021`、`source_val=2022`、`target_train=2015-2021`、`target_eval=2023-2025`。
-- `specs/protocol_v4.yaml`：机器可读的 Protocol V4.3 historical-target-adaptation single source of truth。
-- `specs/kdate_protocol.yaml`：legacy K-shot ablation 约束；不再是主协议。
+- `context/01_RESEARCH_CONTRACT.md`：冻结主协议 `source_fit=2015-2021`、`source_val=2022`、`target_context=2015-2021 input-side`、`target_support K∈{0,4,12}`、`target_eval=2023-2025`。
+- `specs/protocol_v4.yaml`：机器可读的 Protocol V4.4 zero/few-shot single source of truth。
+- `specs/kdate_protocol.yaml`：V4.4 zero/few-shot split details and legacy K-date compatibility notes。

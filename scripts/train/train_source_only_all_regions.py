@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Train source-only SmallResUNet backbone on ALL 6 US regions (R1-R6).
+"""Train legacy all-regions SmallResUNet sanity baseline on ALL 6 US regions.
 
 Unlike train_source_only_backbone.py (which trains per-region LORO models),
 this script trains a single model on all 6 US regions (2015-2021) and reports
 per-region source_val (2022) results. This serves as a comparison point for
-the LORO models — it shows how much the held-out region exclusion matters.
+the LORO models; it is not the paper-facing OOD global baseline because it
+includes the held-out target region's 2015-2021 labels.
 
 Usage:
     PYTHONPATH=. python scripts/train/train_source_only_all_regions.py \\
-        --adaptation_setting target_full_train --seed 0 \\
+        --adaptation_setting zero_shot_context --K 0 --seed 0 \\
         --max_epochs 50 --batch_size 4 --lr 3e-4 \\
         --device cuda --amp \\
         --config configs/model_resunet_main.yaml
 
 No-leakage declaration:
-    - Only source_train split used for training
+    - Legacy/all-regions sanity only: includes all US regions, including any target region
+    - Only source_fit split used for training
     - Normalization stats from source_train only
     - No target_eval/target_query labels used in training/normalization/early_stopping
     - No target prompt or target adaptation labels used by this source-only model
@@ -44,10 +46,11 @@ from hydroda.utils.runtime import gather_runtime_info
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 PHASE = "phase4_source_only_all_regions"
+METHOD = "legacy_all_regions_sanity"
 
 # Use US-R1 for split manifest lookup (has the most date coverage).
 # The region mask is overridden post-construction to include all 6 regions.
@@ -58,9 +61,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train source-only backbone on all 6 US regions")
     # Data
     parser.add_argument("--adaptation_setting", type=str, default=None,
-        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+        help="Split adaptation setting (default: zero_shot_context; main examples: zero_shot_context, few_shot_k4, few_shot_k12)")
     parser.add_argument("--K", type=int, default=None,
-        help="Legacy few-shot K value. Ignored for target_full_train.")
+        help="Zero/few-shot K value for the main protocol.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for split (default from YAML or 0)")
     # Model
     parser.add_argument("--width", type=int, default=None,
@@ -171,7 +174,7 @@ def parse_args():
 
     # Set hard-coded fallback defaults for required params not in YAML
     if parser.get_default("adaptation_setting") is None:
-        parser.set_defaults(adaptation_setting="target_full_train")
+        parser.set_defaults(adaptation_setting="zero_shot_context")
     if parser.get_default("seed") is None:
         parser.set_defaults(seed=0)
     if parser.get_default("width") is None:
@@ -275,7 +278,7 @@ def _run_per_region_evaluation(
             split_role="source_val",
             experiment_id=run_manager.get_run_name(),
             protocol_freeze_id=PROTOCOL_FREEZE_ID,
-            method="source_only_all_regions",
+            method=METHOD,
             split_file=SPLITS_JSON,
             mask_file=REGION_MASKS_NC,
         )
@@ -317,7 +320,9 @@ def main():
     device = resolve_device(args.device, require_gpu=args.require_gpu)
 
     print("=" * 60)
-    print("Phase 4: Source-only All-Regions Baseline")
+    print("Phase 4: Legacy All-Regions Source-Only Sanity Baseline")
+    print("  method=legacy_all_regions_sanity")
+    print("  status=legacy_sanity_not_paper_facing_ood_global")
     print(f"  training on ALL 6 US regions (R1-R6)")
     print(f"  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
@@ -364,12 +369,18 @@ def main():
         "wandb_project": args.wandb_project,
         "wandb_entity": args.wandb_entity,
         "wandb_tags": args.wandb_tags,
+        "method": METHOD,
+        "baseline_role": "legacy_all_regions_sanity",
+        "baseline_status": "legacy_sanity_not_paper_facing_ood_global",
+        "training_domain_policy": "US_all_regions_includes_target_region",
+        "train_domains_exclude_target": False,
+        "paper_table_eligible": False,
     }
 
     # Create RunManager with target_region="US-ALL"
     run_manager = RunManager(
         phase=PHASE,
-        method="source_only",
+        method=METHOD,
         target_region="US-ALL",
         config=run_config,
         output_dir=args.output_dir,
@@ -390,6 +401,12 @@ def main():
     run_manager.save_protocol({
         "protocol_freeze_id": PROTOCOL_FREEZE_ID,
         "split_manifest": FREEZE_MANIFEST,
+        "method": METHOD,
+        "baseline_role": "legacy_all_regions_sanity",
+        "baseline_status": "legacy_sanity_not_paper_facing_ood_global",
+        "training_domain_policy": "US_all_regions_includes_target_region",
+        "normalization_source": "source_fit_only",
+        "model_selection_source": "source_val",
     })
 
     # Setup logging

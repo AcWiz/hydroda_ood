@@ -69,3 +69,33 @@ def test_summary_prefers_global_skill_and_keeps_per_sample_diagnostics():
     assert summary["surface"]["skill_median"] == -49.75
     assert summary["surface"]["skill_p05"] < -90.0
     assert summary["surface"]["skill_negative_outlier_count"] == 1
+
+
+def test_global_metric_rows_carry_zero_few_shot_metadata():
+    rows = evaluate_split(
+        TinyDataset(),
+        ForecastBaseline(),
+        split_role="target_eval",
+        experiment_id="tiny",
+        protocol_freeze_id="test",
+        method="forecast_only",
+        split_file="splits.json",
+        mask_file="masks.nc",
+        target_context_dates_hash="context-hash",
+        target_support_dates_hash="support-hash",
+        target_eval_dates_hash="eval-hash",
+        split_manifest_sha256="split-sha",
+    )
+
+    global_rows = [row for row in rows if row["query_date"] == "global"]
+    assert global_rows
+    for row in global_rows:
+        assert row["target_context_dates_hash"] == "context-hash"
+        assert row["target_support_dates_hash"] == "support-hash"
+        assert row["target_eval_dates_hash"] == "eval-hash"
+        assert row["split_manifest_sha256"] == "split-sha"
+        assert row["split_file"] == "splits.json"
+        assert row["mask_file"] == "masks.nc"
+        assert row["country_id"] == "US"
+        assert row["target_region_id"] == "US-R1"
+        assert row["split_role"] == "target_eval"

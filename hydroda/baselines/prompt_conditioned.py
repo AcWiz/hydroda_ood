@@ -8,8 +8,10 @@ No-leakage declaration:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence
 
 import numpy as np
 import torch
@@ -28,6 +30,233 @@ _REGION_TO_IDX = {
     "US-R5": 4,
     "US-R6": 5,
 }
+
+TARGET_CONTEXT_PROMPT_SCHEMA_VERSION = "target_context_prompt_state_v1"
+TARGET_CONTEXT_PROMPT_SOURCE = "target_context_monthly_prompt_prototypes"
+_MAIN_HYPERDA_METHOD_IDS = {
+    "hyperda_zero_shot_context",
+    "hyperda_few_shot_k4",
+    "hyperda_few_shot_k12",
+}
+
+
+def _hyperda_method_id_from_config(config: Dict[str, Any]) -> Optional[str]:
+    method = config.get("method")
+    if method in _MAIN_HYPERDA_METHOD_IDS:
+        return str(method)
+    setting = config.get("adaptation_setting")
+    if setting == "zero_shot_context":
+        return "hyperda_zero_shot_context"
+    if setting == "few_shot_k4":
+        return "hyperda_few_shot_k4"
+    if setting == "few_shot_k12":
+        return "hyperda_few_shot_k12"
+    return None
+
+
+def _coerce_month(value: Any, date_str: str = "") -> int:
+    try:
+        month = int(value)
+    except Exception:
+        month = int(date_str[5:7]) if date_str and len(date_str) >= 7 else 6
+    if month < 1 or month > 12:
+        raise ValueError(f"month must be in 1..12, got {month}")
+    return month
+
+
+def _prompt_tensor(value: Any, device: torch.device | str | None = None) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    tensor = value.detach().clone() if isinstance(value, torch.Tensor) else torch.as_tensor(value, dtype=torch.float32)
+    tensor = tensor.to(dtype=torch.float32)
+    if tensor.ndim == 2 and tensor.shape[0] == 1:
+        tensor = tensor.squeeze(0)
+    if device is not None:
+        tensor = tensor.to(device)
+    return tensor
+
+
+def normalize_target_context_prompt_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a normalized target-context prompt state with CPU tensor prototypes."""
+    if not state:
+        raise ValueError("target_context_prompt_state is empty")
+    schema = state.get("schema_version")
+    if schema != TARGET_CONTEXT_PROMPT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported target_context_prompt_state schema_version={schema!r}; "
+            f"expected {TARGET_CONTEXT_PROMPT_SCHEMA_VERSION!r}"
+        )
+
+    monthly_counts_raw = state.get("monthly_counts", {})
+    monthly_counts = {str(month): int(monthly_counts_raw.get(str(month), 0)) for month in range(1, 13)}
+    monthly_raw = state.get("monthly_prototypes", {})
+    monthly_prototypes = {
+        str(month): _prompt_tensor(monthly_raw.get(str(month)))
+        for month in range(1, 13)
+    }
+    global_prototype = _prompt_tensor(state.get("global_prototype"))
+    if global_prototype is None:
+        raise ValueError("target_context_prompt_state missing global_prototype")
+
+    normalized = dict(state)
+    normalized["schema_version"] = TARGET_CONTEXT_PROMPT_SCHEMA_VERSION
+    normalized["prompt_source"] = TARGET_CONTEXT_PROMPT_SOURCE
+    normalized["label_usage"] = "none"
+    normalized["monthly_counts"] = monthly_counts
+    normalized["monthly_prototypes"] = monthly_prototypes
+    normalized["global_prototype"] = global_prototype.detach().cpu()
+    context_hash = str(normalized.get("context_hash") or normalized.get("context_date_hash") or "")
+    normalized["context_hash"] = context_hash
+    normalized["context_date_hash"] = context_hash
+    normalized["metadata"] = dict(state.get("metadata", {}))
+    normalized["metadata"].setdefault("eval_input_usage", "none_for_prompt_update")
+    normalized["metadata"].setdefault("eval_month_usage", "known_seasonal_phase_selector_only")
+    normalized["metadata"].setdefault("temporal_usage", "month_of_year_seasonal_phase")
+    return normalized
+
+
+def compose_target_context_prompt_from_state(
+    state: Dict[str, Any],
+    months: int | Sequence[int] | torch.Tensor,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Select monthly target-context prompt prototypes, falling back to global."""
+    normalized = normalize_target_context_prompt_state(state)
+    if isinstance(months, torch.Tensor):
+        month_values = [int(v) for v in months.detach().cpu().view(-1).tolist()]
+    elif isinstance(months, int):
+        month_values = [int(months)]
+    else:
+        month_values = [int(v) for v in months]
+
+    prompts = []
+    for month in month_values:
+        month = _coerce_month(month)
+        prompt = normalized["monthly_prototypes"].get(str(month))
+        if prompt is None:
+            prompt = normalized["global_prototype"]
+        prompts.append(prompt.to(device=device) if device is not None else prompt)
+    return torch.stack(prompts, dim=0)
+
+
+def target_context_prompt_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = normalize_target_context_prompt_state(state)
+    metadata = dict(normalized.get("metadata", {}))
+    metadata.update(
+        {
+            "schema_version": normalized["schema_version"],
+            "prompt_source": normalized["prompt_source"],
+            "label_usage": normalized["label_usage"],
+            "context_hash": normalized.get("context_hash", ""),
+            "context_date_hash": normalized.get("context_date_hash", normalized.get("context_hash", "")),
+            "n_samples": int(normalized.get("n_samples", sum(normalized["monthly_counts"].values()))),
+            "date_start": normalized.get("date_start", ""),
+            "date_end": normalized.get("date_end", ""),
+            "monthly_counts": dict(normalized["monthly_counts"]),
+        }
+    )
+    return metadata
+
+
+def _hash_context_dates(dates: Sequence[str], monthly_counts: Dict[str, int]) -> str:
+    payload = json.dumps(
+        {"dates": list(dates), "monthly_counts": monthly_counts},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def build_target_context_prompt_state(
+    samples: Iterable[Dict[str, Any]],
+    prompt_encoder: RegionPromptEncoder,
+    normalize_x: Callable[[torch.Tensor], torch.Tensor],
+    target_region_embedding: torch.Tensor,
+    device: torch.device | str,
+    context_hash: str = "",
+) -> Dict[str, Any]:
+    """Build monthly target-context prompt prototypes from input-side fields only.
+
+    Reads only ``x``, ``month``, and ``date_str`` from each sample. Target
+    labels, increments, residuals, validation scores, and eval inputs are not
+    consulted.
+    """
+    device = torch.device(device)
+    by_month: Dict[int, list[torch.Tensor]] = {month: [] for month in range(1, 13)}
+    dates: list[str] = []
+    all_input_embs: list[torch.Tensor] = []
+    all_temporal_embs: list[torch.Tensor] = []
+
+    target_region_embedding = target_region_embedding.to(device=device, dtype=torch.float32)
+    if target_region_embedding.ndim == 1:
+        target_region_embedding = target_region_embedding.unsqueeze(0)
+    elif target_region_embedding.ndim != 2 or target_region_embedding.shape[0] != 1:
+        raise ValueError("target_region_embedding must have shape [16] or [1,16]")
+
+    with torch.no_grad():
+        for sample in samples:
+            x = torch.from_numpy(np.asarray(sample["x"], dtype=np.float32)).unsqueeze(0).to(device)
+            x_norm = normalize_x(x)
+            input_stats = prompt_encoder._compute_input_stats(x_norm)
+            input_emb = prompt_encoder.input_proj(input_stats)
+
+            date_str = str(sample.get("date_str", ""))
+            month_value = _coerce_month(sample.get("month", None), date_str)
+            month = torch.tensor([month_value], dtype=torch.long, device=device)
+            temporal = prompt_encoder._temporal_encoding(month)
+            temporal_emb = prompt_encoder.temporal_proj(temporal)
+
+            by_month[month_value].append(input_emb.detach())
+            all_input_embs.append(input_emb.detach())
+            all_temporal_embs.append(temporal_emb.detach())
+            if date_str:
+                dates.append(date_str)
+
+        if not all_input_embs:
+            raise ValueError("Cannot build target_context prompt state from zero samples")
+
+        r_emb = target_region_embedding
+        global_i = torch.stack(all_input_embs, dim=0).mean(dim=0)
+        global_t = torch.stack(all_temporal_embs, dim=0).mean(dim=0)
+        global_prompt = prompt_encoder.mlp(torch.cat([r_emb, global_i, global_t], dim=1)).squeeze(0).detach().cpu()
+
+        monthly_prototypes: Dict[str, Optional[torch.Tensor]] = {}
+        monthly_counts: Dict[str, int] = {}
+        for month_value in range(1, 13):
+            month_key = str(month_value)
+            input_embs = by_month[month_value]
+            monthly_counts[month_key] = len(input_embs)
+            if not input_embs:
+                monthly_prototypes[month_key] = None
+                continue
+            month_i = torch.stack(input_embs, dim=0).mean(dim=0)
+            month_tensor = torch.tensor([month_value], dtype=torch.long, device=device)
+            month_t = prompt_encoder.temporal_proj(prompt_encoder._temporal_encoding(month_tensor))
+            prompt = prompt_encoder.mlp(torch.cat([r_emb, month_i, month_t], dim=1)).squeeze(0)
+            monthly_prototypes[month_key] = prompt.detach().cpu()
+
+    return {
+        "schema_version": TARGET_CONTEXT_PROMPT_SCHEMA_VERSION,
+        "prompt_source": TARGET_CONTEXT_PROMPT_SOURCE,
+        "label_usage": "none",
+        "context_hash": context_hash or _hash_context_dates(dates, monthly_counts),
+        "context_date_hash": context_hash or _hash_context_dates(dates, monthly_counts),
+        "date_start": min(dates) if dates else "",
+        "date_end": max(dates) if dates else "",
+        "n_samples": int(sum(monthly_counts.values())),
+        "monthly_counts": monthly_counts,
+        "global_prototype": global_prompt,
+        "monthly_prototypes": monthly_prototypes,
+        "metadata": {
+            "prompt_source": TARGET_CONTEXT_PROMPT_SOURCE,
+            "input_usage": "target_context_normalized_input_summary_only",
+            "region_usage": "target_region_embedding_or_source_mean_fallback",
+            "temporal_usage": "month_of_year_seasonal_phase",
+            "label_usage": "none",
+            "eval_input_usage": "none_for_prompt_update",
+            "eval_month_usage": "known_seasonal_phase_selector_only",
+        },
+    }
 
 
 class PromptConditionedBackbonePredictor:
@@ -97,7 +326,11 @@ class PromptConditionedBackbonePredictor:
         is_hyperda = model_type in {"hyperda_basis_adapter", "hyperda_basis_adapter_target_adapt"}
         is_target_adapt = model_type == "hyperda_basis_adapter_target_adapt"
         if is_target_adapt:
-            self.method_name = "hyperda_target_adapt"
+            self.method_name = (
+                _hyperda_method_id_from_config(saved_config)
+                or _hyperda_method_id_from_config(source_config)
+                or "hyperda_target_adapt"
+            )
         elif is_hyperda:
             self.method_name = "hyperda_basis_adapter_shared"
         else:
@@ -201,7 +434,16 @@ class PromptConditionedBackbonePredictor:
         self.apply_residual_gain = apply_residual_gain
         self._prompt_route_uses_target_fallback = False
         self._fixed_target_prompt: Optional[torch.Tensor] = None
+        self._target_context_prompt_state: Optional[Dict[str, Any]] = None
         self._target_prompt_metadata: Dict[str, Any] = {}
+        state_candidate = checkpoint.get("target_context_prompt_state") or saved_config.get("target_context_prompt_state")
+        if state_candidate:
+            self.load_target_context_prompt_state(state_candidate)
+        elif is_target_adapt and self.method_name in _MAIN_HYPERDA_METHOD_IDS:
+            raise ValueError(
+                "Paper-facing HyperDA zero/few-shot checkpoints must include "
+                "target_context_prompt_state so target_eval inputs cannot update prompts."
+            )
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Apply channel-wise normalization with NaN/Inf guard."""
@@ -273,58 +515,55 @@ class PromptConditionedBackbonePredictor:
 
     @property
     def uses_fixed_target_prompt(self) -> bool:
-        return self._fixed_target_prompt is not None
+        return self._target_context_prompt_state is not None or self._fixed_target_prompt is not None
 
-    def set_target_prompt_from_samples(self, samples: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-        """Build a fixed target prompt from target_train input-side fields only.
+    @property
+    def target_context_prompt_state(self) -> Dict[str, Any]:
+        if self._target_context_prompt_state is None:
+            raise RuntimeError("target_context_prompt_state has not been initialized")
+        return normalize_target_context_prompt_state(self._target_context_prompt_state)
+
+    def _target_region_embedding_for_prompt_state(self) -> torch.Tensor:
+        if self._is_target_unseen:
+            if self._target_region_emb is None:
+                raise RuntimeError("Target region fallback embedding was not initialized")
+            return self._target_region_emb.unsqueeze(0).to(self.device)
+        target_ids = torch.tensor([self._target_region_idx], dtype=torch.long, device=self.device)
+        return self.prompt_encoder.region_embed(target_ids)
+
+    def load_target_context_prompt_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = normalize_target_context_prompt_state(state)
+        self._target_context_prompt_state = normalized
+        self._fixed_target_prompt = normalized["global_prototype"].unsqueeze(0).to(self.device)
+        self._target_prompt_metadata = target_context_prompt_metadata(normalized)
+        return dict(self._target_prompt_metadata)
+
+    def compose_target_context_prompt(self, month: int | Sequence[int] | torch.Tensor) -> torch.Tensor:
+        if self._target_context_prompt_state is None:
+            raise RuntimeError("target_context_prompt_state has not been initialized")
+        return compose_target_context_prompt_from_state(self._target_context_prompt_state, month, device=self.device)
+
+    def set_target_context_prompt_from_samples(self, samples: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build monthly target-context prompt prototypes from input-side fields only.
 
         The prompt summary reads only ``x``, ``month``, and ``date_str``. It
         deliberately does not read target analysis or increment labels.
         """
-        input_embs = []
-        temporal_embs = []
-        dates = []
+        state = build_target_context_prompt_state(
+            samples=samples,
+            prompt_encoder=self.prompt_encoder,
+            normalize_x=self._normalize,
+            target_region_embedding=self._target_region_embedding_for_prompt_state(),
+            device=self.device,
+        )
+        return self.load_target_context_prompt_state(state)
 
-        with torch.no_grad():
-            for sample in samples:
-                x = torch.from_numpy(np.asarray(sample["x"], dtype=np.float32))
-                x = x.unsqueeze(0).to(self.device)
-                x_norm = self._normalize(x)
-                input_stats = self.prompt_encoder._compute_input_stats(x_norm)
-                input_embs.append(self.prompt_encoder.input_proj(input_stats))
-
-                month = torch.tensor([int(sample.get("month", 6))], dtype=torch.long, device=self.device)
-                temporal = self.prompt_encoder._temporal_encoding(month)
-                temporal_embs.append(self.prompt_encoder.temporal_proj(temporal))
-
-                date_str = sample.get("date_str", "")
-                if date_str:
-                    dates.append(str(date_str))
-
-            if not input_embs:
-                raise ValueError("Cannot build target prompt from zero target_train samples")
-
-            i_emb = torch.stack(input_embs, dim=0).mean(dim=0)
-            t_emb = torch.stack(temporal_embs, dim=0).mean(dim=0)
-            if self._is_target_unseen:
-                if self._target_region_emb is None:
-                    raise RuntimeError("Target region fallback embedding was not initialized")
-                r_emb = self._target_region_emb.unsqueeze(0).to(self.device)
-            else:
-                target_ids = torch.tensor([self._target_region_idx], dtype=torch.long, device=self.device)
-                r_emb = self.prompt_encoder.region_embed(target_ids)
-
-            combined = torch.cat([r_emb, i_emb, t_emb], dim=1)
-            self._fixed_target_prompt = self.prompt_encoder.mlp(combined).detach()
-
-        self._target_prompt_metadata = {
-            "prompt_source": "target_train_input_side_summary",
-            "n_samples": len(input_embs),
-            "date_start": min(dates) if dates else "",
-            "date_end": max(dates) if dates else "",
-            "label_usage": "none",
-        }
-        return dict(self._target_prompt_metadata)
+    def set_target_prompt_from_samples(self, samples: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+        """Legacy alias for older target_train prompt call sites."""
+        metadata = self.set_target_context_prompt_from_samples(samples)
+        metadata["legacy_alias"] = "set_target_prompt_from_samples"
+        self._target_prompt_metadata = dict(metadata)
+        return metadata
 
     def predict(self, sample: Dict[str, Any]) -> Dict[str, np.ndarray]:
         """Predict DA increments and analysis for a single sample with prompt conditioning.
@@ -352,7 +591,13 @@ class PromptConditionedBackbonePredictor:
         month_val = int(sample.get("month", 6))
 
         with torch.no_grad():
-            if use_target_fallback and self._fixed_target_prompt is not None:
+            if use_target_fallback and self._target_context_prompt_state is not None:
+                z = compose_target_context_prompt_from_state(
+                    self._target_context_prompt_state,
+                    month_val,
+                    device=x_norm.device,
+                )
+            elif use_target_fallback and self._fixed_target_prompt is not None:
                 z = self._fixed_target_prompt.to(x_norm.device)
             else:
                 try:
@@ -377,7 +622,8 @@ class PromptConditionedBackbonePredictor:
             pred_inc_s = pred_inc_s * self._inc_std[0] + self._inc_mean[0]
             pred_inc_r = pred_inc_r * self._inc_std[1] + self._inc_mean[1]
 
-        # Apply residual gain calibration if available
+        # Apply residual gain before returning so public outputs satisfy
+        # pred_analysis = forecast + pred_increment.
         if self.apply_residual_gain:
             alpha_s = self.alpha_surface
             alpha_r = self.alpha_rootzone
@@ -385,8 +631,11 @@ class PromptConditionedBackbonePredictor:
             alpha_s = 1.0
             alpha_r = 1.0
 
-        pred_analysis_surface = (forecast_surface + alpha_s * pred_inc_s).astype(np.float32)
-        pred_analysis_rootzone = (forecast_rootzone + alpha_r * pred_inc_r).astype(np.float32)
+        pred_inc_s = (alpha_s * pred_inc_s).astype(np.float32)
+        pred_inc_r = (alpha_r * pred_inc_r).astype(np.float32)
+
+        pred_analysis_surface = (forecast_surface + pred_inc_s).astype(np.float32)
+        pred_analysis_rootzone = (forecast_rootzone + pred_inc_r).astype(np.float32)
 
         return {
             "pred_increment_surface": pred_inc_s,

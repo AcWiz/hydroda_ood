@@ -7,7 +7,7 @@
 #   bash run/phase4_prompt_conditioned.sh US-R2 0 1   # custom region, seed, GPU
 #
 # Prerequisites:
-#   - Splits: artifacts/splits/US_loro_target_train_splits.json
+#   - Splits: artifacts/splits/US_loro_zero_few_shot_splits.json
 #   - DA.nc: /fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc
 #   - Region masks: artifacts/regions/US_region_masks.nc
 
@@ -23,16 +23,16 @@ echo "============================================"
 echo "Phase 4 Prompt-Conditioned Shared Backbone"
 echo "  target_region=${TARGET_REGION}"
 echo "  seed=${SEED}"
-echo "  adaptation_setting=target_full_train"
+echo "  adaptation_setting=zero_shot_context  K=0"
 echo "  source_fit=2015-2021 source_val=2022"
-echo "  split_artifact=artifacts/splits/US_loro_target_train_splits.json"
+echo "  split_artifact=artifacts/splits/US_loro_zero_few_shot_splits.json"
 echo "  width=32 prompt_dim=64 lr=3e-4 batch_size=16 accum_steps=4"
 echo "  lat_weighted_loss=True zero_init=True inc_norm=True amp=True"
 echo "============================================"
 
 PYTHONPATH=. python scripts/train/train_prompt_conditioned_shared.py \
     --target_region "${TARGET_REGION}" \
-    --adaptation_setting target_full_train \
+    --adaptation_setting zero_shot_context --K 0 \
     --seed "${SEED}" \
     --device cuda \
     --amp \

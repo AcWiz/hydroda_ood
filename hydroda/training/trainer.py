@@ -147,7 +147,7 @@ class Trainer:
         device: str = "cuda",
         checkpoint_dir: str = "artifacts/checkpoints/phase4_source_only",
         experiment_id: str = "phase4_source_only",
-        protocol_freeze_id: str = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025",
+        protocol_freeze_id: str = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025",
         split_manifest_path: str = "artifacts/protocol/US_region_split_freeze_manifest.json",
         grad_clip: Optional[float] = None,
         model_width: int = 32,
@@ -1046,7 +1046,7 @@ class Trainer:
             "normalization_source": "source_fit_only",
             "early_stopping_source": "source_val_only" if has_source_val else "train_loss_only",
             "model_selection_source": "source_val_only" if has_source_val else "best_train_loss",
-            "target_adaptation_source": "target_full_train_2022_for_target_specific_operator_only",
+            "target_adaptation_source": "main_zero_few_shot_target_support_only",
             "target_eval_usage": "eval_only_no_early_stopping",
             "target_query_usage": "eval_only_no_early_stopping",  # deprecated alias
             "leakage_guard_status": "pass",

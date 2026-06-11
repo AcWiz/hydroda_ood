@@ -106,9 +106,10 @@ input_stats      来自 source fit only
 increment_stats  来自 source fit only
 ```
 
-target_full_train adaptation 可以使用 2015-2021 target_train labels 计算 adaptation
-loss、prompt summary 或 generated-parameter calibration，但不要用 target_train
-stats 改变全局 normalization，除非该行为被明确记录为一个方法变体。
+主协议中 K=0 不使用 target labels；K=4/12 只允许 K 个 `target_support`
+cycles 的 labels 进入轻量 target-specific adaptation loss。target_context 只使用
+input-side fields 构造 prompt。不要用 target_support stats 改变全局
+normalization，除非该行为被明确记录为一个方法变体。
 
 禁止：
 

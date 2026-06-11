@@ -1,4 +1,9 @@
-# phase2_protocol_v4_final_update.md — Protocol V4.2 full-target-train update
+# phase2_protocol_v4_final_update.md — Superseded Protocol V4.2 full-target-train update
+
+Status: superseded by Protocol V4.4 zero/few-shot generalization. Current
+main protocol is documented in `specs/protocol_v4.yaml`,
+`context/01_RESEARCH_CONTRACT.md`, and `context/12_PROTOCOL_V4_FINAL_UPDATE.md`.
+This file is retained only as historical migration context.
 
 ## 目标
 
@@ -55,6 +60,6 @@ adaptation_setting = target_full_train
 2. `ProtocolConfig().role_for_date("2021-06-01") == "source_fit"`。
 3. `ProtocolConfig().role_for_date("2022-06-01") == "source_val"`。
 4. `ProtocolConfig().role_for_date("2023-06-01") == "target_eval"`。
-5. split builder 默认生成 `adaptation_setting=target_full_train`。
+5. split builder 默认生成 `adaptation_setting ∈ {zero_shot_context, few_shot_k4, few_shot_k12}`。
 6. target_eval labels 不能用于 training、prompt、normalization、early stopping、model selection 或 hyperparameter selection。
-7. metrics_long.csv 包含 `adaptation_setting`、`target_train_dates_hash`、`target_eval_dates_hash`、`split_manifest_sha256`。
+7. metrics_long.csv 包含 `adaptation_setting`、`target_context_dates_hash`、`target_support_dates_hash`、`target_eval_dates_hash`、`split_manifest_sha256`。

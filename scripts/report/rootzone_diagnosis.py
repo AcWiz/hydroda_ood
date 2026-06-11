@@ -8,7 +8,7 @@ and rootzone skill denominator sensitivity analysis.
 Usage:
     PYTHONPATH=. python scripts/report/rootzone_diagnosis.py \\
         --checkpoint artifacts/checkpoints/phase4_source_only/best.pt \\
-        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --target_region US-R1 --adaptation_setting zero_shot_context --K 0 --seed 0 \\
         --output reports/rootzone_diagnosis_US-R1.md
 
 No-leakage declaration:
@@ -39,7 +39,7 @@ from hydroda.metrics.skill import (
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 
 
@@ -333,7 +333,7 @@ def generate_report(
     K: int | None,
     seed: int,
     output_path: str,
-    adaptation_setting: str = "target_full_train",
+    adaptation_setting: str = "zero_shot_context",
     device: str = "cuda",
 ) -> str:
     """Generate rootzone diagnosis markdown report."""
@@ -495,10 +495,10 @@ def main():
     parser = argparse.ArgumentParser(description="Generate rootzone diagnosis report")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint (.pt)")
     parser.add_argument("--target_region", type=str, default="US-R1")
-    parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
-        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+    parser.add_argument("--adaptation_setting", type=str, default="zero_shot_context",
+        help="Split adaptation setting (default: zero_shot_context; main examples: zero_shot_context, few_shot_k4, few_shot_k12)")
     parser.add_argument("--K", type=int, default=None,
-        help="Legacy few-shot K value. Ignored for target_full_train.")
+        help="Zero/few-shot K value for the main protocol.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=str, default=None,
         help="Output markdown path (default: reports/rootzone_diagnosis_{target_region}.md)")

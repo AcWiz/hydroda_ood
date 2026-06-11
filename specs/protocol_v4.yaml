@@ -1,17 +1,18 @@
 protocol_name: HydroDA-OOD-HyperDA-V4
-protocol_version: v4.3-historical-target-adaptation
-protocol_freeze_id: hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025
+protocol_version: v4.4-zero-few-shot-generalization
+protocol_freeze_id: hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025
 objective: neural_land_DA_increment_emulation
 not_objective:
   - generic_soil_moisture_prediction
   - true_soil_moisture_estimation
 
-main_change_from_v4_2: >-
-  Target-domain generalization is no longer a few-shot/K-shot support protocol.
-  After source/HyperDA training, methods may use the complete held-out target
-  historical training period (2015-2021) to build a target-specific operator,
-  prompt, adapter, or generated parameter set. The year 2022 is validation;
-  final metrics remain restricted to the held-out target evaluation period.
+main_change_from_v4_3: >-
+  Target-domain generalization is now zero/few-shot. Target 2015-2021
+  input-side data build a context prompt; K in {0,4,12} controls the labeled
+  target support budget. Target validation is unused in the main protocol.
+  Source validation year 2022 remains the preregistered checkpoint and
+  hyperparameter selection source, and final metrics remain restricted to
+  target_eval 2023-2025.
 
 periods:
   # Backward-compatible alias used by some existing scripts.
@@ -47,25 +48,34 @@ periods:
       - target_adaptation_fit
       - final_evaluation
       - normalization
-  target_train:
+  target_context:
     start: '2015-01-01'
     end: '2021-12-31'
-    aliases: [target_adapt, target_context, target_support_legacy]
+    aliases: [target_train_legacy]
     domain_constraint: held_out_target_continent_only
     allowed_usage:
-      - target_specific_operator_construction
-      - target_prompt_summary
-      - adapter_tuning
-      - lora_tuning
-      - hyperda_calibration
-      - hyperda_refinement
-      - generated_parameter_conditioning
+      - target_prompt_summary_input_side_only
+      - generated_parameter_conditioning_input_side_only
+    forbidden_usage:
+      - target_label_training
+      - target_label_gain_calibration
+      - checkpoint_selection
+      - early_stopping
+      - final_evaluation
+  target_support:
+    start: '2015-01-01'
+    end: '2021-12-31'
+    domain_constraint: held_out_target_continent_only
+    K_values: [0, 4, 12]
+    allowed_usage:
+      - few_shot_lightweight_target_variable_tuning
     forbidden_usage:
       - source_backbone_training
       - source_operator_episode_bank_training
       - global_normalization
-      - checkpoint_selection_unless_preregistered
-      - hyperparameter_selection_unless_preregistered
+      - checkpoint_selection
+      - early_stopping
+      - hyperparameter_selection
       - architecture_selection
       - final_evaluation
   target_val:
@@ -73,12 +83,14 @@ periods:
     end: '2022-12-31'
     domain_constraint: held_out_target_continent_only
     allowed_usage:
-      - preregistered_target_adaptation_validation
-      - adaptation_step_selection_if_declared
+      - unused_in_main_protocol
     forbidden_usage:
       - source_backbone_training
       - source_operator_episode_bank_training
       - global_normalization
+      - target_side_selection
+      - early_stopping
+      - residual_gain_calibration
       - final_evaluation
   target_eval:
     start: '2023-01-01'
@@ -101,27 +113,47 @@ periods:
       - region_definition
 
 main_adaptation_settings:
-  - target_full_train
+  - zero_shot_context
+  - few_shot_k4
+  - few_shot_k12
+
+main_K_values: [0, 4, 12]
 
 adaptation_setting_definitions:
-  target_full_train:
-    target_label_budget: all_labeled_target_DA_cycles_in_target_train_period
-    target_period: target_train
-    support_subset: none
-    notes: >-
-      Uses all available target training samples from 2015-2021 for
-      target-specific fast generalization/adaptation, then validates on 2022
-      if preregistered and evaluates only on 2023-2025.
+  zero_shot_context:
+    K: 0
+    target_label_budget: none
+    target_context: target_context_input_side_only
+  few_shot_k4:
+    K: 4
+    target_label_budget: up_to_4_labeled_target_DA_cycles
+    support_sampling: one_valid_cycle_per_season_from_2015_2021
+  few_shot_k12:
+    K: 12
+    target_label_budget: up_to_12_labeled_target_DA_cycles
+    support_sampling: one_valid_cycle_per_month_from_2015_2021
 
-legacy_few_shot_ablation:
-  status: secondary_ablation_not_main_protocol
+legacy_full_target_train:
+  status: legacy_internal_explicit_opt_in_only
+  setting: target_full_train
+  target_label_budget: all_labeled_target_DA_cycles_in_target_train_period
+  notes: >-
+    Retained for historical reproduction only; not a default script,
+    main-table setting, or paper narrative.
+
+zero_few_shot_sampling:
   K_values: [0, 4, 12]
-  K_definition: number_of_labeled_target_DA_analysis_cycles_from_target_train_2015_2021
+  context_period: 2015-2021
+  support_period: 2015-2021
+  target_eval_period: 2023-2025
   support_sampling:
-    support_period: 2015-2021
     K0: no_target_analysis_labels_input_side_prompt_only
-    K4: one_valid_cycle_per_season_from_target_train_period
-    K12: one_valid_cycle_per_month_from_target_train_period
+    K4: one_valid_cycle_per_season_from_target_context_period
+    K12: one_valid_cycle_per_month_from_target_context_period
+    notes: >-
+      Selection may inspect calendar, time availability, and base_valid
+      coverage only; never analysis increments, model errors, target_eval
+      labels, or target_eval statistics.
 
 source_training_policy:
   main: use_source_fit_2015_2021_and_source_val_2022
@@ -159,20 +191,31 @@ required_run_metadata:
   - split_manifest_path
   - split_manifest_sha256
   - adaptation_setting
-  - target_train_dates_hash
+  - adapt_recipe
+  - anchor_alpha
+  - target_context_dates_hash
+  - target_context_prompt_state
+  - target_support_dates_hash
+  - target_support_dates
   - target_eval_dates_hash
-  - target_val_dates_hash_if_used
+  - target_val_usage
   - method
   - trainable_parameter_count
   - adaptation_steps
+  - lr
+  - support_final_loss
+  - support_loss_delta
+  - target_parameter_l2_drift
   - normalization_source
   - model_selection_source
 
 paper_protocol_note: >-
   For each held-out target continent, train source-domain models on source
   years 2015-2021, select checkpoints and hyperparameters only on source-domain
-  year 2022, construct target-specific operators using the full held-out target
-  historical training period in 2015-2021, optionally validate target adaptation
-  on preregistered target year 2022, and report final metrics exclusively on
-  target years 2023-2025. Legacy K=0/4/12 support-cycle experiments are reported only as
-  secondary few-shot ablations.
+  year 2022, construct target-context monthly prompt prototypes from held-out
+  target 2015-2021 input-side context, optionally tune lightweight target
+  variables on K labeled support cycles for K in {4,12} while using the same
+  monthly context prototype policy, and report final metrics exclusively on
+  target years 2023-2025. Target validation and full-target-train adaptation
+  are unused in the main protocol. Month is a deployment-known month-of-year
+  seasonal phase selector, not an absolute date label or model-selection signal.

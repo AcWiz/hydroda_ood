@@ -33,6 +33,7 @@ _SPLIT_TYPE_TO_DATES_KEY = {
     "source_test": "source_test_dates",
     "target_train": "target_train_dates",
     "target_adaptation": "target_adaptation_dates",
+    "target_context": "target_context_dates",
     "target_val": "target_val_dates",
     "target_eval": "target_eval_dates",
     # Deprecated aliases retained for old K-date artifacts.
@@ -41,6 +42,7 @@ _SPLIT_TYPE_TO_DATES_KEY = {
 }
 
 _DATES_KEY_FALLBACKS = {
+    "target_context_dates": "target_train_dates",
     "target_train_dates": "target_support_dates",
     "target_adaptation_dates": "target_train_dates",
     # Existing frozen US manifests predate explicit target_val_dates. Calendar
@@ -164,7 +166,7 @@ class HydroDADataset(Dataset):
             self.split_manifest_sha256 = ""
         self.target_region = target_region
         self.split_type = split_type
-        self.K = int(K) if K is not None else None
+        self.K = int(K) if K is not None else (None if adaptation_setting == "target_full_train" else 0)
         self.seed = int(seed)
         self.adaptation_setting = adaptation_setting
         self.input_var = input_var
@@ -180,7 +182,7 @@ class HydroDADataset(Dataset):
         if self.adaptation_setting is None:
             self.adaptation_setting = self._split_entry.get(
                 "adaptation_setting",
-                "target_full_train" if self.K is None else f"legacy_few_shot_k{self.K}",
+                "zero_shot_context" if self.K in (None, 0) else f"few_shot_k{self.K}",
             )
         self._active_region_ids = (
             [r for r in _ALL_US_REGIONS if r != target_region]
@@ -270,9 +272,13 @@ class HydroDADataset(Dataset):
                     return entry
                 continue
             if self.K is None:
+                if entry.get("adaptation_setting") == "zero_shot_context":
+                    return entry
                 if entry.get("K") is None and entry.get("adaptation_setting", "target_full_train") == "target_full_train":
                     return entry
                 continue
+            if int(self.K) == 0 and entry.get("adaptation_setting") == "zero_shot_context":
+                return entry
             entry_k = entry.get("K", entry.get("K_legacy"))
             if entry_k is not None and int(entry_k) == self.K:
                 return entry
@@ -301,6 +307,8 @@ class HydroDADataset(Dataset):
         guard = LeakageGuard(ProtocolConfig())
         if self.split_type in ("target_query", "target_eval"):
             guard.check_query_evaluation_only(dates)
+        elif self.split_type == "target_context":
+            guard.protocol.assert_dates_within(dates, ["target_context"], "target_context_prompt")
         elif self.split_type in ("target_support", "target_train", "target_adaptation"):
             guard.check_target_adaptation_scope(
                 dates,
@@ -318,6 +326,56 @@ class HydroDADataset(Dataset):
 
     def __len__(self) -> int:
         return len(self._time_indices)
+
+    def _base_sample_metadata(self, time_index: int, date_str: str) -> Dict[str, Any]:
+        month, season = _month_and_season(date_str)
+        if self.K is None:
+            split_id = f"{self.target_region}-{self.adaptation_setting}-S{self.seed}-{self.split_type}"
+        else:
+            split_id = f"{self.target_region}-K{self.K}-S{self.seed}-{self.split_type}"
+        return {
+            "date_str": date_str,
+            "month": month,
+            "season": season,
+            "time_index": int(time_index),
+            "country_id": "US",
+            "target_region_id": self.target_region,
+            "active_region_ids": list(self._active_region_ids),
+            "split_role": self.split_type,
+            "regime_id": self.regime_id,
+            "split_id": split_id,
+            "K": self.K,
+            "K_legacy": self.K if str(self.adaptation_setting).startswith("legacy_few_shot") else None,
+            "adaptation_setting": self.adaptation_setting,
+            "target_context_dates_hash": self._split_entry.get("target_context_dates_hash", self._split_entry.get("target_train_dates_hash", "")),
+            "target_support_dates_hash": self._split_entry.get("target_support_dates_hash", self._split_entry.get("support_dates_hash", "")),
+            "target_train_dates_hash": self._split_entry.get("target_train_dates_hash", self._split_entry.get("support_dates_hash", "")),
+            "target_eval_dates_hash": self._split_entry.get("target_eval_dates_hash", self._split_entry.get("target_query_dates_hash", "")),
+            "support_dates_hash": self._split_entry.get("support_dates_hash", ""),
+            "split_manifest_sha256": self._split_entry.get("split_manifest_sha256", "") or self.split_manifest_sha256,
+            "seed": self.seed,
+        }
+
+    def get_input_side_sample(self, idx: int) -> Dict[str, Any]:
+        """Return fields allowed for target_context prompt construction only."""
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} out of range for dataset of size {len(self)}")
+        time_index = self._time_indices[idx]
+        input_arr = self._da_ds[self.input_var].isel(time=time_index).values.astype(np.float32)
+        date_str = self._date_str_map.get(time_index, "")
+        sample = {
+            "x": input_arr,
+            "forecast_surface": input_arr[self.forecast_surface_channel],
+            "forecast_rootzone": input_arr[self.forecast_rootzone_channel],
+            "base_valid_mask": (input_arr[self.base_valid_mask_channel] > 0.5).astype(np.float32),
+            "region_mask_integer": self._region_mask_int,
+            "active_region_mask": self._active_region_mask,
+            "region_mask": (self._active_region_mask > 0.5).astype(np.float32),
+            "latitude": self._latitude,
+            "latitude_weight": self._latitude_weight,
+        }
+        sample.update(self._base_sample_metadata(time_index, date_str))
+        return sample
 
     def _resolve_sample_region_id(self, label_valid_mask: np.ndarray) -> str:
         """Resolve the dominant region ID for a sample.
@@ -383,13 +441,7 @@ class HydroDADataset(Dataset):
         sample_region_id = self._resolve_sample_region_id(metric_mask)
 
         date_str = self._date_str_map.get(time_index, "")
-        month, season = _month_and_season(date_str)
-        if self.K is None:
-            split_id = f"{self.target_region}-{self.adaptation_setting}-S{self.seed}-{self.split_type}"
-        else:
-            split_id = f"{self.target_region}-K{self.K}-S{self.seed}-{self.split_type}"
-
-        return {
+        sample = {
             "x": input_arr,
             "forecast_surface": forecast_surface,
             "forecast_rootzone": forecast_rootzone,
@@ -406,26 +458,10 @@ class HydroDADataset(Dataset):
             "metric_mask": metric_mask,
             "latitude": self._latitude,
             "latitude_weight": self._latitude_weight,
-            "date_str": date_str,
-            "month": month,
-            "season": season,
-            "time_index": int(time_index),
-            "country_id": "US",
-            "target_region_id": self.target_region,
-            "active_region_ids": list(self._active_region_ids),
-            "split_role": self.split_type,
-            "regime_id": self.regime_id,
-            "split_id": split_id,
             "sample_region_id": sample_region_id,
-            "K": self.K,
-            "K_legacy": self.K if str(self.adaptation_setting).startswith("legacy_few_shot") else None,
-            "adaptation_setting": self.adaptation_setting,
-            "target_train_dates_hash": self._split_entry.get("target_train_dates_hash", self._split_entry.get("support_dates_hash", "")),
-            "target_eval_dates_hash": self._split_entry.get("target_eval_dates_hash", self._split_entry.get("target_query_dates_hash", "")),
-            "support_dates_hash": self._split_entry.get("support_dates_hash", ""),
-            "split_manifest_sha256": self._split_entry.get("split_manifest_sha256", "") or self.split_manifest_sha256,
-            "seed": self.seed,
         }
+        sample.update(self._base_sample_metadata(time_index, date_str))
+        return sample
 
     def set_active_region(self, region_id: str) -> None:
         """Restrict active region mask to a single region's pixels."""
@@ -487,7 +523,7 @@ class TensorCacheHydroDADataset(Dataset):
             self.split_manifest_sha256 = ""
         self.target_region = target_region
         self.split_type = split_type
-        self.K = int(K) if K is not None else None
+        self.K = int(K) if K is not None else (None if adaptation_setting == "target_full_train" else 0)
         self.seed = int(seed)
         self.adaptation_setting = adaptation_setting
         self.input_var = input_var
@@ -508,7 +544,7 @@ class TensorCacheHydroDADataset(Dataset):
         if self.adaptation_setting is None:
             self.adaptation_setting = self._split_entry.get(
                 "adaptation_setting",
-                "target_full_train" if self.K is None else f"legacy_few_shot_k{self.K}",
+                "zero_shot_context" if self.K in (None, 0) else f"few_shot_k{self.K}",
             )
 
         date_key = _SPLIT_TYPE_TO_DATES_KEY[split_type]
@@ -649,6 +685,27 @@ class TensorCacheHydroDADataset(Dataset):
                 self._year_cache.popitem(last=False)
         return tensors
 
+    def _load_year_input_tensor(self, year: int) -> torch.Tensor:
+        cached = self._year_cache.get(year)
+        if cached is not None and "input" in cached:
+            self._year_cache.move_to_end(year)
+            return cached["input"]
+        year_dir = self.region_dir / "da_full" / str(year)
+        input_path = year_dir / "input.pt"
+        if not input_path.exists():
+            raise FileNotFoundError(f"tensor cache input file missing for {self.active_region_id} {year}: {input_path}")
+        tensor = self._load_tensor(input_path)
+        meta = self._year_metadata[year]
+        time_steps = int(meta["time_steps"])
+        crop_h, crop_w = [int(x) for x in meta["crop_shape"]]
+        expected = (time_steps, 12, crop_h, crop_w)
+        if tuple(tensor.shape) != expected:
+            raise ValueError(
+                f"tensor cache shape mismatch for {self.active_region_id} {year} input: "
+                f"expected {expected}, got {tuple(tensor.shape)}"
+            )
+        return tensor
+
     def _validate_year_tensor_shapes(self, year: int, tensors: Dict[str, torch.Tensor]) -> None:
         meta = self._year_metadata[year]
         time_steps = int(meta["time_steps"])
@@ -668,6 +725,32 @@ class TensorCacheHydroDADataset(Dataset):
 
     def __len__(self) -> int:
         return len(self._sample_locations)
+
+    def get_input_side_sample(self, idx: int) -> Dict[str, Any]:
+        """Return fields allowed for target_context prompt construction only."""
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} out of range for dataset of size {len(self)}")
+        time_index = self._time_indices[idx]
+        location = self._sample_locations[idx]
+        input_arr = self._load_year_input_tensor(location["year"])[location["local_index"]].numpy().astype(
+            np.float32,
+            copy=False,
+        )
+        date_str = self._date_str_map.get(time_index, "")
+        sample = {
+            "x": input_arr,
+            "forecast_surface": input_arr[self.forecast_surface_channel],
+            "forecast_rootzone": input_arr[self.forecast_rootzone_channel],
+            "base_valid_mask": (input_arr[self.base_valid_mask_channel] > 0.5).astype(np.float32),
+            "region_mask_integer": self._region_mask_int,
+            "active_region_mask": self._active_region_mask,
+            "region_mask": (self._active_region_mask > 0.5).astype(np.float32),
+            "latitude": self._latitude,
+            "latitude_weight": self._latitude_weight,
+            "sample_region_id": self.active_region_id,
+        }
+        sample.update(HydroDADataset._base_sample_metadata(self, time_index, date_str))
+        return sample
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         if idx < 0 or idx >= len(self):
@@ -738,6 +821,8 @@ class TensorCacheHydroDADataset(Dataset):
             "K": self.K,
             "K_legacy": self.K if str(self.adaptation_setting).startswith("legacy_few_shot") else None,
             "adaptation_setting": self.adaptation_setting,
+            "target_context_dates_hash": self._split_entry.get("target_context_dates_hash", self._split_entry.get("target_train_dates_hash", "")),
+            "target_support_dates_hash": self._split_entry.get("target_support_dates_hash", self._split_entry.get("support_dates_hash", "")),
             "target_train_dates_hash": self._split_entry.get("target_train_dates_hash", self._split_entry.get("support_dates_hash", "")),
             "target_eval_dates_hash": self._split_entry.get("target_eval_dates_hash", self._split_entry.get("target_query_dates_hash", "")),
             "support_dates_hash": self._split_entry.get("support_dates_hash", ""),

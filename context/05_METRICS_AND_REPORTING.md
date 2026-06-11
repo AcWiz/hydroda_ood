@@ -43,14 +43,14 @@ Dead-zone sign accuracy：当 `abs(true_increment) < epsilon` 时不计入 sign 
 
 ## 3. Adaptation metrics
 
-主协议按 `adaptation_setting` 报告 target_full_train 结果，并与 source-only /
-prompt-conditioned shared baseline 比较。旧 K-date adaptation 指标只用于 secondary
-few-shot ablation：
+主协议按 `adaptation_setting` / K=0/4/12 报告 zero/few-shot 结果，并与
+source-only / prompt-conditioned shared baseline 比较。Full-target 结果只用于
+legacy/internal reproduction：
 
 ```text
 AdaptationGain(K) = Metric(adapted, K) - Metric(source_only, K=0)
 CE12 = legacy calibration efficiency from K=0 to K=12
-AUC-K = legacy area under K-performance curve for K in {0,4,12,24}
+AUC-K = area under K-performance curve for K in {0,4,12}
 ```
 
 具体方向由 metric 决定。对于 skill 越大越好；对于 RMSE 越小越好。
@@ -77,9 +77,9 @@ Phase 3 起必须逐步产生：
 
 ```text
 Table 1: Forecast-only and source-only sanity by held-out target
-Table 2: Main target_full_train comparison across source-only, prompt-conditioned, adapter/LoRA, HyperDA
-Table 3: Adaptation mechanism ablation under target_full_train
-Table 4: Legacy K-shot ablation curves (secondary)
+Table 2: Main zero/few-shot comparison across source-only, prompt-conditioned, HyperDA K=0/4/12
+Table 3: Lightweight adaptation mechanism ablation under K=4/12
+Table 4: Legacy full-target reproduction (secondary/internal)
 Table 5: Event/high-update analysis after final model selection
 ```
 

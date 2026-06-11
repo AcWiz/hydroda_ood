@@ -451,6 +451,138 @@ def test_target_train_fixed_prompt_uses_only_input_side_fields():
         assert predictor.uses_fixed_target_prompt is True
 
 
+def test_target_context_prompt_state_builds_monthly_prototypes_with_global_fallback():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = Path(tmpdir) / "prompt.pt"
+        _make_prompt_predictor_checkpoint(ckpt_path)
+
+        from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+        predictor = PromptConditionedBackbonePredictor(
+            checkpoint_path=str(ckpt_path),
+            device="cpu",
+            target_region="US-R1",
+        )
+        samples = [
+            {
+                "x": np.full((12, 8, 8), fill_value=float(month), dtype=np.float32),
+                "month": month,
+                "date_str": f"2019-{month:02d}-01",
+            }
+            for month in (1, 3)
+        ]
+
+        metadata = predictor.set_target_context_prompt_from_samples(samples)
+        state = predictor.target_context_prompt_state
+
+        assert metadata["prompt_source"] == "target_context_monthly_prompt_prototypes"
+        assert state["label_usage"] == "none"
+        assert state["monthly_counts"]["1"] == 1
+        assert state["monthly_counts"]["3"] == 1
+        assert state["monthly_counts"]["2"] == 0
+        assert state["monthly_prototypes"]["1"] is not None
+        assert state["monthly_prototypes"]["2"] is None
+        assert predictor.compose_target_context_prompt(1).shape == predictor.compose_target_context_prompt(2).shape
+        assert predictor.compose_target_context_prompt(2).shape == predictor.compose_target_context_prompt(12).shape
+
+
+def test_checkpoint_prompt_state_is_used_for_target_eval_without_eval_input_stats(tmp_path):
+    from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+    base_ckpt = tmp_path / "prompt_base.pt"
+    _make_prompt_predictor_checkpoint(base_ckpt)
+    base = PromptConditionedBackbonePredictor(
+        checkpoint_path=str(base_ckpt),
+        device="cpu",
+        target_region="US-R1",
+    )
+    base.set_target_context_prompt_from_samples(
+        [
+            {
+                "x": np.full((12, 8, 8), fill_value=1.0, dtype=np.float32),
+                "month": 7,
+                "date_str": "2019-07-01",
+            }
+        ]
+    )
+    checkpoint = torch.load(base_ckpt, map_location="cpu", weights_only=False)
+    checkpoint["target_context_prompt_state"] = base.target_context_prompt_state
+    checkpoint["config"]["target_context_prompt_state"] = base.target_context_prompt_state
+    ckpt_path = tmp_path / "prompt_with_state.pt"
+    torch.save(checkpoint, ckpt_path)
+
+    predictor = PromptConditionedBackbonePredictor(
+        checkpoint_path=str(ckpt_path),
+        device="cpu",
+        target_region="US-R1",
+    )
+
+    def fail_compute_input_stats(_x):
+        raise AssertionError("target_eval input stats must not update target-context prompt")
+
+    predictor.prompt_encoder._compute_input_stats = fail_compute_input_stats
+    sample = _make_prompt_sample(
+        split_role="target_eval",
+        target_region_id="US-R1",
+        sample_region_id="US-R3",
+    )
+    sample["month"] = 7
+
+    pred = predictor.predict(sample)
+
+    assert predictor.uses_fixed_target_prompt is True
+    assert pred["pred_increment_surface"].shape == sample["forecast_surface"].shape
+
+
+def test_prompt_predictor_reports_gain_adjusted_increment_for_reconstruction(tmp_path):
+    from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+    ckpt_path = tmp_path / "prompt.pt"
+    _make_prompt_predictor_checkpoint(ckpt_path)
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    checkpoint["residual_gain_alpha_surface"] = 0.25
+    checkpoint["residual_gain_alpha_rootzone"] = 0.0
+    torch.save(checkpoint, ckpt_path)
+
+    predictor = PromptConditionedBackbonePredictor(
+        checkpoint_path=str(ckpt_path),
+        device="cpu",
+        target_region="US-R1",
+    )
+
+    def fixed_forward(_x, _z):
+        return torch.stack(
+            [
+                torch.full((1, 4, 4), 2.0, dtype=torch.float32),
+                torch.full((1, 4, 4), 3.0, dtype=torch.float32),
+            ],
+            dim=1,
+        )
+
+    predictor.model.forward = fixed_forward
+    sample = _make_prompt_sample(
+        split_role="source_test",
+        target_region_id="US-R1",
+        sample_region_id="US-R2",
+    )
+    sample["x"] = np.zeros((12, 4, 4), dtype=np.float32)
+    sample["forecast_surface"] = np.ones((4, 4), dtype=np.float32)
+    sample["forecast_rootzone"] = np.ones((4, 4), dtype=np.float32) * 10.0
+
+    pred = predictor.predict(sample)
+
+    np.testing.assert_allclose(pred["pred_increment_surface"], 0.5)
+    np.testing.assert_allclose(pred["pred_increment_rootzone"], 0.0)
+    np.testing.assert_allclose(
+        pred["pred_analysis_surface"],
+        sample["forecast_surface"] + pred["pred_increment_surface"],
+    )
+    np.testing.assert_allclose(
+        pred["pred_analysis_rootzone"],
+        sample["forecast_rootzone"] + pred["pred_increment_rootzone"],
+    )
+
+
 def test_transfer_safe_score_uses_source_val_only():
     """Verify transfer safe score computation uses only source_val data."""
     from hydroda.training.calibration import calibrate_residual_gain_region_aware
@@ -625,8 +757,8 @@ def test_checkpoint_contains_model_and_prompt_encoder_state_dicts():
         assert "config" in ckpt
         assert ckpt["config"]["source_regions"] == ["US-R1", "US-R2"]
         assert ckpt["config"]["checkpoint_every_n_epochs"] == 5  # default
-        assert ckpt["config"]["adaptation_setting"] == "target_full_train"
-        assert ckpt["config"]["K"] is None
+        assert ckpt["config"]["adaptation_setting"] == "zero_shot_context"
+        assert ckpt["config"]["K"] == 0
         assert ckpt["config"]["protocol_freeze_id"] == train_pc.PROTOCOL_FREEZE_ID
 
         print(f"  test_checkpoint_contains_model_and_prompt_encoder_state_dicts passed.")

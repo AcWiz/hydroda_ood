@@ -4,13 +4,14 @@
 
 ## Split leakage
 
-- [ ] target_train/adaptation dates 只来自 2015-2021 target_train。
+- [ ] target_context dates 只来自 2015-2021 input-side context。
+- [ ] target_support dates 只来自 2015-2021，且数量 `<= K`。
 - [ ] target_eval/query dates 只来自 2023-2025 target_eval。
-- [ ] target_train 和 target_eval 无重叠。
+- [ ] target_context/target_support 和 target_eval 无重叠。
 - [ ] target adaptation sample selection 未使用 target_eval labels。
 - [ ] target adaptation sample selection 未使用 model error。
-- [ ] 所有主方法在同一 region/adaptation_setting 下使用相同 target_train/eval manifest。
-- [ ] legacy K-shot 结果已明确标记为 secondary ablation。
+- [ ] 所有主方法在同一 region/K/seed 下使用相同 zero/few-shot manifest。
+- [ ] target_full_train 结果已明确标记为 legacy/internal。
 
 ## Normalization leakage
 
@@ -28,7 +29,8 @@
 
 - [ ] early stopping 未使用 target_eval/query labels。
 - [ ] model selection 未使用 target_eval/query labels。
-- [ ] 主协议 target_train labels 只用于 target-specific adaptation/generalization，不用于未注册的超参数选择。
+- [ ] 主协议不使用 target_val 做 target-side selection、early stopping 或 gain calibration。
+- [ ] K-shot support labels 只用于轻量 target-specific adaptation，不用于未注册的超参数选择。
 
 ## Evaluation leakage
 

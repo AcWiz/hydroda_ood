@@ -114,7 +114,7 @@ def main():
         "artifacts/regions/US_region_masks.nc",
         "artifacts/regions/US_region_mask_tensor.pt",
         "artifacts/regions/US_region_masks_manifest.json",
-        "artifacts/splits/US_loro_target_train_splits.json",
+        "artifacts/splits/US_loro_zero_few_shot_splits.json",
     ]
     optional_legacy_paths = [
         "artifacts/splits/US_loro_kdate_splits.json",

@@ -2,15 +2,16 @@
 """Rebuild Phase 4 summary.json files and generate merged summary table.
 
 Reads existing evaluation results from:
-  - phase4_source_only_region_specific/  (one checkpoint per region)
-  - phase4_source_only_all_regions/      (one checkpoint for all regions)
+  - phase4_source_only_region_specific/  (target_full_history_region_oracle)
+  - phase4_source_only_all_regions/      (legacy_all_regions_sanity)
   - phase3_forecast_only_all_regions/    (forecast-only baseline)
 
 For each region, reads metrics_long.csv (or per_region_summary.json for all-regions),
 computes latw-aware summary statistics, and writes updated summary.json files.
 
-Generates summary_table.md comparing source-only (region-specific),
-source-only (all-regions), and forecast-only methods across all US regions.
+Generates a historical/internal summary table. The all-regions and
+target-history region-specific runs are not paper-facing OOD baselines under
+V4.4.
 
 Usage:
     PYTHONPATH=. python scripts/eval/rebuild_phase4_summary_table.py
@@ -42,10 +43,16 @@ SPLIT_TYPES = ["target_eval", "source_test"]
 def _find_latest_run(base: Path, region: str | None = None) -> Path | None:
     """Find the latest run directory for a region (or all-regions)."""
     if region:
-        pattern = f"phase4_source_only_region_specific_source_only_{region}_*"
+        patterns = [
+            f"phase4_source_only_region_specific_target_full_history_region_oracle_{region}_*",
+            f"phase4_source_only_region_specific_source_only_{region}_*",
+        ]
     else:
-        pattern = "phase4_source_only_all_regions_source_only_*"
-    runs = sorted(base.glob(pattern))
+        patterns = [
+            "phase4_source_only_all_regions_legacy_all_regions_sanity_*",
+            "phase4_source_only_all_regions_source_only_*",
+        ]
+    runs = sorted(run for pattern in patterns for run in base.glob(pattern))
     return runs[-1] if runs else None
 
 
@@ -93,10 +100,10 @@ def all_region_wrmse_win_gate(
     *,
     regions: list[str] | None = None,
 ) -> dict:
-    """Require every region x variable WRMSE to beat AR and RS baselines.
+    """Require every region x variable WRMSE to beat legacy AR and oracle RS.
 
     The gate is strict: the candidate must have finite target_eval WRMSE lower
-    than both the all-regions baseline and the region-specific baseline for
+    than both the all-regions sanity run and the target-history oracle run for
     each requested region and for both Surface and RootZone.
     """
     regions = REGIONS if regions is None else list(regions)
@@ -530,14 +537,16 @@ def build_summary_table(
     ]
 
     lines = [
-        "# Phase 4 Source-Only — All Regions Summary (latw WRMSE)",
+        "# Phase 4 Historical/Internal Source-Only Summary (latw WRMSE)",
         "",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         "Methods:",
-        "- **RS**: Region-Specific source-only (one backbone per region)",
-        "- **AR**: All-Regions source-only (shared backbone)",
+        "- **RS**: target_full_history_region_oracle (one target-history backbone per region)",
+        "- **AR**: legacy_all_regions_sanity (shared backbone trained on all US regions)",
         "- **FO**: Forecast-Only baseline",
+        "",
+        "Note: RS and AR are not paper-facing OOD baselines under V4.4.",
         "",
         "| " + " | ".join(header_cols) + " |",
         "|" + "|".join(["--------"] * len(header_cols)) + "|",
@@ -681,20 +690,31 @@ def build_combined_summary_payload(
     ar_results: dict,
     fo_results: dict,
 ) -> dict:
-    """Build machine-readable Phase 4 summary with paper-facing baseline names."""
+    """Build machine-readable Phase 4 summary with explicit baseline statuses."""
     return {
         "generated": datetime.now().isoformat(),
         "regions": REGIONS,
         "baselines": {
             "region_specific": {
-                "paper_name": "RS-Scratch",
-                "description": "One backbone per region trained from scratch on that region's 2015-2021 labels.",
+                "method_id": "target_full_history_region_oracle",
+                "paper_name": "Target-History Region Oracle",
+                "status": "oracle_upper_bound_internal_only",
+                "description": "One backbone per region trained on that target region's own 2015-2021 labels.",
             },
             "all_regions": {
-                "paper_name": "Pooled Global",
-                "description": "One shared backbone trained on all US regions' 2015-2021 labels.",
+                "method_id": "legacy_all_regions_sanity",
+                "paper_name": "Legacy All-Regions Sanity",
+                "status": "legacy_sanity_not_paper_facing_ood_global",
+                "description": "One shared backbone trained on all US regions' 2015-2021 labels, including the held-out target region.",
+            },
+            "source_pooled_global": {
+                "method_id": "source_pooled_global_backbone",
+                "paper_name": "Source-Pooled Global Backbone",
+                "status": "paper_main_transition_us_loro",
+                "description": "US-only transition global baseline: train on the five non-target US regions and evaluate the held-out region.",
             },
             "forecast_only": {
+                "method_id": "forecast_only",
                 "paper_name": "Forecast-Only",
                 "description": "No learned increment; predicted analysis equals forecast.",
             },

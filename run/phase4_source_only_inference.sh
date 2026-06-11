@@ -1,29 +1,42 @@
 #!/bin/bash
-# Phase 4 Source-Only Inference: In-domain (source_test) vs OOD (target_eval)
+# Phase 4 source_pooled_global_backbone Inference: source_test vs target_eval
 #
 # Usage:
-#   bash run/phase4_source_only_inference.sh
-#   bash run/phase4_source_only_inference.sh /path/to/checkpoint.pt
+#   bash run/phase4_source_only_inference.sh [TARGET_REGION] [CHECKPOINT_PATH] [OUTPUT_DIR] [GPU_ID]
 #
 # Evaluates the source-only backbone on:
-#   - source_test:  2023-2025 held-out source regions R2-R6 (in-domain baseline, NOT target)
-#   - target_eval:  2023-2025 US-R1 target pixels (OOD signal)
+#   - source_test:  2023-2025 held-out source regions (in-domain baseline, NOT target)
+#   - target_eval:  2023-2025 target-region pixels (OOD signal)
 
 set -euo pipefail
 
-CHECKPOINT_PATH="${1:-}"
-OUTPUT_DIR_OVERRIDE="${2:-}"
+TARGET_REGION="${1:-US-R1}"
+CHECKPOINT_PATH="${2:-}"
+OUTPUT_DIR_OVERRIDE="${3:-}"
+GPU_ID="${4:-1}"
 
 cd "$(dirname "$0")/.."
 
 # Auto-detect latest checkpoint if not provided
 if [[ -z "$CHECKPOINT_PATH" ]]; then
-    LATEST_RUN=$(ls -td artifacts/runs/phase4_source_only/phase4_source_only_source_only_US-R1_w32_e30_lr0.0003_nonorm_nozero_s0_* 2>/dev/null | head -1)
+    LATEST_RUN=$(find artifacts/runs/phase4_source_only \
+        -maxdepth 1 \
+        -type d \
+        \( -name "phase4_source_only_source_pooled_global_backbone_${TARGET_REGION}_w32_e50_lr0.0003_norm_zero_s0_*" \
+           -o -name "phase4_source_only_source_only_${TARGET_REGION}_w32_e50_lr0.0003_norm_zero_s0_*" \) \
+        -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr \
+        | awk 'NR == 1 {print $2}')
     if [[ -z "$LATEST_RUN" ]]; then
-        echo "ERROR: No phase4_source_only run found. Provide checkpoint path manually."
+        echo "ERROR: No phase4_source_only run found for target_region=${TARGET_REGION}. Provide checkpoint path manually."
         exit 1
     fi
-    CHECKPOINT_PATH="${LATEST_RUN}/checkpoints/best.pt"
+
+    if [[ -f "${LATEST_RUN}/checkpoints/checkpoint_best_source_val_safe_score.pt" ]]; then
+        CHECKPOINT_PATH="${LATEST_RUN}/checkpoints/checkpoint_best_source_val_safe_score.pt"
+    else
+        CHECKPOINT_PATH="${LATEST_RUN}/checkpoints/best.pt"
+    fi
     echo "[auto-detect] Using checkpoint: ${CHECKPOINT_PATH}"
 fi
 
@@ -43,17 +56,16 @@ else
 fi
 
 # Fixed evaluation parameters matching training
-TARGET_REGION="US-R1"
-K="0"
 SEED="0"
-DEVICE="${CUDA_VISIBLE_DEVICES:-1}"
+export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 
 echo "============================================"
 echo "Phase 4 Source-Only Inference"
+echo "  method=source_pooled_global_backbone"
 echo "  checkpoint=${CHECKPOINT_PATH}"
-echo "  target_region=${TARGET_REGION}  K=${K}  seed=${SEED}"
+echo "  target_region=${TARGET_REGION}  adaptation_setting=zero_shot_context  K=0  seed=${SEED}"
 echo "  output_base=${OUTPUT_BASE}"
-echo "  device=gpu:${DEVICE}"
+echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "============================================"
 
 # Create output directory
@@ -61,12 +73,12 @@ mkdir -p "${OUTPUT_BASE}"
 
 # Run 1: source_test (in-domain)
 echo ""
-echo ">>> [1/2] Evaluating source_test on source regions R2-R6 (in-domain)..."
+echo ">>> [1/2] Evaluating source_test on held-out source regions (in-domain)..."
 EVAL_SOURCE_DIR="${OUTPUT_BASE}/source_test"
 PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \
     --checkpoint "$CHECKPOINT_PATH" \
     --target_region "${TARGET_REGION}" \
-    --K "${K}" \
+    --adaptation_setting zero_shot_context --K 0 \
     --seed "${SEED}" \
     --split_type source_test \
     --predictor_type source_only \
@@ -78,12 +90,12 @@ SOURCE_SUMMARY="${EVAL_SOURCE_DIR}/${TARGET_REGION}/summary.json"
 
 # Run 2: target_eval (OOD)
 echo ""
-echo ">>> [2/2] Evaluating target_eval on target region US-R1 (OOD)..."
+echo ">>> [2/2] Evaluating target_eval on target region ${TARGET_REGION} (OOD)..."
 EVAL_TARGET_DIR="${OUTPUT_BASE}/target_eval"
 PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \
     --checkpoint "$CHECKPOINT_PATH" \
     --target_region "${TARGET_REGION}" \
-    --K "${K}" \
+    --adaptation_setting zero_shot_context --K 0 \
     --seed "${SEED}" \
     --split_type target_eval \
     --predictor_type source_only \
@@ -129,10 +141,10 @@ tgt = load_summary(target_summary)
 print()
 print("```")
 print(f"Run ID:      {run_dir.name}")
-print(f"Method:      source_only_backbone")
+print(f"Method:      source_pooled_global_backbone")
 print(f"Checkpoint: {src['checkpoint'] if src else tgt['checkpoint'] if tgt else 'N/A'}")
-print(f"Protocol:    hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025")
-print(f"Target:      {target_region}  adaptation_setting=target_full_train")
+print(f"Protocol:    hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025")
+print(f"Target:      {target_region}  adaptation_setting=zero_shot_context  K=0")
 print("```")
 print()
 

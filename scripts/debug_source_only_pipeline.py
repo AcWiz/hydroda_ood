@@ -28,9 +28,9 @@ import torch.nn as nn
 # ---------------------------------------------------------------------------
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 OUTPUT_BASE = Path("reports/source_only_debug")
 ARTIFACTS_BASE = Path("artifacts/source_only_debug")
 
@@ -77,7 +77,7 @@ def check1_dataset_audit(
     OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    splits_to_check = ["source_train", "source_val", "target_train", "target_eval"]
+    splits_to_check = ["source_train", "source_val", "target_context", "target_eval"]
 
     for split_type in splits_to_check:
         print(f"\n  Check1: Loading {split_type}...")
@@ -87,9 +87,9 @@ def check1_dataset_audit(
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type=split_type,
-            K=None,
+            K=0,
             seed=0,
-            adaptation_setting="target_full_train",
+            adaptation_setting="zero_shot_context",
             freeze_manifest=FREEZE_MANIFEST,
         )
 
@@ -342,9 +342,9 @@ def check2_zero_predictor_metrics(
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type=split_type,
-            K=None,
+            K=0,
             seed=0,
-            adaptation_setting="target_full_train",
+            adaptation_setting="zero_shot_context",
             freeze_manifest=FREEZE_MANIFEST,
         )
 
@@ -462,9 +462,9 @@ def check3_perfect_predictor_metrics(
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type=split_type,
-            K=None,
+            K=0,
             seed=0,
-            adaptation_setting="target_full_train",
+            adaptation_setting="zero_shot_context",
             freeze_manifest=FREEZE_MANIFEST,
         )
 
@@ -658,9 +658,9 @@ def check5_prediction_distribution(
             splits_json=SPLITS_JSON,
             target_region="US-R1",
             split_type=split_type,
-            K=None,
+            K=0,
             seed=0,
-            adaptation_setting="target_full_train",
+            adaptation_setting="zero_shot_context",
             freeze_manifest=FREEZE_MANIFEST,
         )
 
@@ -989,9 +989,9 @@ def check7_tiny_overfit(
         splits_json=SPLITS_JSON,
         target_region="US-R1",
         split_type="source_train",
-        K=None,
+        K=0,
         seed=0,
-        adaptation_setting="target_full_train",
+        adaptation_setting="zero_shot_context",
         freeze_manifest=FREEZE_MANIFEST,
     )
 

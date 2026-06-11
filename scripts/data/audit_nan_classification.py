@@ -16,7 +16,7 @@ import pandas as pd
 from pathlib import Path
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
 OUTPUT_CSV = "artifacts/experiments/phase3_simple_baselines/US/verification/nan_classification_audit.csv"
 OUTPUT_DIR = Path(OUTPUT_CSV).parent

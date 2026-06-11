@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Train source-only SmallResUNet backbone with full experiment infrastructure.
+"""Train source-pooled global SmallResUNet backbone for US-only LORO.
 
 Usage:
     PYTHONPATH=. python scripts/train/train_source_only_backbone.py \\
-        --target_region US-R1 --adaptation_setting target_full_train --seed 0 \\
+        --target_region US-R1 --adaptation_setting zero_shot_context --K 0 --seed 0 \\
         --max_epochs 30 --batch_size 4 --lr 1e-3 \\
         --device cuda --amp \\
         --wandb_mode disabled \\
         --config configs/model_resunet_main.yaml
 
 No-leakage declaration:
-    - Only source_train split used for training
-    - Normalization stats from source_train only
+    - US-only transition global baseline: leave-one-region-out source pooled model
+    - Only source_fit split used for training; target region is excluded by target_region
+    - Normalization stats from source_fit only
     - No target_eval/target_query labels used in training/normalization/early_stopping
     - No target prompt or target adaptation labels used by this source-only model
 """
@@ -37,11 +38,12 @@ from hydroda.utils.runtime import gather_runtime_info
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 CHECKPOINT_DIR = "artifacts/checkpoints/phase4_source_only"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 PHASE = "phase4_source_only"
+METHOD = "source_pooled_global_backbone"
 
 
 def parse_args():
@@ -49,9 +51,9 @@ def parse_args():
     # Data
     parser.add_argument("--target_region", type=str, required=True, help="Target region, e.g. US-R1")
     parser.add_argument("--adaptation_setting", type=str, default=None,
-        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
+        help="Split adaptation setting (default: zero_shot_context; main examples: zero_shot_context, few_shot_k4, few_shot_k12)")
     parser.add_argument("--K", type=int, default=None,
-        help="Legacy few-shot K value. Ignored for target_full_train.")
+        help="Zero/few-shot K value for the main protocol.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for split (default from YAML or 0)")
     # Model
     parser.add_argument("--width", type=int, default=None,
@@ -161,7 +163,7 @@ def parse_args():
 
     # Set hard-coded fallback defaults for required params not in YAML
     if parser.get_default("adaptation_setting") is None:
-        parser.set_defaults(adaptation_setting="target_full_train")
+        parser.set_defaults(adaptation_setting="zero_shot_context")
     if parser.get_default("seed") is None:
         parser.set_defaults(seed=0)
     if parser.get_default("width") is None:
@@ -215,7 +217,9 @@ def main():
     device = resolve_device(args.device, require_gpu=args.require_gpu)
 
     print("=" * 60)
-    print("Phase 4A: Source-only Backbone Training")
+    print("Phase 4A: Source-Pooled Global Backbone Training")
+    print("  method=source_pooled_global_backbone")
+    print("  scope=US-only transition global; leave-one-region-out source pooled")
     print(f"  target_region={args.target_region}  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
     print(f"  device={device}  width={args.width}  amp={args.amp}")
@@ -261,12 +265,18 @@ def main():
         "wandb_project": args.wandb_project,
         "wandb_entity": args.wandb_entity,
         "wandb_tags": args.wandb_tags,
+        "method": METHOD,
+        "baseline_role": "source_pooled_global",
+        "baseline_status": "paper_main_transition_us_loro",
+        "training_domain_policy": "US_loro_exclude_target_region",
+        "train_domains_exclude_target": True,
+        "paper_name": "Source-Pooled Global Backbone",
     }
 
     # Create RunManager
     run_manager = RunManager(
         phase=PHASE,
-        method="source_only",
+        method=METHOD,
         target_region=args.target_region,
         config=run_config,
         output_dir=args.output_dir,
@@ -287,6 +297,12 @@ def main():
     run_manager.save_protocol({
         "protocol_freeze_id": PROTOCOL_FREEZE_ID,
         "split_manifest": FREEZE_MANIFEST,
+        "method": METHOD,
+        "baseline_role": "source_pooled_global",
+        "baseline_status": "paper_main_transition_us_loro",
+        "training_domain_policy": "US_loro_exclude_target_region",
+        "normalization_source": "source_fit_only",
+        "model_selection_source": "source_val",
     })
 
     # Setup logging

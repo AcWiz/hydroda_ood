@@ -136,7 +136,7 @@ def test_all_regions_collection_prefers_metrics_long_global_skill(tmp_path, monk
     assert results["US-R1"]["source_test"]["surface"]["analysis_skill_vs_forecast_latw_global"] == 0.60
 
 
-def test_combined_summary_payload_names_paper_facing_baselines(monkeypatch):
+def test_combined_summary_payload_marks_legacy_and_oracle_baselines(monkeypatch):
     monkeypatch.setattr(phase4_summary, "REGIONS", ["US-R1"])
     monkeypatch.setattr(phase4_summary, "SPLIT_TYPES", ["target_eval", "source_test"])
 
@@ -150,7 +150,11 @@ def test_combined_summary_payload_names_paper_facing_baselines(monkeypatch):
         fo_results=fo_results,
     )
 
-    assert payload["baselines"]["region_specific"]["paper_name"] == "RS-Scratch"
-    assert payload["baselines"]["all_regions"]["paper_name"] == "Pooled Global"
+    assert payload["baselines"]["region_specific"]["method_id"] == "target_full_history_region_oracle"
+    assert payload["baselines"]["region_specific"]["status"] == "oracle_upper_bound_internal_only"
+    assert payload["baselines"]["all_regions"]["method_id"] == "legacy_all_regions_sanity"
+    assert payload["baselines"]["all_regions"]["status"] == "legacy_sanity_not_paper_facing_ood_global"
+    assert payload["baselines"]["source_pooled_global"]["method_id"] == "source_pooled_global_backbone"
+    assert payload["baselines"]["source_pooled_global"]["status"] == "paper_main_transition_us_loro"
     assert payload["baselines"]["forecast_only"]["paper_name"] == "Forecast-Only"
     assert payload["forecast_only"]["US-R1"]["target_eval"]["surface"]["analysis_rmse_latw_mean"] == 0.3

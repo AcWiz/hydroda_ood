@@ -22,3 +22,13 @@ def test_guard_rejects_query_labels_for_normalization():
 def test_guard_accepts_historical_target_adaptation_dates():
     guard = LeakageGuard(ProtocolConfig())
     guard.check_support_dates(["2016-03-01", "2021-09-01"])
+
+
+def test_guard_rejects_target_val_for_main_protocol_selection():
+    guard = LeakageGuard(ProtocolConfig())
+    with pytest.raises(ValueError):
+        guard.check_model_selection_scope(
+            ["2022-06-01"],
+            purpose="checkpoint_selection",
+            model_selection_source="target_val",
+        )

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone per-region evaluation for a trained source-only all-regions checkpoint.
+"""Standalone per-region evaluation for a legacy all-regions checkpoint.
 
 Evaluates each US region (R1-R6) independently: for each region, creates a dataset
 where _active_region_mask is restricted to that region's pixels only, then runs
@@ -9,7 +9,7 @@ Usage:
     # Evaluate on 2023-2025 target_eval (default):
     PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
         --checkpoint .../checkpoint_best_source_val_safe_score.pt \
-        --split_type target_eval --adaptation_setting target_full_train --seed 0 --device cuda
+        --split_type target_eval --adaptation_setting zero_shot_context --K 0 --seed 0 --device cuda
 
     # Evaluate on 2022 source_val:
     PYTHONPATH=. python scripts/eval/eval_source_only_all_regions.py \
@@ -30,9 +30,9 @@ from hydroda.utils.device import resolve_device
 
 DA_NC = "/fastersharefiles2/fenglonghan/dataset/SMAP/DA.nc"
 REGION_MASKS_NC = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 
 
 def _evaluate_one_region(
@@ -72,7 +72,7 @@ def _evaluate_one_region(
         split_role=split_type,
         experiment_id="per_region_eval",
         protocol_freeze_id=PROTOCOL_FREEZE_ID,
-        method="source_only_all_regions",
+        method="legacy_all_regions_sanity",
         split_file=SPLITS_JSON,
         mask_file=REGION_MASKS_NC,
     )
@@ -92,10 +92,10 @@ def main():
     parser.add_argument("--split_type", type=str, default="target_eval",
         choices=["source_val", "source_test", "target_eval", "target_train"],
         help="Split to evaluate on. Default: target_eval (2023-2025).")
-    parser.add_argument("--adaptation_setting", type=str, default="target_full_train",
-        help="Split adaptation setting (default: target_full_train; legacy example: legacy_few_shot_k4)")
-    parser.add_argument("--K", type=int, default=None,
-        help="Legacy few-shot K value. Ignored for target_full_train.")
+    parser.add_argument("--adaptation_setting", type=str, default="zero_shot_context",
+        help="Split adaptation setting (default: zero_shot_context; main examples: zero_shot_context, few_shot_k4, few_shot_k12)")
+    parser.add_argument("--K", type=int, default=0,
+        help="Zero/few-shot K value for the main protocol.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_dir", type=str, default=None,
@@ -125,7 +125,9 @@ def main():
     regions = args.regions if args.regions else list(_ALL_US_REGIONS)
 
     print("=" * 60)
-    print("Source-only All-Regions Per-Region Evaluation")
+    print("Legacy All-Regions Sanity Per-Region Evaluation")
+    print("  method:      legacy_all_regions_sanity")
+    print("  status:      legacy_sanity_not_paper_facing_ood_global")
     print(f"  checkpoint:  {checkpoint_path}")
     print(f"  split_type:  {args.split_type}")
     print(f"  results:     {results_dir}")

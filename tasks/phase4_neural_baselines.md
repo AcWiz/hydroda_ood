@@ -58,17 +58,37 @@ large transformer backbone
 
 ```text
 source_only_backbone:
+  concrete method_id: source_pooled_global_backbone
   train: source regions / continents, 2015-2021
   target: no prompt, no target labels
+  final LOO-continent: source = non-target continents only
+  US-only transition: existing leave-one-region-out source-only runner can be
+    used as the global baseline when it excludes the target US region.
+
+source_regime_specialist_bank:
+  train: source-side same-regime specialists, 2015-2021
+  target: no target labels
+  final LOO-continent: target C-Ri uses specialist trained on source continents'
+    Ri regions, e.g. AU-R1 uses US-R1+CN-R1.
+  routing: preregistered region/regime ID or input-only target_context.
+  US-only transition: source-region expert routing/ensemble is internal sanity
+    only; target-region supervised experts are oracle upper bounds.
 
 prompt_conditioned_shared:
   train: source regions / continents, 2015-2021
   input: x + region prompt token/feature map
-  target_full_train: source-trained shared conditional baseline; optional fixed
-    target prompt summary may use target_train 2015-2021 input-side fields only,
-    with no target_train labels and no target_val/target_eval labels
-  legacy K-shot: K=0/4/12 only as secondary ablation
+  zero_shot_context: source-trained shared conditional baseline; optional
+    target-context monthly prompt prototypes may use target_context 2015-2021
+    input-side fields only, with no target labels and no target_val/target_eval labels
+  few_shot_k4/k12: K-shot labels are reserved for HyperDA/lightweight target
+    adaptation, not for training the shared source-stage baseline
 ```
+
+旧 `phase4_source_only_all_regions` 只能标记为
+`legacy_all_regions_sanity`，因为它训练所有 US-R1..R6 并包含 target region
+2015-2021 labels。旧 `source_only_region_specific` 只能标记为
+`target_full_history_region_oracle`，作为 appendix/internal upper bound，不进入
+V4.4 主表。
 
 ## 禁止
 

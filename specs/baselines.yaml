@@ -1,30 +1,66 @@
 paper_main_baselines:
-  target_full_train:
+  zero_few_shot_generalization:
     - forecast_only
-    - source_only_backbone
+    - source_pooled_global_backbone
     - prompt_conditioned_shared_backbone
-    - adapter_tuning_full_target_train
-    - lora_tuning_full_target_train
-    - hyperda_generated_operator_full_target_train
-    - hyperda_refine_full_target_train
+    - source_regime_specialist_bank
+    - hyperda_zero_shot_context
+    - hyperda_few_shot_k4
+    - hyperda_few_shot_k12
 
-legacy_few_shot_ablation:
-  status: secondary_not_main_table
-  K0:
-    - forecast_only
-    - source_only_backbone
-    - prompt_conditioned_shared_backbone
-    - hyperda_zero
-  K4_K12:
-    - forecast_only
-    - source_only_backbone
-    - adapter_tuning
-    - lora_tuning
-    - prompt_conditioned_shared_backbone_with_calibration_prompt
-    - hyperda_calib
-    - hyperda_refine
+baseline_definitions:
+  source_pooled_global_backbone:
+    display_name: Source-only backbone
+    training_policy: pooled_source_domains_only
+    final_leave_one_continent_out:
+      source: all regions from non-target continents
+      target: held-out continent
+    us_only_transition:
+      source: five non-target US regions
+      target: held-out US region
+      note: existing train_source_only_backbone.py implements this LORO transition global baseline
+    source_fit: 2015-2021
+    source_val: 2022
+    target_eval: 2023-2025
+    target_labels_used_for_training: false
+    paper_table_eligible: true
+  prompt_conditioned_global_backbone:
+    display_name: Prompt-conditioned shared backbone
+    training_policy: pooled_source_domains_only_with_input_side_context_prompt
+    target_context_allowed: 2015-2021 input-side target_context only
+    target_context_labels_allowed: false
+    source_fit: 2015-2021
+    source_val: 2022
+    target_eval: 2023-2025
+    paper_table_eligible: true
+  source_regime_specialist_bank:
+    display_name: Source-trained regime specialist bank
+    training_policy: same-regime source specialists only
+    final_leave_one_continent_out: >-
+      For held-out target continent C and regime Ri, train the Ri specialist
+      on source continents' Ri regions only, e.g. target AU-R1 uses US-R1+CN-R1.
+    routing_policy: preregistered region/regime id or input-only target_context descriptor
+    target_labels_used_for_training: false
+    us_only_transition_status: source_region_expert_routing_sanity_only
+    note: US-only has no cross-continent same-regime counterpart; target-region experts remain oracle/internal.
+    paper_table_eligible: true
+
+secondary_ablation:
+  adapter_lora_kshot:
+    status: appendix_or_followup_not_main_table
+    K_values: [4, 12]
+  legacy_full_target_train:
+    status: legacy_internal_explicit_opt_in_only
+    methods:
+      - adapter_tuning_full_target_train
+      - lora_tuning_full_target_train
+      - hyperda_generated_operator_full_target_train
+      - hyperda_refine_full_target_train
+      - target_full_history_region_oracle
 
 internal_sanity_only:
+  - legacy_all_regions_sanity
+  - source_region_expert_routing_sanity
   - source_mean_increment
   - target_train_mean_increment
   - target_monthly_train_increment
@@ -35,13 +71,26 @@ internal_sanity_only:
   - linear_prompt_to_parameter
   - random_prompt_hyperda
   # Deprecated names retained in old result files/scripts:
+  - source_only_all_regions
+  - source_only_region_specific
   - target_support_mean_increment
   - target_monthly_support_increment
+
+legacy_oracle_not_main:
+  legacy_all_regions_sanity:
+    previous_name: phase4_source_only_all_regions
+    reason_not_main: trains all US regions, including the held-out target region's 2015-2021 labels
+    allowed_use: internal sanity and historical comparison
+  target_full_history_region_oracle:
+    previous_name: source_only_region_specific
+    reason_not_main: trains on the target region's own full 2015-2021 history
+    allowed_use: appendix/internal upper bound only
 
 fairness_requirements:
   same_source_train_split: true
   same_source_val_split: true
-  same_target_train_period: true
+  same_target_context_period: true
+  same_target_support_budget: true
   same_target_eval_dates: true
   same_normalization_scope: source_fit_only
   same_adaptation_setting: true
@@ -50,6 +99,7 @@ fairness_requirements:
   report_trainable_parameters: true
   report_adaptation_steps: true
   report_wall_clock_time: true
-  report_target_train_dates_hash: true
+  report_target_context_dates_hash: true
+  report_target_support_dates_hash: true
   report_target_eval_dates_hash: true
   report_split_manifest_sha256: true

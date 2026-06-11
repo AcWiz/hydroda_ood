@@ -1,4 +1,4 @@
-"""Protocol objects for HydroDA-OOD / HyperDA V4 historical target adaptation."""
+"""Protocol objects for HydroDA-OOD / HyperDA V4.4 zero/few-shot generalization."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -33,17 +33,17 @@ class DateRange:
 class ProtocolConfig:
     """Single source of truth for the current HydroDA-OOD time protocol.
 
-    The main protocol is not K-shot/few-cycle adaptation. After source-domain
-    hypernetwork training, the held-out target domain may use its full
-    historical training period (2015-2021) for fast target adaptation. The
-    target validation year is 2022, and final target evaluation is 2023-2025.
-    Date ranges overlap between source_fit and target_train by design; callers
-    must pass the intended role to assert_dates_within for domain-specific
-    checks.
+    The paper-facing protocol is zero/few-shot target generalization. Source
+    training fits on 2015-2021 and source validation in 2022 is the only main
+    checkpoint / hyperparameter selection source. Target-domain 2015-2021
+    input-side context may build a prompt. For K in {0, 4, 12}, only K labeled
+    target support cycles may update target-specific lightweight variables.
+    Target validation is unused in the main protocol, and target evaluation
+    labels are final-offline-evaluation-only for 2023-2025.
     """
 
     protocol_name: str = "HydroDA-OOD-HyperDA-V4"
-    protocol_freeze_id: str = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+    protocol_freeze_id: str = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
     source_train: DateRange = field(
         default_factory=lambda: DateRange.from_strings("source_train", "2015-01-01", "2021-12-31")
     )
@@ -56,6 +56,14 @@ class ProtocolConfig:
     source_test: DateRange = field(
         default_factory=lambda: DateRange.from_strings("source_test", "2023-01-01", "2025-12-31")
     )
+    target_context: DateRange = field(
+        default_factory=lambda: DateRange.from_strings("target_context", "2015-01-01", "2021-12-31")
+    )
+    target_support: DateRange = field(
+        default_factory=lambda: DateRange.from_strings("target_support", "2015-01-01", "2021-12-31")
+    )
+    # Backward-compatible legacy full-target aliases. They share dates with
+    # target_context/support but are not paper-facing main settings.
     target_train: DateRange = field(
         default_factory=lambda: DateRange.from_strings("target_train", "2015-01-01", "2021-12-31")
     )
@@ -65,10 +73,6 @@ class ProtocolConfig:
     target_val: DateRange = field(
         default_factory=lambda: DateRange.from_strings("target_val", "2022-01-01", "2022-12-31")
     )
-    # Backward-compatible date-range alias for older V4 docs/tests.
-    target_context: DateRange = field(
-        default_factory=lambda: DateRange.from_strings("target_context", "2015-01-01", "2021-12-31")
-    )
     target_eval: DateRange = field(
         default_factory=lambda: DateRange.from_strings("target_eval", "2023-01-01", "2025-12-31")
     )
@@ -77,10 +81,12 @@ class ProtocolConfig:
     target_query: DateRange = field(
         default_factory=lambda: DateRange.from_strings("target_query", "2023-01-01", "2025-12-31")
     )
-    main_adaptation_settings: Sequence[str] = ("target_full_train",)
+    main_adaptation_settings: Sequence[str] = ("zero_shot_context", "few_shot_k4", "few_shot_k12")
+    main_K_values: Sequence[int] = (0, 4, 12)
+    legacy_full_target_train_settings: Sequence[str] = ("target_full_train",)
+    # Backward-compatible alias for older callers; these values are now the
+    # main K-axis rather than legacy ablations.
     legacy_few_shot_K_values: Sequence[int] = (0, 4, 12)
-    # Deprecated alias. Empty by design: K is no longer a main experiment axis.
-    main_K_values: Sequence[int] = ()
 
     def role_for_date(self, value: str | date | datetime) -> str:
         if self.source_fit.contains(value):
@@ -91,34 +97,44 @@ class ProtocolConfig:
             return "target_eval"
         return "outside_protocol"
 
-    def assert_supported_adaptation_setting(self, setting: str) -> None:
-        if setting not in set(self.main_adaptation_settings):
+    def assert_supported_adaptation_setting(
+        self,
+        setting: str,
+        *,
+        allow_legacy_full_target_train: bool = False,
+    ) -> None:
+        if setting in set(self.main_adaptation_settings):
+            return
+        if setting in set(self.legacy_full_target_train_settings):
+            if allow_legacy_full_target_train:
+                return
             raise ValueError(
-                f"Unsupported main adaptation_setting={setting!r}. "
-                f"Main protocol uses {list(self.main_adaptation_settings)}; "
-                "few-shot K settings are legacy ablations."
+                f"adaptation_setting={setting!r} is legacy/internal. "
+                "Pass allow_legacy_full_target_train=True only for explicit historical reproduction."
             )
+        raise ValueError(
+            f"Unsupported main adaptation_setting={setting!r}. "
+            f"Main protocol uses {list(self.main_adaptation_settings)}; "
+            "target_full_train is legacy/internal only."
+        )
 
     def assert_legacy_few_shot_K(self, K: int) -> None:
-        if int(K) not in set(self.legacy_few_shot_K_values):
-            raise ValueError(
-                f"Unsupported legacy few-shot K={K}. "
-                f"Allowed legacy K values: {list(self.legacy_few_shot_K_values)}."
-            )
+        self.assert_supported_K(K)
 
     def assert_supported_K(self, K: int, *, allow_legacy: bool = False) -> None:
-        """Deprecated K-axis validator.
+        """Validate the paper-facing K-axis.
 
-        Main experiments must use adaptation_setting. Pass allow_legacy=True
-        only for explicitly labeled few-shot ablation code paths.
+        ``allow_legacy`` is accepted for older call sites and has no effect for
+        K in the current main axis.
         """
-        if allow_legacy:
-            self.assert_legacy_few_shot_K(K)
-            return
-        raise ValueError(
-            "K is no longer a main protocol axis. Use adaptation_setting='target_full_train'. "
-            "Pass allow_legacy=True only for secondary few-shot ablations."
-        )
+        if int(K) not in set(self.main_K_values):
+            raise ValueError(
+                f"Unsupported main K={K}. Main zero/few-shot protocol uses {list(self.main_K_values)}."
+            )
+
+    def adaptation_setting_for_K(self, K: int) -> str:
+        self.assert_supported_K(K)
+        return "zero_shot_context" if int(K) == 0 else f"few_shot_k{int(K)}"
 
     def assert_no_query_dates(self, dates: Iterable[str | date | datetime], purpose: str) -> None:
         bad = [str(d) for d in dates if self.target_eval.contains(d)]
@@ -148,7 +164,7 @@ class ProtocolConfig:
             "target_adapt": self.target_adapt,
             "target_adaptation": self.target_adapt,
             "target_context": self.target_context,
-            "target_support": self.target_context,
+            "target_support": self.target_support,
             "target_val": self.target_val,
             "target_eval": self.target_eval,
             "target_query": self.target_query,

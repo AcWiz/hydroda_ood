@@ -47,7 +47,7 @@ def da_nc_path():
 
 @pytest.fixture(scope="module")
 def splits_json_path():
-    return "artifacts/splits/US_loro_kdate_splits.json"
+    return "artifacts/splits/US_loro_zero_few_shot_splits.json"
 
 
 @pytest.fixture(scope="module")

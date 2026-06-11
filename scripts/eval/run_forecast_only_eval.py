@@ -20,9 +20,9 @@ import pandas as pd
 
 DATA_DIR = "/fastersharefiles2/fenglonghan/dataset/SMAP"
 REGION_MASKS = "artifacts/regions/US_region_masks.nc"
-SPLITS_JSON = "artifacts/splits/US_loro_target_train_splits.json"
+SPLITS_JSON = "artifacts/splits/US_loro_zero_few_shot_splits.json"
 MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
-PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
+PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 OUT_DIR = Path("artifacts/results/phase3_forecast_only")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -33,8 +33,8 @@ MAX_SAMPLES_PER_REGION = 100
 def audit_mask_coverage(
     region: str,
     split_type: str = "target_eval",
-    adaptation_setting: str = "target_full_train",
-    K: int | None = None,
+    adaptation_setting: str = "zero_shot_context",
+    K: int | None = 0,
     seed: int = 0,
     max_samples: int = 100,
 ) -> Dict[str, Any]:
@@ -96,8 +96,8 @@ def audit_mask_coverage(
 def quick_diagnostic(
     region: str,
     split_type: str = "target_eval",
-    adaptation_setting: str = "target_full_train",
-    K: int | None = None,
+    adaptation_setting: str = "zero_shot_context",
+    K: int | None = 0,
     seed: int = 0,
 ):
     """Quick diagnostic without running full evaluation."""
@@ -148,8 +148,8 @@ def quick_diagnostic(
 def run_forecast_only_fast(
     region: str,
     split_type: str = "target_eval",
-    adaptation_setting: str = "target_full_train",
-    K: int | None = None,
+    adaptation_setting: str = "zero_shot_context",
+    K: int | None = 0,
     seed: int = 0,
     max_samples: int = 50,
 ):
