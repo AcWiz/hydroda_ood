@@ -36,7 +36,13 @@ import pandas as pd
 from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
 from hydroda.data.dataset import HydroDADataset
 from hydroda.data.file_hash import compute_sha256
-from hydroda.evaluation.harness import evaluate_split, summarize_metric_rows
+from hydroda.evaluation.harness import (
+    evaluate_split,
+    metric_rows_content_hash,
+    metric_values_content_hash,
+    summarize_metric_rows,
+)
+from scripts.train.train_hyperda_target_adapt import apply_target_adapter_state
 from hydroda.training.calibration import calibrate_residual_gain
 from hydroda.utils.device import resolve_device
 
@@ -106,8 +112,18 @@ def main():
         help="Zero/few-shot K value for the main protocol.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split_type", type=str, default="target_eval")
+    parser.add_argument(
+        "--active_region_override",
+        type=str,
+        default=None,
+        help="Source-side pseudo-query override; valid for source_* splits only.",
+    )
+    parser.add_argument("--splits_json", type=str, default=None,
+        help="Override split manifest. Diagnostics only; defaults from adaptation_setting.")
     parser.add_argument("--max_samples", type=int, default=0,
         help="Max samples to evaluate (0 = no limit, evaluate all)")
+    parser.add_argument("--batch_size", type=int, default=8,
+        help="Evaluation batch-size metadata. Current predictor path evaluates samples sequentially.")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--require_gpu", action="store_true",
         help="Exit with error if CUDA unavailable")
@@ -128,6 +144,18 @@ def main():
         help="Legacy/internal: calibrate residual gain on target support/train labels")
     parser.add_argument("--allow_legacy_target_label_calibration", action="store_true",
         help="Required with --target_train_residual_gain_calibration.")
+    parser.add_argument(
+        "--adapt_mix_rho",
+        type=float,
+        default=1.0,
+        help="Fixed output mixture with same-context K0 prediction; diagnostic only, never selected on target_eval.",
+    )
+    parser.add_argument(
+        "--prediction_record_path",
+        type=str,
+        default="",
+        help="Optional JSONL path for source-safe prediction records used by offline calibration mixing.",
+    )
     args = parser.parse_args()
 
     if args.adaptation_setting is None:
@@ -135,6 +163,8 @@ def main():
     if args.adaptation_setting == "target_full_train":
         args.K = None
     splits_json, protocol_freeze_id = resolve_split_protocol_for_adaptation(args.adaptation_setting)
+    if args.splits_json:
+        splits_json = args.splits_json
     if args.target_prompt_from_target_train:
         args.target_context_prompt = True
     if args.no_target_prompt_from_target_train:
@@ -144,6 +174,8 @@ def main():
             "--target_train_residual_gain_calibration is legacy/internal. "
             "Pass --allow_legacy_target_label_calibration to opt in explicitly."
         )
+    if not 0.0 <= float(args.adapt_mix_rho) <= 1.0:
+        raise ValueError("--adapt_mix_rho must be in [0, 1]")
 
     if (
         args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt")
@@ -178,6 +210,7 @@ def main():
     print(f"  checkpoint={ckpt_path}")
     print(f"  target_region={args.target_region}  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  split_type={args.split_type}  max_samples={args.max_samples if args.max_samples > 0 else 'all'}")
+    print(f"  eval_batch_size={args.batch_size} (metadata; sample-wise predictor path)")
     print(f"  device={device}")
     print("=" * 60)
 
@@ -194,6 +227,11 @@ def main():
         adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
     )
+    if args.active_region_override:
+        if args.split_type not in ("source_train", "source_fit", "source_val", "source_test"):
+            raise ValueError("--active_region_override is valid only for source_* splits")
+        dataset.set_active_region(args.active_region_override)
+        print(f"  active_region_override={args.active_region_override} (source-side pseudo-query)")
 
     total_samples = len(dataset)
     n_samples = min(total_samples, args.max_samples) if args.max_samples > 0 else total_samples
@@ -201,6 +239,7 @@ def main():
 
     # Load predictor
     print(f"\nLoading checkpoint...")
+    zero_shot_predictor = None
     if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt"):
         from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
 
@@ -209,6 +248,22 @@ def main():
             device=str(device),
             target_region=args.target_region,
         )
+        if args.predictor_type == "hyperda_target_adapt" and float(args.adapt_mix_rho) < 1.0:
+            zero_shot_predictor = PromptConditionedBackbonePredictor(
+                checkpoint_path=str(ckpt_path),
+                device=str(device),
+                target_region=args.target_region,
+            )
+            import torch
+
+            raw_checkpoint = torch.load(ckpt_path, map_location=str(device), weights_only=False)
+            anchor_state = raw_checkpoint.get("target_adapter_anchor_state")
+            if not anchor_state:
+                raise ValueError(
+                    "--adapt_mix_rho < 1 requires checkpoint target_adapter_anchor_state "
+                    "to reconstruct same-context K0 predictions."
+                )
+            apply_target_adapter_state(zero_shot_predictor.model, anchor_state)
         target_context_dataset = None
         target_train_dataset = None
         if args.target_context_prompt:
@@ -340,8 +395,23 @@ def main():
             dataset.set_active_region(source_region)
             rows.extend(evaluate_split(dataset=dataset, predictor=predictor, **eval_kwargs))
         dataset.set_active_all_regions()
+        eval_hashes = {
+            "prediction_content_hash": "",
+            "prediction_record_count": n_samples_effective,
+            "metric_content_hash": metric_rows_content_hash(rows),
+            "metric_values_content_hash": metric_values_content_hash(rows),
+            "metric_row_count": len(rows),
+        }
     else:
-        rows = evaluate_split(dataset=dataset, predictor=predictor, **eval_kwargs)
+        rows, eval_hashes = evaluate_split(
+            dataset=dataset,
+            predictor=predictor,
+            return_hashes=True,
+            zero_shot_predictor=zero_shot_predictor,
+            adapt_mix_rho=float(args.adapt_mix_rho),
+            prediction_record_path=args.prediction_record_path or None,
+            **eval_kwargs,
+        )
 
     elapsed = time.time() - start_time
     print(f"  Evaluation done in {elapsed:.1f}s — {len(rows)} metric rows")
@@ -384,8 +454,10 @@ def main():
         "K": args.K,
         "seed": args.seed,
         "split_type": args.split_type,
+        "split_file": splits_json,
         "n_samples_evaluated": n_samples_effective,
         "n_metric_rows": len(rows),
+        "eval_batch_size": args.batch_size,
         "protocol_freeze_id": protocol_freeze_id,
         "split_manifest_sha256": split_manifest_sha256,
         "target_context_dates_hash": dataset_date_hash(dataset, "target_context_dates_hash"),
@@ -395,6 +467,20 @@ def main():
         "target_eval_dates_hash": dataset_date_hash(dataset, "target_eval_dates_hash"),
         "target_prompt": getattr(predictor, "_target_prompt_metadata", {}),
         "target_train_residual_gain_calibration": target_train_calibration if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt") else {},
+        "prediction_content_hash": eval_hashes.get("prediction_content_hash", ""),
+        "prediction_record_count": eval_hashes.get("prediction_record_count", 0),
+        "metric_content_hash": eval_hashes.get("metric_content_hash", ""),
+        "metric_row_content_hash": eval_hashes.get("metric_content_hash", ""),
+        "metric_values_content_hash": eval_hashes.get("metric_values_content_hash", ""),
+        "metric_hash_source": "in_memory_metric_rows_before_csv_write",
+        "adapt_mix_rho": float(args.adapt_mix_rho),
+        "zero_shot_prediction_content_hash": eval_hashes.get("zero_shot_prediction_content_hash", ""),
+        "adapted_pre_mix_prediction_content_hash": eval_hashes.get("adapted_pre_mix_prediction_content_hash", ""),
+        "final_mixed_prediction_content_hash": eval_hashes.get("final_mixed_prediction_content_hash", ""),
+        "mix_mean_abs_change_from_k0": eval_hashes.get("mix_mean_abs_change_from_k0", 0.0),
+        "mix_max_abs_change_from_k0": eval_hashes.get("mix_max_abs_change_from_k0", 0.0),
+        "mix_mean_abs_change_from_adapted": eval_hashes.get("mix_mean_abs_change_from_adapted", 0.0),
+        "mix_max_abs_change_from_adapted": eval_hashes.get("mix_max_abs_change_from_adapted", 0.0),
         "surface": metric_summary.get("surface", {}),
         "rootzone": metric_summary.get("rootzone", {}),
         "eval_time_s": elapsed,
@@ -422,10 +508,12 @@ def main():
         "target_region": args.target_region,
         "adaptation_setting": args.adaptation_setting,
         "split_type": args.split_type,
+        "split_file": splits_json,
         "predictor_type": args.predictor_type,
         "n_samples_total": total_samples,
         "n_samples_evaluated": n_samples_effective,
         "n_metric_rows": len(rows),
+        "eval_batch_size": args.batch_size,
         "target_context_dates_hash": dataset_date_hash(dataset, "target_context_dates_hash"),
         "target_support_dates_hash": dataset_date_hash(dataset, "target_support_dates_hash"),
         "target_eval_dates_hash": dataset_date_hash(dataset, "target_eval_dates_hash"),
@@ -433,6 +521,19 @@ def main():
         "metrics_computed": sorted(df["metric"].unique().tolist()),
         "variables": sorted(df["variable"].unique().tolist()),
         "seasonal_breakdown": sorted(df["season"].unique().tolist()) if "season" in df.columns else [],
+        "prediction_content_hash": eval_hashes.get("prediction_content_hash", ""),
+        "prediction_record_count": eval_hashes.get("prediction_record_count", 0),
+        "metric_content_hash": eval_hashes.get("metric_content_hash", ""),
+        "metric_values_content_hash": eval_hashes.get("metric_values_content_hash", ""),
+        "metric_hash_source": "in_memory_metric_rows_before_csv_write",
+        "adapt_mix_rho": float(args.adapt_mix_rho),
+        "zero_shot_prediction_content_hash": eval_hashes.get("zero_shot_prediction_content_hash", ""),
+        "adapted_pre_mix_prediction_content_hash": eval_hashes.get("adapted_pre_mix_prediction_content_hash", ""),
+        "final_mixed_prediction_content_hash": eval_hashes.get("final_mixed_prediction_content_hash", ""),
+        "mix_mean_abs_change_from_k0": eval_hashes.get("mix_mean_abs_change_from_k0", 0.0),
+        "mix_max_abs_change_from_k0": eval_hashes.get("mix_max_abs_change_from_k0", 0.0),
+        "mix_mean_abs_change_from_adapted": eval_hashes.get("mix_mean_abs_change_from_adapted", 0.0),
+        "mix_max_abs_change_from_adapted": eval_hashes.get("mix_max_abs_change_from_adapted", 0.0),
     }
     diag_path = region_output_dir / "diagnostics.json"
     with open(diag_path, "w") as f:
