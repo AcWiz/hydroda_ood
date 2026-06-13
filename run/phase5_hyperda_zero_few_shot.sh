@@ -60,16 +60,52 @@ else
     exit 2
 fi
 
-ADAPTATION_STEPS="${MAX_STEPS:-${ADAPTATION_STEPS:-${DEFAULT_STEPS}}}"
+ADAPTATION_STEPS="${ADAPT_MAX_STEPS:-${MAX_STEPS:-${ADAPTATION_STEPS:-${DEFAULT_STEPS}}}}"
 ADAPT_RECIPE="${ADAPT_RECIPE:-source_anchor}"
-ANCHOR_ALPHA="${ANCHOR_ALPHA:-${DEFAULT_ANCHOR_ALPHA}}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
-LR="${LR:-${DEFAULT_LR}}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
-GRAD_CLIP="${GRAD_CLIP:-1.0}"
+ANCHOR_ALPHA="${ADAPT_ANCHOR_ALPHA:-${ANCHOR_ALPHA:-${DEFAULT_ANCHOR_ALPHA}}}"
+ADAPT_BATCH_SIZE="${ADAPT_BATCH_SIZE:-${BATCH_SIZE:-8}}"
+LR="${ADAPT_LR:-${LR:-${DEFAULT_LR}}}"
+WEIGHT_DECAY="${ADAPT_WEIGHT_DECAY:-${WEIGHT_DECAY:-1e-4}}"
+GRAD_CLIP="${ADAPT_GRAD_CLIP:-${GRAD_CLIP:-1.0}}"
+LAMBDA_PRIOR="${ADAPT_LAMBDA_PRIOR:-${LAMBDA_PRIOR:-1e-3}}"
+LAMBDA_LATENT="${ADAPT_LAMBDA_LATENT:-${LAMBDA_LATENT:-1e-3}}"
+LAMBDA_GAIN="${ADAPT_LAMBDA_GAIN:-${LAMBDA_GAIN:-1e-2}}"
+LAMBDA_GAIN_SMOOTH="${ADAPT_LAMBDA_GAIN_SMOOTH:-${LAMBDA_GAIN_SMOOTH:-1e-3}}"
+LAMBDA_ANALYSIS="${ADAPT_LAMBDA_ANALYSIS:-${LAMBDA_ANALYSIS:-0.25}}"
+SCHEDULE_LABEL="${SCHEDULE_LABEL:-}"
 TARGET_LATENT_DIM="${TARGET_LATENT_DIM:-32}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
+SPLITS_JSON="${SPLITS_JSON:-artifacts/splits/US_loro_zero_few_shot_splits.json}"
+ADAPT_SCOPE="${ADAPT_SCOPE:-all}"
+ADAPT_SOLVER="${ADAPT_SOLVER:-adamw}"
+FREEZE_MONTHLY_GAIN="${FREEZE_MONTHLY_GAIN:-0}"
+RIDGE_LAMBDA="${RIDGE_LAMBDA:-1.0}"
+RIDGE_CLIP_COEFF_NORM="${RIDGE_CLIP_COEFF_NORM:-1.0}"
+RIDGE_TRUST_REGION_RADIUS="${RIDGE_TRUST_REGION_RADIUS:-1.0}"
+RIDGE_MAX_FEATURE_PIXELS="${RIDGE_MAX_FEATURE_PIXELS:-20000}"
+RIDGE_STANDARDIZE_FEATURES="${RIDGE_STANDARDIZE_FEATURES:-0}"
+TRUST_REGION_MODE="${TRUST_REGION_MODE:-none}"
+TRUST_TOTAL_RADIUS="${TRUST_TOTAL_RADIUS:-0.0}"
+TRUST_PROMPT_RADIUS="${TRUST_PROMPT_RADIUS:-0.0}"
+TRUST_GAIN_RADIUS="${TRUST_GAIN_RADIUS:-0.0}"
+TRUST_COEFF_RADIUS="${TRUST_COEFF_RADIUS:-0.0}"
+TRUST_SPATIAL_RADIUS="${TRUST_SPATIAL_RADIUS:-0.0}"
+SUPPORT_LOSS_REDUCTION="${SUPPORT_LOSS_REDUCTION:-global_pixel}"
+AUDIT_IDENTITY="${AUDIT_IDENTITY:-0}"
+AUDIT_IDENTITY_TOLERANCE="${AUDIT_IDENTITY_TOLERANCE:-1e-8}"
+AUDIT_ARGS=()
+FREEZE_MONTHLY_GAIN_ARGS=()
+RIDGE_STANDARDIZE_ARGS=()
+if [[ "${AUDIT_IDENTITY}" == "1" || "${AUDIT_IDENTITY,,}" == "true" ]]; then
+    AUDIT_ARGS=(--audit_identity)
+fi
+if [[ "${FREEZE_MONTHLY_GAIN}" == "1" || "${FREEZE_MONTHLY_GAIN,,}" == "true" ]]; then
+    FREEZE_MONTHLY_GAIN_ARGS=(--freeze_monthly_gain)
+fi
+if [[ "${RIDGE_STANDARDIZE_FEATURES}" == "1" || "${RIDGE_STANDARDIZE_FEATURES,,}" == "true" ]]; then
+    RIDGE_STANDARDIZE_ARGS=(--ridge_standardize_features)
+fi
 
 echo "============================================"
 echo "Phase 5 HyperDA Zero/Few-Shot Generalization"
@@ -82,9 +118,16 @@ echo "  target_support=K labeled cycles"
 echo "  target_val=unused_in_main_protocol"
 echo "  target_eval=2023-2025 final offline evaluation"
 echo "  split_artifact=artifacts/splits/US_loro_zero_few_shot_splits.json"
+echo "  active_splits_json=${SPLITS_JSON}"
 echo "  model_selection_source=source_val_preregistered"
 echo "  adapt_recipe=${ADAPT_RECIPE} anchor_alpha=${ANCHOR_ALPHA}"
-echo "  adaptation_steps=${ADAPTATION_STEPS} batch_size=${BATCH_SIZE} lr=${LR}"
+echo "  adapt_scope=${ADAPT_SCOPE} adapt_solver=${ADAPT_SOLVER} freeze_monthly_gain=${FREEZE_MONTHLY_GAIN} audit_identity=${AUDIT_IDENTITY}"
+echo "  ridge_lambda=${RIDGE_LAMBDA} ridge_clip_coeff_norm=${RIDGE_CLIP_COEFF_NORM} ridge_trust_region_radius=${RIDGE_TRUST_REGION_RADIUS} ridge_max_feature_pixels=${RIDGE_MAX_FEATURE_PIXELS} ridge_standardize_features=${RIDGE_STANDARDIZE_FEATURES}"
+echo "  trust_region_mode=${TRUST_REGION_MODE} trust_total=${TRUST_TOTAL_RADIUS} trust_prompt=${TRUST_PROMPT_RADIUS} trust_gain=${TRUST_GAIN_RADIUS} trust_coeff=${TRUST_COEFF_RADIUS} trust_spatial=${TRUST_SPATIAL_RADIUS}"
+echo "  support_loss_reduction=${SUPPORT_LOSS_REDUCTION}"
+echo "  schedule_label=${SCHEDULE_LABEL}"
+echo "  adaptation_steps=${ADAPTATION_STEPS} adapt_batch_size=${ADAPT_BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} grad_clip=${GRAD_CLIP}"
+echo "  lambda_prior=${LAMBDA_PRIOR} lambda_latent=${LAMBDA_LATENT} lambda_gain=${LAMBDA_GAIN} lambda_gain_smooth=${LAMBDA_GAIN_SMOOTH} lambda_analysis=${LAMBDA_ANALYSIS}"
 echo "  output_dir=${OUTPUT_DIR:-auto}"
 echo "============================================"
 
@@ -96,14 +139,38 @@ PYTHONPATH=. python scripts/train/train_hyperda_few_shot_adapt.py \
     --seed "${SEED}" \
     --device cuda \
     --target_latent_dim "${TARGET_LATENT_DIM}" \
+    --splits_json "${SPLITS_JSON}" \
     --adaptation_steps "${ADAPTATION_STEPS}" \
+    --schedule_label "${SCHEDULE_LABEL}" \
     --adapt_recipe "${ADAPT_RECIPE}" \
     --anchor_alpha "${ANCHOR_ALPHA}" \
-    --batch_size "${BATCH_SIZE}" \
+    --adapt_scope "${ADAPT_SCOPE}" \
+    --adapt_solver "${ADAPT_SOLVER}" \
+    "${FREEZE_MONTHLY_GAIN_ARGS[@]}" \
+    --ridge_lambda "${RIDGE_LAMBDA}" \
+    --ridge_clip_coeff_norm "${RIDGE_CLIP_COEFF_NORM}" \
+    --ridge_trust_region_radius "${RIDGE_TRUST_REGION_RADIUS}" \
+    --ridge_max_feature_pixels "${RIDGE_MAX_FEATURE_PIXELS}" \
+    "${RIDGE_STANDARDIZE_ARGS[@]}" \
+    --trust_region_mode "${TRUST_REGION_MODE}" \
+    --trust_total_radius "${TRUST_TOTAL_RADIUS}" \
+    --trust_prompt_radius "${TRUST_PROMPT_RADIUS}" \
+    --trust_gain_radius "${TRUST_GAIN_RADIUS}" \
+    --trust_coeff_radius "${TRUST_COEFF_RADIUS}" \
+    --trust_spatial_radius "${TRUST_SPATIAL_RADIUS}" \
+    --support_loss_reduction "${SUPPORT_LOSS_REDUCTION}" \
+    --audit_identity_tolerance "${AUDIT_IDENTITY_TOLERANCE}" \
+    --batch_size "${ADAPT_BATCH_SIZE}" \
     --lr "${LR}" \
     --weight_decay "${WEIGHT_DECAY}" \
     --grad_clip "${GRAD_CLIP}" \
+    --lambda_prior "${LAMBDA_PRIOR}" \
+    --lambda_latent "${LAMBDA_LATENT}" \
+    --lambda_gain "${LAMBDA_GAIN}" \
+    --lambda_gain_smooth "${LAMBDA_GAIN_SMOOTH}" \
+    --lambda_analysis "${LAMBDA_ANALYSIS}" \
     --num_workers "${NUM_WORKERS}" \
     --use_lat_weighted_loss \
     $(if [[ -n "${OUTPUT_DIR}" ]]; then echo "--output_dir ${OUTPUT_DIR}"; fi) \
+    "${AUDIT_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"

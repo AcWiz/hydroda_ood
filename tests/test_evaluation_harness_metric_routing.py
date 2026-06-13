@@ -2,7 +2,12 @@ import numpy as np
 import pandas as pd
 
 from hydroda.baselines.forecast import ForecastBaseline
-from hydroda.evaluation.harness import evaluate_split, summarize_metric_rows
+from hydroda.evaluation.harness import (
+    evaluate_split,
+    metric_values_content_hash,
+    mix_prediction_with_zero_shot,
+    summarize_metric_rows,
+)
 
 
 class TinyDataset:
@@ -99,3 +104,123 @@ def test_global_metric_rows_carry_zero_few_shot_metadata():
         assert row["country_id"] == "US"
         assert row["target_region_id"] == "US-R1"
         assert row["split_role"] == "target_eval"
+
+
+def test_evaluate_split_can_return_prediction_hashes():
+    rows, hashes = evaluate_split(
+        TinyDataset(),
+        ForecastBaseline(),
+        split_role="target_eval",
+        experiment_id="tiny",
+        protocol_freeze_id="test",
+        method="forecast_only",
+        return_hashes=True,
+    )
+
+    assert rows
+    assert hashes["prediction_content_hash"]
+    assert hashes["prediction_record_count"] == 1
+    assert hashes["metric_content_hash"]
+    assert hashes["metric_row_count"] == len(rows)
+
+    repeat_rows, repeat_hashes = evaluate_split(
+        TinyDataset(),
+        ForecastBaseline(),
+        split_role="target_eval",
+        experiment_id="tiny",
+        protocol_freeze_id="test",
+        method="forecast_only",
+        return_hashes=True,
+    )
+    assert len(repeat_rows) == len(rows)
+    assert repeat_hashes == hashes
+
+
+def test_evaluate_split_can_persist_source_safe_prediction_records(tmp_path):
+    record_path = tmp_path / "prediction_records.jsonl"
+
+    rows, hashes = evaluate_split(
+        TinyDataset(),
+        ForecastBaseline(),
+        split_role="source_val",
+        experiment_id="tiny",
+        protocol_freeze_id="test",
+        method="forecast_only",
+        return_hashes=True,
+        prediction_record_path=record_path,
+    )
+
+    assert rows
+    assert record_path.exists()
+    records = [__import__("json").loads(line) for line in record_path.read_text().splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    assert record["schema_version"] == "hydroda_prediction_record_v1"
+    assert record["split_role"] == "source_val"
+    assert record["prediction_content_hash"] == hashes["prediction_content_hash"]
+    for key in [
+        "forecast_surface",
+        "analysis_surface",
+        "increment_surface",
+        "pred_increment_surface",
+        "metric_mask",
+        "latitude_weight",
+    ]:
+        assert key in record["arrays"]
+        assert record["arrays"][key]["shape"] == [2, 2]
+
+
+def test_metric_value_hash_ignores_run_metadata_but_keeps_values():
+    rows_a = evaluate_split(
+        TinyDataset(),
+        ForecastBaseline(),
+        split_role="target_eval",
+        experiment_id="tiny_a",
+        protocol_freeze_id="test",
+        method="method_a",
+    )
+    rows_b = evaluate_split(
+        TinyDataset(),
+        ForecastBaseline(),
+        split_role="target_eval",
+        experiment_id="tiny_b",
+        protocol_freeze_id="test",
+        method="method_b",
+    )
+    assert metric_values_content_hash(rows_a) == metric_values_content_hash(rows_b)
+
+    rows_b[0] = dict(rows_b[0])
+    rows_b[0]["value"] = rows_b[0]["value"] + 1.0
+
+    assert metric_values_content_hash(rows_a) != metric_rows_content_hash_for_test(rows_a)
+    assert metric_values_content_hash(rows_a) != metric_values_content_hash(rows_b)
+
+
+def metric_rows_content_hash_for_test(rows):
+    from hydroda.evaluation.harness import metric_rows_content_hash
+
+    return metric_rows_content_hash(rows)
+
+
+def test_mix_prediction_rho_zero_and_one_reproduce_endpoints():
+    sample = {
+        "forecast_surface": np.ones((2, 2), dtype=np.float32) * 10,
+        "forecast_rootzone": np.ones((2, 2), dtype=np.float32) * 20,
+    }
+    zero = {
+        "pred_increment_surface": np.ones((2, 2), dtype=np.float32),
+        "pred_increment_rootzone": np.ones((2, 2), dtype=np.float32) * 2,
+    }
+    adapted = {
+        "pred_increment_surface": np.ones((2, 2), dtype=np.float32) * 5,
+        "pred_increment_rootzone": np.ones((2, 2), dtype=np.float32) * 8,
+    }
+
+    mixed0 = mix_prediction_with_zero_shot(sample, adapted, zero, rho=0.0)
+    mixed1 = mix_prediction_with_zero_shot(sample, adapted, zero, rho=1.0)
+    mixed_half = mix_prediction_with_zero_shot(sample, adapted, zero, rho=0.5)
+
+    assert np.allclose(mixed0["pred_increment_surface"], zero["pred_increment_surface"])
+    assert np.allclose(mixed0["pred_analysis_surface"], sample["forecast_surface"] + zero["pred_increment_surface"])
+    assert np.allclose(mixed1["pred_increment_rootzone"], adapted["pred_increment_rootzone"])
+    assert np.allclose(mixed_half["pred_increment_surface"], np.ones((2, 2), dtype=np.float32) * 3)
