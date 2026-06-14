@@ -18,7 +18,7 @@ import torch
 
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
 from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
-from hydroda.models.prompt_encoder import RegionPromptEncoder
+from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
 
 
 # Mapping from region name (e.g. "US-R1") to region index (0..5)
@@ -38,6 +38,29 @@ _MAIN_HYPERDA_METHOD_IDS = {
     "hyperda_few_shot_k4",
     "hyperda_few_shot_k12",
 }
+_CONTEXT_ENCODERS = {"current_mean_std", "robust_input_side_da_diagnostics"}
+
+
+def _build_prompt_encoder(
+    *,
+    context_encoder: str,
+    num_regions: int,
+    input_channels: int,
+    hidden_dim: int,
+) -> RegionPromptEncoder:
+    if context_encoder == "current_mean_std":
+        return RegionPromptEncoder(
+            num_regions=num_regions,
+            input_channels=input_channels,
+            hidden_dim=hidden_dim,
+        )
+    if context_encoder == "robust_input_side_da_diagnostics":
+        return RobustInputSideDAPromptEncoder(
+            num_regions=num_regions,
+            input_channels=input_channels,
+            hidden_dim=hidden_dim,
+        )
+    raise ValueError(f"Unsupported context_encoder: {context_encoder}")
 
 
 def _hyperda_method_id_from_config(config: Dict[str, Any]) -> Optional[str]:
@@ -371,9 +394,13 @@ class PromptConditionedBackbonePredictor:
         self.model.to(device).eval()
         self._requires_month = is_target_adapt
 
-        # Init RegionPromptEncoder
+        # Init context prompt encoder. Old checkpoints omit this field.
         num_regions = cfg_get("num_regions", 6)
-        self.prompt_encoder = RegionPromptEncoder(
+        self.context_encoder = cfg_get("context_encoder", "current_mean_std")
+        if self.context_encoder not in _CONTEXT_ENCODERS:
+            raise ValueError(f"Unsupported checkpoint context_encoder: {self.context_encoder}")
+        self.prompt_encoder = _build_prompt_encoder(
+            context_encoder=self.context_encoder,
             num_regions=num_regions,
             input_channels=12,
             hidden_dim=prompt_dim,

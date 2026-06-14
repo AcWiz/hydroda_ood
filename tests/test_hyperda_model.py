@@ -4,6 +4,7 @@ import torch
 
 from hydroda.models.hyper_adapters import BasisHyperAdapter
 from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
+from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
 
 
 def test_basis_hyper_adapter_returns_coefficients_and_feature_shape():
@@ -86,3 +87,36 @@ def test_hyper_adapter_conditional_resunet_requires_prompt():
         assert "prompt" in str(exc).lower()
     else:
         raise AssertionError("HyperAdapterConditionalResUNet should require a prompt tensor")
+
+
+def test_prompt_encoders_return_finite_prompt_vectors():
+    """Both source-stage context encoders must preserve the prompt interface."""
+    x = torch.randn(2, 12, 8, 10)
+    x[0, 0, 0, 0] = float("nan")
+    x[1, 3, 1, 1] = float("inf")
+    region_ids = torch.tensor([0, 1], dtype=torch.long)
+    month = torch.tensor([1, 12], dtype=torch.long)
+
+    for encoder_cls in [RegionPromptEncoder, RobustInputSideDAPromptEncoder]:
+        encoder = encoder_cls(num_regions=2, input_channels=12, hidden_dim=16)
+        z = encoder(x, region_ids, month)
+
+        assert z.shape == (2, 16)
+        assert torch.isfinite(z).all()
+
+
+def test_robust_prompt_encoder_does_not_use_channel_11_as_mask_semantics():
+    """Channel 11 may vary, but robust diagnostics must not use it as a validity mask."""
+    encoder = RobustInputSideDAPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    x = torch.ones(1, 12, 4, 4)
+    x[:, 11] = 0.0
+    region_ids = torch.tensor([0], dtype=torch.long)
+    month = torch.tensor([6], dtype=torch.long)
+
+    z_zero_mask_like_channel = encoder(x, region_ids, month)
+    x[:, 11] = 1.0
+    z_one_mask_like_channel = encoder(x, region_ids, month)
+
+    assert torch.isfinite(z_zero_mask_like_channel).all()
+    assert torch.isfinite(z_one_mask_like_channel).all()
+    assert torch.allclose(z_zero_mask_like_channel, z_one_mask_like_channel, atol=1e-6)

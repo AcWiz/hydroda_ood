@@ -32,7 +32,7 @@ from hydroda.data.dataset import HydroDADataset, collate_hydroda_samples
 from hydroda.data.file_hash import compute_sha256
 from hydroda.data.protocol import ProtocolConfig
 from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
-from hydroda.models.prompt_encoder import RegionPromptEncoder
+from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
 from hydroda.training.losses import WeightedMaskedHuberLoss, MaskedHuberLoss
 from hydroda.utils.run_manager import RunManager
 from hydroda.utils.runtime import get_git_hash, get_timestamp
@@ -45,6 +45,20 @@ FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 PROTOCOL_FREEZE_ID = "hyperda_v4_3_historical_target_adapt_2015_2025_train2015_2021_val2022_test2023_2025"
 PHASE = "phase5_hyperda_target_adapt"
 _REGION_TO_IDX = {f"US-R{i}": i - 1 for i in range(1, 7)}
+
+
+def _build_source_prompt_encoder(source_config: Dict[str, Any]) -> RegionPromptEncoder:
+    context_encoder = source_config.get("context_encoder", "current_mean_std")
+    kwargs = {
+        "num_regions": int(source_config.get("num_regions", len(source_config.get("source_regions", [])) or 6)),
+        "input_channels": 12,
+        "hidden_dim": int(source_config.get("prompt_dim", 64)),
+    }
+    if context_encoder == "current_mean_std":
+        return RegionPromptEncoder(**kwargs)
+    if context_encoder == "robust_input_side_da_diagnostics":
+        return RobustInputSideDAPromptEncoder(**kwargs)
+    raise ValueError(f"Unsupported source checkpoint context_encoder: {context_encoder}")
 
 
 @dataclass
@@ -447,11 +461,7 @@ def load_source_checkpoint_for_target_adaptation(
     model.to(device)
     model.freeze_source_prior_for_target_adaptation()
 
-    prompt_encoder = RegionPromptEncoder(
-        num_regions=int(source_config.get("num_regions", len(source_config.get("source_regions", [])) or 6)),
-        input_channels=12,
-        hidden_dim=int(source_config.get("prompt_dim", 64)),
-    )
+    prompt_encoder = _build_source_prompt_encoder(source_config)
     prompt_state = source_checkpoint.get("prompt_encoder_state_dict")
     if prompt_state is not None:
         prompt_encoder.load_state_dict(prompt_state)

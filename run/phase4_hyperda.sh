@@ -16,7 +16,7 @@ set -euo pipefail
 
 TARGET_REGION="${1:-US-R1}"
 SEED="${2:-0}"
-export CUDA_VISIBLE_DEVICES="${3:-1}"
+export CUDA_VISIBLE_DEVICES="${3:-0}"
 INIT_FROM_PROMPT_CHECKPOINT="${INIT_FROM_PROMPT_CHECKPOINT:-}"
 
 cd "$(dirname "$0")/.."

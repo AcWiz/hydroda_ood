@@ -33,7 +33,7 @@ from hydroda.baselines.prompt_conditioned import (
     target_context_prompt_metadata,
 )
 from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
-from hydroda.models.prompt_encoder import RegionPromptEncoder
+from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
 from hydroda.training.losses import MaskedHuberLoss, WeightedMaskedHuberLoss
 from hydroda.utils.run_manager import RunManager
 from hydroda.utils.runtime import get_git_hash, get_timestamp
@@ -72,6 +72,20 @@ COEFF_RESIDUAL_PARAMETER_NAMES = (
     "target_adapter_coefficient_residual_d2.logit_delta",
     "target_adapter_coefficient_residual_d1.logit_delta",
 )
+
+
+def _build_source_prompt_encoder(source_config: Dict[str, Any]) -> RegionPromptEncoder:
+    context_encoder = source_config.get("context_encoder", "current_mean_std")
+    kwargs = {
+        "num_regions": int(source_config.get("num_regions", len(source_config.get("source_regions", [])) or 6)),
+        "input_channels": 12,
+        "hidden_dim": int(source_config.get("prompt_dim", 64)),
+    }
+    if context_encoder == "current_mean_std":
+        return RegionPromptEncoder(**kwargs)
+    if context_encoder == "robust_input_side_da_diagnostics":
+        return RobustInputSideDAPromptEncoder(**kwargs)
+    raise ValueError(f"Unsupported source checkpoint context_encoder: {context_encoder}")
 
 
 @dataclass
@@ -376,11 +390,7 @@ def load_source_checkpoint_for_few_shot(
     model.to(device)
     model.freeze_source_prior_for_target_adaptation()
 
-    prompt_encoder = RegionPromptEncoder(
-        num_regions=int(source_config.get("num_regions", len(source_config.get("source_regions", [])) or 6)),
-        input_channels=12,
-        hidden_dim=int(source_config.get("prompt_dim", 64)),
-    )
+    prompt_encoder = _build_source_prompt_encoder(source_config)
     prompt_state = source_checkpoint.get("prompt_encoder_state_dict")
     if prompt_state is not None:
         prompt_encoder.load_state_dict(prompt_state)

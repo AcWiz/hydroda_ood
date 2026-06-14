@@ -22,7 +22,7 @@ import torch
 
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
 from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
-from hydroda.models.prompt_encoder import RegionPromptEncoder
+from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
 from hydroda.training.losses import WeightedMaskedHuberLoss
 from scripts.train import train_prompt_conditioned_shared as train_pc
 from scripts.train.train_prompt_conditioned_shared import PromptQualityTracker, PromptConditionedTrainer
@@ -130,6 +130,19 @@ def test_parse_args_target_full_train_clears_legacy_k(monkeypatch):
     assert args.K is None
 
 
+def test_parse_args_accepts_context_encoder(monkeypatch):
+    """CLI should expose source-stage context encoder selection."""
+    monkeypatch.setattr(sys, "argv", [
+        "train_prompt_conditioned_shared.py",
+        "--target_region", "US-R1",
+        "--context_encoder", "robust_input_side_da_diagnostics",
+    ])
+
+    args = train_pc.parse_args()
+
+    assert args.context_encoder == "robust_input_side_da_diagnostics"
+
+
 def test_selection_metric_modes_choose_expected_values():
     """Checkpoint selection should respect the requested selection_metric."""
     trainer = PromptConditionedTrainer.__new__(PromptConditionedTrainer)
@@ -182,6 +195,7 @@ def test_summary_and_checkpoint_record_best_selection_value_for_safe_score():
             source_regions=["US-R1", "US-R2"],
             global_to_source_lookup={0: 0, 1: 1},
             selection_metric="source_val_transfer_safe_score",
+            context_encoder="current_mean_std",
         )
         trainer.best_loss = float("inf")
         trainer.best_safe_score = 0.42
@@ -194,6 +208,9 @@ def test_summary_and_checkpoint_record_best_selection_value_for_safe_score():
 
         assert summary["best_selection_metric"] == "source_val_transfer_safe_score"
         assert summary["best_selection_value"] == 0.42
+        assert summary["context_encoder"] == "current_mean_std"
+        assert summary["leakage_policy"]["normalization_source"] == "source_fit_only"
+        assert summary["resolved_config"]["context_encoder"] == "current_mean_std"
         assert np.isfinite(summary["best_selection_value"])
         assert summary["target_eval_usage"] == "eval_only_no_early_stopping"
         assert summary["target_query_usage"] == "eval_only_no_early_stopping"
@@ -204,6 +221,7 @@ def test_summary_and_checkpoint_record_best_selection_value_for_safe_score():
         assert "- **Target query usage**" not in readme
         assert "- **Best selection metric**: source_val_transfer_safe_score" in readme
         assert "- **Best selection value**: 0.420000" in readme
+        assert "- **Context encoder**: current_mean_std" in readme
 
         trainer.save_checkpoint(
             Path(tmpdir) / "test.pt",
@@ -217,6 +235,9 @@ def test_summary_and_checkpoint_record_best_selection_value_for_safe_score():
 
         assert ckpt["best_selection_metric"] == "source_val_transfer_safe_score"
         assert ckpt["best_selection_value"] == 0.42
+        assert ckpt["config"]["context_encoder"] == "current_mean_std"
+        assert ckpt["config"]["leakage_policy"]["target_eval_usage"] == "eval_only_no_early_stopping"
+        assert ckpt["config"]["resolved_config"]["selection_metric"] == "source_val_transfer_safe_score"
 
 
 def test_hyperda_summary_and_checkpoint_record_model_metadata():
@@ -270,6 +291,24 @@ def test_hyperda_summary_and_checkpoint_record_model_metadata():
         assert ckpt["config"]["hyper_adapter_scale"] == 0.25
 
 
+def test_checkpoint_missing_context_encoder_defaults_to_current_mean_std():
+    """Old checkpoints should load as current_mean_std context encoders."""
+    checkpoint = {"config": {"prompt_dim": 16, "num_regions": 2}}
+
+    assert train_pc.resolve_context_encoder_from_checkpoint(checkpoint) == "current_mean_std"
+
+
+def test_build_prompt_encoder_selects_robust_context_encoder():
+    encoder = train_pc.build_prompt_encoder(
+        context_encoder="robust_input_side_da_diagnostics",
+        num_regions=2,
+        input_channels=12,
+        hidden_dim=16,
+    )
+
+    assert isinstance(encoder, RobustInputSideDAPromptEncoder)
+
+
 def test_predictor_loads_hyperda_model_type():
     """Prompt-conditioned predictor should auto-load HyperDA checkpoints."""
     model = HyperAdapterConditionalResUNet(
@@ -313,6 +352,51 @@ def test_predictor_loads_hyperda_model_type():
 
         assert predictor.method_name == "hyperda_basis_adapter_shared"
         assert isinstance(predictor.model, HyperAdapterConditionalResUNet)
+
+
+def test_predictor_loads_robust_context_encoder():
+    """Predictor should instantiate the checkpoint-declared prompt encoder."""
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_adapter_scale=0.25,
+    )
+    prompt_encoder = RobustInputSideDAPromptEncoder(num_regions=2, input_channels=12, hidden_dim=16)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = Path(tmpdir) / "hyperda_robust.pt"
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+                "config": {
+                    "model_type": "hyperda_basis_adapter",
+                    "context_encoder": "robust_input_side_da_diagnostics",
+                    "width": 8,
+                    "prompt_dim": 16,
+                    "num_regions": 2,
+                    "hyper_n_basis": 3,
+                    "hyper_adapter_bottleneck": 8,
+                    "hyper_adapter_scale": 0.25,
+                    "source_region_global_indices": [1, 2],
+                },
+            },
+            ckpt_path,
+        )
+
+        from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+        predictor = PromptConditionedBackbonePredictor(
+            checkpoint_path=str(ckpt_path),
+            device="cpu",
+            target_region="US-R1",
+        )
+
+        assert isinstance(predictor.prompt_encoder, RobustInputSideDAPromptEncoder)
 
 
 def _make_prompt_predictor_checkpoint(path: Path) -> None:

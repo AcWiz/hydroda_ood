@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
-from hydroda.models.prompt_encoder import RegionPromptEncoder
+from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
 
 
 def _write_source_checkpoint(path: Path) -> None:
@@ -28,6 +28,43 @@ def _write_source_checkpoint(path: Path) -> None:
             "prompt_encoder_state_dict": prompt_encoder.state_dict(),
             "config": {
                 "model_type": "hyperda_basis_adapter",
+                "width": 4,
+                "prompt_dim": 8,
+                "hyper_n_basis": 3,
+                "hyper_adapter_bottleneck": 2,
+                "hyper_adapter_scale": 1.0,
+                "zero_raw_increment_init": True,
+                "num_regions": 5,
+                "ch_mean": [0.0] * 12,
+                "ch_std": [1.0] * 12,
+                "inc_mean": [0.0, 0.0],
+                "inc_std": [1.0, 1.0],
+                "source_regions": ["US-R2", "US-R3", "US-R4", "US-R5", "US-R6"],
+                "source_region_global_indices": [1, 2, 3, 4, 5],
+            },
+        },
+        path,
+    )
+
+
+def _write_robust_source_checkpoint(path: Path) -> None:
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=2,
+        zero_raw_increment_init=True,
+    )
+    prompt_encoder = RobustInputSideDAPromptEncoder(num_regions=5, input_channels=12, hidden_dim=8)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "config": {
+                "model_type": "hyperda_basis_adapter",
+                "context_encoder": "robust_input_side_da_diagnostics",
                 "width": 4,
                 "prompt_dim": 8,
                 "hyper_n_basis": 3,
@@ -334,6 +371,20 @@ def test_load_source_checkpoint_for_few_shot_freezes_source_prior(tmp_path):
     )
     assert state.prompt_encoder.training is False
     assert all(not p.requires_grad for p in state.prompt_encoder.parameters())
+
+
+def test_load_source_checkpoint_for_few_shot_preserves_robust_context_encoder(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import load_source_checkpoint_for_few_shot
+
+    ckpt_path = tmp_path / "source_robust.pt"
+    _write_robust_source_checkpoint(ckpt_path)
+    state = load_source_checkpoint_for_few_shot(
+        checkpoint_path=str(ckpt_path),
+        device=torch.device("cpu"),
+        target_latent_dim=4,
+    )
+
+    assert isinstance(state.prompt_encoder, RobustInputSideDAPromptEncoder)
 
 
 def test_apply_adapt_scope_controls_trainable_target_variables(tmp_path):

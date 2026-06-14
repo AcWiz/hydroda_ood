@@ -69,11 +69,12 @@ class RegionPromptEncoder(nn.Module):
         x_flat = x.view(B, C, -1)  # [B, C, H*W]
         # Handle NaN/inf by masking
         valid_mask = torch.isfinite(x_flat)
+        safe_x = torch.where(valid_mask, x_flat, torch.zeros_like(x_flat))
         # Compute mean with valid masking
         valid_count = valid_mask.float().sum(dim=-1).clamp(min=1.0)  # [B, C]
-        mean = (x_flat * valid_mask.float()).sum(dim=-1) / valid_count  # [B, C]
+        mean = safe_x.sum(dim=-1) / valid_count  # [B, C]
         # Compute std
-        diff = (x_flat - mean.unsqueeze(-1)) * valid_mask.float()
+        diff = torch.where(valid_mask, x_flat - mean.unsqueeze(-1), torch.zeros_like(x_flat))
         var = (diff ** 2).sum(dim=-1) / valid_count
         std = torch.sqrt(var.clamp(min=1e-8))  # [B, C]
 
@@ -125,3 +126,53 @@ class RegionPromptEncoder(nn.Module):
         z = self.mlp(combined)  # [B, hidden_dim]
 
         return z
+
+
+class RobustInputSideDAPromptEncoder(RegionPromptEncoder):
+    """Prompt encoder using robust input-side diagnostics only.
+
+    This encoder preserves ``RegionPromptEncoder.forward(x, region_ids, month)``
+    and replaces the input summary branch with finite-value diagnostics derived
+    from ``x``. It deliberately ignores channel 11 when constructing input
+    diagnostics so ``base_valid_mask`` cannot become an observation, loss, or
+    region-mask proxy.
+    """
+
+    def _compute_input_stats(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute robust per-channel diagnostics from finite input values.
+
+        The returned shape remains ``[B, input_channels * 2]`` for checkpoint
+        compatibility with the existing projection layer. For each channel the
+        two diagnostics are finite-value median and interquartile range. Channel
+        11 is set to neutral diagnostics and is not used as mask semantics.
+        """
+        batch_size, channels = x.shape[0], x.shape[1]
+        diagnostics = []
+        x_flat = x.reshape(batch_size, channels, -1)
+        neutral = x.new_zeros(batch_size)
+
+        for channel_idx in range(channels):
+            if channel_idx == 11:
+                diagnostics.append(neutral)
+                diagnostics.append(neutral)
+                continue
+
+            channel = x_flat[:, channel_idx, :]
+            finite = torch.isfinite(channel)
+            medians = []
+            iqrs = []
+            for sample_idx in range(batch_size):
+                values = channel[sample_idx][finite[sample_idx]]
+                if values.numel() == 0:
+                    medians.append(channel.new_tensor(0.0))
+                    iqrs.append(channel.new_tensor(0.0))
+                    continue
+                values = values.float()
+                quantiles = torch.quantile(values, values.new_tensor([0.25, 0.5, 0.75]))
+                medians.append(quantiles[1].to(channel.dtype))
+                iqrs.append((quantiles[2] - quantiles[0]).to(channel.dtype))
+
+            diagnostics.append(torch.stack(medians))
+            diagnostics.append(torch.stack(iqrs))
+
+        return torch.stack(diagnostics, dim=1)

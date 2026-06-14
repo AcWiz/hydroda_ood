@@ -45,7 +45,7 @@ from hydroda.data.leakage_guard import LeakageGuard
 from hydroda.data.protocol import ProtocolConfig
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
 from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
-from hydroda.models.prompt_encoder import RegionPromptEncoder
+from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
 from hydroda.training.calibration import calibrate_residual_gain, calibrate_residual_gain_region_aware
 from hydroda.training.losses import MaskedHuberLoss, WeightedMaskedHuberLoss
 from hydroda.metrics.skill import weighted_analysis_skill_components
@@ -65,6 +65,39 @@ PHASE = "phase4_prompt_conditioned"
 
 _ALL_US_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 _GLOBAL_REGION_IDX_MAP = {r: i for i, r in enumerate(_ALL_US_REGIONS)}
+CONTEXT_ENCODERS = ("current_mean_std", "robust_input_side_da_diagnostics")
+
+
+def build_prompt_encoder(
+    *,
+    context_encoder: str,
+    num_regions: int,
+    input_channels: int,
+    hidden_dim: int,
+) -> RegionPromptEncoder:
+    """Instantiate the configured source-stage prompt context encoder."""
+    if context_encoder == "current_mean_std":
+        return RegionPromptEncoder(
+            num_regions=num_regions,
+            input_channels=input_channels,
+            hidden_dim=hidden_dim,
+        )
+    if context_encoder == "robust_input_side_da_diagnostics":
+        return RobustInputSideDAPromptEncoder(
+            num_regions=num_regions,
+            input_channels=input_channels,
+            hidden_dim=hidden_dim,
+        )
+    raise ValueError(f"Unsupported context_encoder: {context_encoder}")
+
+
+def resolve_context_encoder_from_checkpoint(checkpoint: Dict[str, Any]) -> str:
+    """Return checkpoint context encoder, defaulting old checkpoints safely."""
+    config = checkpoint.get("config", {})
+    context_encoder = config.get("context_encoder", "current_mean_std")
+    if context_encoder not in CONTEXT_ENCODERS:
+        raise ValueError(f"Unsupported checkpoint context_encoder: {context_encoder}")
+    return str(context_encoder)
 
 
 def _compute_channel_stats(
@@ -280,6 +313,7 @@ class PromptConditionedTrainer:
         target_region: Optional[str] = None,
         adaptation_setting: str = "zero_shot_context",
         K: Optional[int] = None,
+        context_encoder: str = "current_mean_std",
         model_type: str = "prompt_conditioned",
         hyper_n_basis: int = 8,
         hyper_adapter_bottleneck: Optional[int] = None,
@@ -332,6 +366,9 @@ class PromptConditionedTrainer:
         self.cuda_sync_debug = cuda_sync_debug
         self.target_region = target_region
         self.adaptation_setting = adaptation_setting
+        if context_encoder not in CONTEXT_ENCODERS:
+            raise ValueError(f"Unsupported context_encoder: {context_encoder}")
+        self.context_encoder = context_encoder
         if adaptation_setting == "target_full_train":
             self.K = None
         elif K is None and adaptation_setting == "zero_shot_context":
@@ -343,6 +380,23 @@ class PromptConditionedTrainer:
         self.hyper_adapter_bottleneck = hyper_adapter_bottleneck
         self.hyper_adapter_scale = float(hyper_adapter_scale)
         self._source_region_global_indices = sorted(global_to_source_lookup.keys()) if global_to_source_lookup else []
+        self.leakage_policy = {
+            "train_split": "source_fit",
+            "selection_split": "source_val",
+            "normalization_source": "source_fit_only",
+            "model_selection_source": "source_val_only" if source_val_dataset is not None else "best_train_loss",
+            "target_context_usage": "input_side_only",
+            "target_val_usage": "unused_in_main_protocol",
+            "target_eval_usage": "eval_only_no_early_stopping",
+            "forbidden_fields": [
+                "analysis_*",
+                "increment_*",
+                "prediction_error_*",
+                "target_val",
+                "target_eval",
+                "channel_11_as_observation_or_region_mask",
+            ],
+        }
 
         # AMP
         self._amp_scaler: Optional[GradScaler] = None
@@ -452,6 +506,32 @@ class PromptConditionedTrainer:
         if self.selection_metric == "train_loss":
             return float(train_loss), False
         raise ValueError(f"Unsupported selection_metric: {self.selection_metric}")
+
+    def _resolved_config_metadata(self) -> Dict[str, Any]:
+        """Return the protocol-relevant resolved config saved in artifacts."""
+        return {
+            "target_region": self.target_region,
+            "adaptation_setting": self.adaptation_setting,
+            "K": self.K,
+            "model_type": self.model_type,
+            "context_encoder": self.context_encoder,
+            "width": self.model_width,
+            "prompt_dim": self.prompt_dim,
+            "hyper_n_basis": self.hyper_n_basis,
+            "hyper_adapter_bottleneck": self.hyper_adapter_bottleneck,
+            "hyper_adapter_scale": self.hyper_adapter_scale,
+            "max_epochs": self.max_epochs,
+            "batch_size": self.batch_size,
+            "accum_steps": self.accum_steps,
+            "lr": self.lr,
+            "weight_decay": self.weight_decay,
+            "selection_metric": self.selection_metric,
+            "source_val_residual_gain": self.source_val_residual_gain,
+            "source_regions": self.source_regions,
+            "source_region_global_indices": self._source_region_global_indices,
+            "split_manifest_path": self.split_manifest_path,
+            "protocol_freeze_id": self.protocol_freeze_id,
+        }
 
     def _compute_normalization_stats(self) -> None:
         print(f"Computing normalization stats from training dataset (n={len(self.train_dataset)})...")
@@ -1271,6 +1351,7 @@ class PromptConditionedTrainer:
             f"- **Protocol**: {self.protocol_freeze_id}",
             f"- **Split manifest**: {self.split_manifest_path}",
             f"- **Model type**: {self.model_type}",
+            f"- **Context encoder**: {self.context_encoder}",
             f"- **Model width**: {self.model_width}",
             f"- **Prompt dim**: {self.prompt_dim}",
             f"- **Hyper n basis**: {self.hyper_n_basis}",
@@ -1372,6 +1453,7 @@ class PromptConditionedTrainer:
                 "hyper_n_basis": self.hyper_n_basis,
                 "hyper_adapter_bottleneck": self.hyper_adapter_bottleneck,
                 "hyper_adapter_scale": self.hyper_adapter_scale,
+                "context_encoder": self.context_encoder,
                 "num_regions": self.prompt_encoder.num_regions,
                 "num_workers": self.num_workers,
                 "target_increment_normalization": self.target_increment_normalization,
@@ -1396,6 +1478,8 @@ class PromptConditionedTrainer:
                 "inc_std": self._inc_std.tolist() if self._inc_std is not None else None,
                 "source_regions": self.source_regions,
                 "source_region_global_indices": self._source_region_global_indices,
+                "leakage_policy": self.leakage_policy,
+                "resolved_config": self._resolved_config_metadata(),
             },
         }
         # Attach gain calibration results
@@ -1461,6 +1545,7 @@ class PromptConditionedTrainer:
             "model_width": self.model_width,
             "prompt_dim": self.prompt_dim,
             "model_type": self.model_type,
+            "context_encoder": self.context_encoder,
             "hyper_n_basis": self.hyper_n_basis,
             "hyper_adapter_bottleneck": self.hyper_adapter_bottleneck,
             "hyper_adapter_scale": self.hyper_adapter_scale,
@@ -1482,6 +1567,8 @@ class PromptConditionedTrainer:
             "target_eval_usage": "eval_only_no_early_stopping",
             "target_query_usage": "eval_only_no_early_stopping",
             "leakage_guard_status": "pass",
+            "leakage_policy": self.leakage_policy,
+            "resolved_config": self._resolved_config_metadata(),
             "skipped_steps": self._skipped_steps,
             "git_hash": get_git_hash(),
             "timestamp": get_timestamp(),
@@ -1506,6 +1593,9 @@ def parse_args():
     parser.add_argument("--model_type", type=str, default="prompt_conditioned",
         choices=["prompt_conditioned", "hyperda_basis_adapter"],
         help="Conditional model type to train")
+    parser.add_argument("--context_encoder", type=str, default="current_mean_std",
+        choices=list(CONTEXT_ENCODERS),
+        help="Prompt context encoder (default current_mean_std)")
     parser.add_argument("--hyper_n_basis", type=int, default=8,
         help="Number of generated adapter bases for model_type=hyperda_basis_adapter")
     parser.add_argument("--hyper_adapter_bottleneck", type=int, default=None,
@@ -1634,6 +1724,7 @@ def main():
         "K": args.K,
         "seed": args.seed,
         "model_type": args.model_type,
+        "context_encoder": args.context_encoder,
         "width": args.width, "prompt_dim": args.prompt_dim,
         "hyper_n_basis": args.hyper_n_basis,
         "hyper_adapter_bottleneck": args.hyper_adapter_bottleneck,
@@ -1666,6 +1757,10 @@ def main():
         if args.output_dir is None:
             args.output_dir = str(resume_path.parent.parent)
             print(f"[resume] output_dir auto-derived from checkpoint: {args.output_dir}")
+        resume_ckpt_for_config = torch.load(resume_path, map_location="cpu", weights_only=False)
+        args.context_encoder = resolve_context_encoder_from_checkpoint(resume_ckpt_for_config)
+        run_config["context_encoder"] = args.context_encoder
+        print(f"[resume] context_encoder restored from checkpoint: {args.context_encoder}")
 
     # RunManager
     run_manager = RunManager(
@@ -1683,6 +1778,7 @@ def main():
         seed=args.seed,
     )
     run_manager.save_config(run_config, "config.yaml")
+    run_manager.save_config(run_config, "config_resolved.yaml")
     run_manager.save_git_info()
     run_manager.save_protocol({
         "protocol_freeze_id": PROTOCOL_FREEZE_ID,
@@ -1764,7 +1860,8 @@ def main():
             prompt_dim=args.prompt_dim,
             zero_raw_increment_init=args.zero_raw_increment_init,
         )
-    prompt_encoder = RegionPromptEncoder(
+    prompt_encoder = build_prompt_encoder(
+        context_encoder=args.context_encoder,
         num_regions=num_source_regions,
         input_channels=12,
         hidden_dim=args.prompt_dim,
@@ -1833,6 +1930,7 @@ def main():
         target_region=args.target_region,
         adaptation_setting=args.adaptation_setting,
         K=args.K,
+        context_encoder=args.context_encoder,
         model_type=args.model_type,
         hyper_n_basis=args.hyper_n_basis,
         hyper_adapter_bottleneck=args.hyper_adapter_bottleneck,
