@@ -279,6 +279,20 @@ def test_dataset_default_split_selection_prefers_main_zero_shot(tmp_path):
     assert entry["adaptation_setting"] == "zero_shot_context"
 
 
+def test_dataset_date_records_fallback_when_primary_key_is_empty():
+    from hydroda.data.dataset import HydroDADataset
+
+    dataset = HydroDADataset.__new__(HydroDADataset)
+    dataset._split_entry = {
+        "source_test_dates": [],
+        "target_eval_dates": [_record(4, "2023-01-15")],
+    }
+
+    records = HydroDADataset._get_date_records(dataset, "source_test_dates")
+
+    assert records == [_record(4, "2023-01-15")]
+
+
 def test_paper_main_registry_uses_zero_few_shot_methods():
     from hydroda.baselines.registry import PAPER_MAIN_BASELINES, assert_allowed_for_table
 

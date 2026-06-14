@@ -293,7 +293,9 @@ class HydroDADataset(Dataset):
         while current and current not in seen:
             seen.add(current)
             if current in self._split_entry:
-                return list(self._split_entry[current])
+                records = list(self._split_entry[current])
+                if records or current not in _DATES_KEY_FALLBACKS:
+                    return records
             current = _DATES_KEY_FALLBACKS.get(current, "")
         return []
 
