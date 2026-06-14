@@ -1,0 +1,101 @@
+schema_version: hyperda_plus_source_prior_matrix_v1
+matrix_id: phase4_hyperda_plus_source_prior_matrix
+description: Source-stage HyperDA++ prior matrix for V4.4 zero/few-shot protocol.
+
+protocol:
+  protocol_freeze_id: hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025
+  split_manifest: artifacts/splits/US_loro_zero_few_shot_splits.json
+  train_split: source_fit
+  train_dates: 2015-01-01_to_2021-12-31
+  selection_split: source_val
+  selection_dates: 2022-01-01_to_2022-12-31
+  target_context_usage: input_side_only_2015_2021
+  target_val_usage: unused_in_main_protocol
+  target_eval_usage: forbidden_for_matrix_selection
+  leakage_policy:
+    normalizer_source: source_fit_only
+    model_selection_source: source_val_only
+    forbidden_for_selection:
+      - target_val
+      - target_eval
+      - target_eval_metrics
+      - target_eval_labels
+      - prediction_records
+
+defaults:
+  target_region: US-R1
+  seed: 0
+  gpu: 1
+  adaptation_setting: zero_shot_context
+  K: 0
+  model_type: hyperda_basis_adapter
+  max_epochs: 50
+  batch_size: 16
+  accum_steps: 4
+  lr: 3e-4
+  weight_decay: 1e-4
+  grad_clip: 1.0
+  num_workers: 0
+  device: cuda
+  amp: true
+  zero_raw_increment_init: true
+  target_increment_normalization: true
+  use_lat_weighted_loss: true
+  log_every_steps: 100
+  eval_every_epochs: 1
+  checkpoint_every: 10
+  selection_metric: source_val_transfer_safe_score
+  hyper_adapter_bottleneck: 32
+  hyper_adapter_scale: 1.0
+  source_fit: 2015-2021
+  source_val: 2022
+
+selection:
+  order:
+    - maximize: source_val_transfer_safe_score
+    - maximize: source_val_skill_rootzone
+    - maximize_optional_no_promotion: source_pseudo_target_k12_non_degradation_rate
+    - minimize_optional_no_promotion: source_pseudo_target_adaptation_drift
+  target_eval_policy: never_read
+
+candidates:
+  - candidate_id: H0_current
+    label: Current HyperDA baseline
+    width: 32
+    prompt_dim: 64
+    hyper_n_basis: 8
+    context_encoder: current_mean_std
+    episodic_prior: false
+  - candidate_id: H1_capacity_safe
+    label: Moderate capacity HyperDA
+    width: 48
+    prompt_dim: 96
+    hyper_n_basis: 12
+    context_encoder: current_mean_std
+    episodic_prior: false
+    selection_constraint: must_improve_source_val_over_H0
+  - candidate_id: H2_capacity_safe_large
+    label: Larger capacity HyperDA
+    width: 64
+    prompt_dim: 128
+    hyper_n_basis: 16
+    context_encoder: current_mean_std
+    episodic_prior: false
+    selection_constraint: must_improve_source_val_over_H0
+  - candidate_id: H3_context_plus
+    label: Robust input-side DA diagnostics context
+    width: 32
+    prompt_dim: 64
+    hyper_n_basis: 8
+    context_encoder: robust_input_side_da_diagnostics
+    episodic_prior: false
+    leakage_audit: explicit_input_side_diagnostics_no_target_eval_no_target_val
+  - candidate_id: H4_episode_prior
+    label: Source episode prior
+    width: 32
+    prompt_dim: 64
+    hyper_n_basis: 8
+    context_encoder: robust_input_side_da_diagnostics
+    episodic_prior: true
+    status: todo_scaffold
+    trainer: scripts/train/train_hyperda_episode_prior.py

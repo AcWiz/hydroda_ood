@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 
 def test_research_plan_protocol_block_uses_zero_few_shot_dates():
     text = Path("完整研究计划方案.md").read_text()
@@ -215,6 +217,68 @@ def test_hyperda_train_wrapper_is_source_stage_prior():
     assert "US_loro_kdate_splits.json" not in text
     assert "--model_type hyperda_basis_adapter" in text
     assert "--selection_metric source_val_transfer_safe_score" in text
+
+
+def test_hyperda_plus_source_prior_matrix_yaml_declares_h0_h4():
+    cfg = yaml.safe_load(Path("configs/experiments/hyperda_plus_source_prior_matrix.yaml").read_text())
+
+    assert cfg["protocol"]["split_manifest"] == "artifacts/splits/US_loro_zero_few_shot_splits.json"
+    assert cfg["protocol"]["train_split"] == "source_fit"
+    assert cfg["protocol"]["selection_split"] == "source_val"
+    assert cfg["protocol"]["target_val_usage"] == "unused_in_main_protocol"
+    assert cfg["protocol"]["target_eval_usage"] == "forbidden_for_matrix_selection"
+
+    defaults = cfg["defaults"]
+    assert defaults["model_type"] == "hyperda_basis_adapter"
+    assert defaults["K"] == 0
+    assert defaults["max_epochs"] == 50
+    assert defaults["batch_size"] == 16
+    assert defaults["accum_steps"] == 4
+    assert defaults["lr"] == "3e-4"
+    assert defaults["selection_metric"] == "source_val_transfer_safe_score"
+
+    candidates = {c["candidate_id"]: c for c in cfg["candidates"]}
+    assert list(candidates) == [
+        "H0_current",
+        "H1_capacity_safe",
+        "H2_capacity_safe_large",
+        "H3_context_plus",
+        "H4_episode_prior",
+    ]
+    assert candidates["H0_current"]["width"] == 32
+    assert candidates["H0_current"]["prompt_dim"] == 64
+    assert candidates["H0_current"]["hyper_n_basis"] == 8
+    assert candidates["H0_current"]["context_encoder"] == "current_mean_std"
+    assert candidates["H0_current"]["episodic_prior"] is False
+    assert candidates["H3_context_plus"]["context_encoder"] == "robust_input_side_da_diagnostics"
+    assert candidates["H4_episode_prior"]["status"] == "todo_scaffold"
+
+
+def test_hyperda_plus_matrix_wrapper_is_source_only_protocol():
+    text = Path("run/phase4_hyperda_plus_matrix.sh").read_text()
+
+    assert "US_loro_zero_few_shot_splits.json" in text
+    assert "--selection_metric source_val_transfer_safe_score" in text
+    assert "--context_encoder" in text
+    assert "--output_dir" in text
+    assert "source_fit=2015-2021" in text
+    assert "source_val=2022" in text
+    assert "target_val=unused_in_main_protocol" in text
+    assert "target_eval=forbidden_for_matrix_selection" in text
+    assert "target_full_history" not in text
+    assert "all-regions paper-main" not in text
+    assert "target_eval/" not in text
+    assert "scripts/report/hyperda_plus_source_prior_matrix.py" in text
+    assert "TODO_H4_episode_prior.md" in text
+
+
+def test_hyperda_plus_matrix_h4_todo_documents_episode_prior_interface():
+    text = Path("run/phase4_hyperda_plus_matrix.sh").read_text()
+
+    assert "build_source_episode_adapter_bank.py" in text
+    assert "train_hyperda_episode_prior.py" in text
+    assert "source_side_episodic_validation" in text
+    assert "leakage_metadata" in text
 
 
 def test_hyperda_inference_wrapper_uses_target_eval_protocol():
