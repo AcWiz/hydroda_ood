@@ -76,6 +76,30 @@ def dataset_date_hash(dataset: HydroDADataset, key: str) -> str:
     return str(getattr(dataset, "_split_entry", {}).get(key, ""))
 
 
+def validate_target_context_prompt_hash(
+    *,
+    predictor: object,
+    dataset: HydroDADataset,
+    predictor_type: str,
+    split_type: str,
+) -> None:
+    """Ensure eval uses the same target-context monthly prompt state as adaptation."""
+    if predictor_type != "hyperda_target_adapt" or split_type not in ("target_eval", "target_query"):
+        return
+    split_hash = dataset_date_hash(dataset, "target_context_dates_hash")
+    prompt_metadata = dict(getattr(predictor, "_target_prompt_metadata", {}) or {})
+    prompt_hash = str(
+        prompt_metadata.get("context_hash")
+        or prompt_metadata.get("context_date_hash")
+        or ""
+    )
+    if split_hash and prompt_hash and split_hash != prompt_hash:
+        raise ValueError(
+            "target_context_dates_hash mismatch between eval split manifest and "
+            f"checkpoint target_context_prompt_state.context_hash: {split_hash!r} != {prompt_hash!r}"
+        )
+
+
 def aggregate_results(rows):
     """Aggregate metrics by region, season, variable."""
     if not rows:
@@ -156,6 +180,42 @@ def main():
         default="",
         help="Optional JSONL path for source-safe prediction records used by offline calibration mixing.",
     )
+    parser.add_argument(
+        "--stage3_k0_context_shrinkage",
+        action="store_true",
+        help="Diagnostic M2.4: post-hoc K=0 source-base residual shrinkage from target_context input reliability.",
+    )
+    parser.add_argument(
+        "--stage3_k0_context_shrinkage_rho_cap",
+        type=float,
+        default=1.0,
+        help="Source-calibrated upper cap for M2.4 target_context reliability shrinkage rho.",
+    )
+    parser.add_argument(
+        "--stage3_k0_context_shrinkage_policy",
+        type=str,
+        default="variable_reliability_v1",
+        choices=["scalar_reliability_v1", "variable_reliability_v1", "source_episode_calibrated_v1"],
+        help="Stage 3 K=0 M2.4a residual guard policy.",
+    )
+    parser.add_argument(
+        "--stage3_k0_context_shrinkage_surface_rho_cap",
+        type=float,
+        default=None,
+        help="Surface-channel M2.4a rho cap. Defaults to --stage3_k0_context_shrinkage_rho_cap.",
+    )
+    parser.add_argument(
+        "--stage3_k0_context_shrinkage_rootzone_rho_cap",
+        type=float,
+        default=None,
+        help="Rootzone-channel M2.4a rho cap. Defaults to --stage3_k0_context_shrinkage_rho_cap.",
+    )
+    parser.add_argument(
+        "--stage3_k0_context_shrinkage_policy_json",
+        type=str,
+        default="",
+        help="Optional source-episode calibrated M2.4a policy JSON with variable rho caps.",
+    )
     args = parser.parse_args()
 
     if args.adaptation_setting is None:
@@ -176,6 +236,28 @@ def main():
         )
     if not 0.0 <= float(args.adapt_mix_rho) <= 1.0:
         raise ValueError("--adapt_mix_rho must be in [0, 1]")
+    if not 0.0 <= float(args.stage3_k0_context_shrinkage_rho_cap) <= 1.0:
+        raise ValueError("--stage3_k0_context_shrinkage_rho_cap must be in [0, 1]")
+    if args.stage3_k0_context_shrinkage_surface_rho_cap is None:
+        args.stage3_k0_context_shrinkage_surface_rho_cap = float(args.stage3_k0_context_shrinkage_rho_cap)
+    if args.stage3_k0_context_shrinkage_rootzone_rho_cap is None:
+        args.stage3_k0_context_shrinkage_rootzone_rho_cap = float(args.stage3_k0_context_shrinkage_rho_cap)
+    if not 0.0 <= float(args.stage3_k0_context_shrinkage_surface_rho_cap) <= 1.0:
+        raise ValueError("--stage3_k0_context_shrinkage_surface_rho_cap must be in [0, 1]")
+    if not 0.0 <= float(args.stage3_k0_context_shrinkage_rootzone_rho_cap) <= 1.0:
+        raise ValueError("--stage3_k0_context_shrinkage_rootzone_rho_cap must be in [0, 1]")
+    if args.stage3_k0_context_shrinkage:
+        if args.predictor_type != "hyperda_target_adapt":
+            raise ValueError("--stage3_k0_context_shrinkage requires --predictor_type hyperda_target_adapt")
+        if int(args.K) != 0 or args.adaptation_setting != "zero_shot_context":
+            raise ValueError("--stage3_k0_context_shrinkage is valid only for K=0 zero_shot_context")
+        if args.split_type not in ("target_eval", "target_query"):
+            raise ValueError("--stage3_k0_context_shrinkage is valid only for target_eval/target_query")
+        if args.stage3_k0_context_shrinkage_policy == "source_episode_calibrated_v1" and not args.stage3_k0_context_shrinkage_policy_json:
+            raise ValueError(
+                "--stage3_k0_context_shrinkage_policy=source_episode_calibrated_v1 requires "
+                "--stage3_k0_context_shrinkage_policy_json"
+            )
 
     if (
         args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt")
@@ -312,6 +394,25 @@ def main():
                 f"labels={prompt_metadata['label_usage']}"
             )
 
+        if args.stage3_k0_context_shrinkage:
+            shrinkage_metadata = predictor.enable_stage3_k0_context_shrinkage(
+                source_calibrated_rho_cap=float(args.stage3_k0_context_shrinkage_rho_cap),
+                policy=str(args.stage3_k0_context_shrinkage_policy),
+                surface_rho_cap=float(args.stage3_k0_context_shrinkage_surface_rho_cap),
+                rootzone_rho_cap=float(args.stage3_k0_context_shrinkage_rootzone_rho_cap),
+                policy_json_path=str(args.stage3_k0_context_shrinkage_policy_json or ""),
+            )
+            if shrinkage_metadata is None:
+                shrinkage_metadata = getattr(predictor, "stage3_k0_context_shrinkage_metadata", {})
+            print(
+                "  Stage 3 K=0 context shrinkage enabled: "
+                f"variant={shrinkage_metadata['stage3_variant']} "
+                f"policy={shrinkage_metadata.get('policy')} "
+                f"rho_cap={shrinkage_metadata['rho_cap']} "
+                f"rho_surface_cap={shrinkage_metadata.get('rho_surface_cap')} "
+                f"rho_rootzone_cap={shrinkage_metadata.get('rho_rootzone_cap')}"
+            )
+
         target_train_calibration = {}
         if args.target_train_residual_gain_calibration:
             print("  Calibrating residual gain on legacy target support labels...")
@@ -360,6 +461,12 @@ def main():
             device=str(device),
         )
     print(f"  method: {predictor.method_name}")
+    validate_target_context_prompt_hash(
+        predictor=predictor,
+        dataset=dataset,
+        predictor_type=args.predictor_type,
+        split_type=args.split_type,
+    )
 
     # Run evaluation
     print(f"\nRunning evaluation...")
@@ -445,6 +552,11 @@ def main():
         by_season_df.to_csv(by_season_path, index=False)
 
     metric_summary = summarize_metric_rows(df)
+    stage3_protocol_metadata = dict(getattr(predictor, "stage3_protocol_metadata", {}) or {})
+    stage3_k0_context_shrinkage = dict(
+        getattr(predictor, "stage3_k0_context_shrinkage_metadata", {}) or {"enabled": False}
+    )
+    stage3_k0_context_shrinkage.update(eval_hashes.get("stage3_k0_context_shrinkage", {}))
 
     summary = {
         "method": predictor.method_name,
@@ -466,6 +578,8 @@ def main():
         "target_train_dates_hash": dataset_date_hash(dataset, "target_train_dates_hash"),
         "target_eval_dates_hash": dataset_date_hash(dataset, "target_eval_dates_hash"),
         "target_prompt": getattr(predictor, "_target_prompt_metadata", {}),
+        "stage3_protocol": stage3_protocol_metadata,
+        "stage3_k0_context_shrinkage": stage3_k0_context_shrinkage,
         "target_train_residual_gain_calibration": target_train_calibration if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt") else {},
         "prediction_content_hash": eval_hashes.get("prediction_content_hash", ""),
         "prediction_record_count": eval_hashes.get("prediction_record_count", 0),
@@ -521,6 +635,8 @@ def main():
         "metrics_computed": sorted(df["metric"].unique().tolist()),
         "variables": sorted(df["variable"].unique().tolist()),
         "seasonal_breakdown": sorted(df["season"].unique().tolist()) if "season" in df.columns else [],
+        "stage3_protocol": stage3_protocol_metadata,
+        "stage3_k0_context_shrinkage": stage3_k0_context_shrinkage,
         "prediction_content_hash": eval_hashes.get("prediction_content_hash", ""),
         "prediction_record_count": eval_hashes.get("prediction_record_count", 0),
         "metric_content_hash": eval_hashes.get("metric_content_hash", ""),

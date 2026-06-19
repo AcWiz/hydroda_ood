@@ -163,6 +163,101 @@ def test_tensor_cache_dataset_sample_matches_netcdf_region_crop(tmp_path):
     tensor_dataset.close()
 
 
+def test_tensor_cache_load_mode_mmap_passes_mmap_to_torch_load(tmp_path, monkeypatch):
+    from hydroda.data.dataset import TensorCacheHydroDADataset
+
+    da_nc, masks_nc, splits_json, cache_dir = _build_tiny_cache(tmp_path)
+    calls = []
+    original_torch_load = torch.load
+
+    def tracking_torch_load(*args, **kwargs):
+        calls.append({"path": Path(args[0]), "kwargs": dict(kwargs)})
+        kwargs.pop("mmap", None)
+        return original_torch_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", tracking_torch_load)
+
+    dataset = TensorCacheHydroDADataset(
+        da_nc_path=str(da_nc),
+        region_masks_nc=str(masks_nc),
+        splits_json=str(splits_json),
+        target_region="US-R1",
+        split_type="source_fit",
+        K=None,
+        seed=0,
+        adaptation_setting="target_full_train",
+        freeze_manifest=None,
+        active_region_id="US-R1",
+        tensor_cache_dir=str(cache_dir),
+        tensor_cache_load_mode="mmap",
+    )
+
+    dataset[0]
+
+    assert calls
+    assert all(call["kwargs"].get("weights_only") is True for call in calls)
+    assert all(call["kwargs"].get("mmap") is True for call in calls)
+    dataset.close()
+
+
+def test_tensor_cache_eager_and_mmap_samples_match(tmp_path):
+    from hydroda.data.dataset import TensorCacheHydroDADataset
+
+    da_nc, masks_nc, splits_json, cache_dir = _build_tiny_cache(tmp_path)
+    common_kwargs = dict(
+        da_nc_path=str(da_nc),
+        region_masks_nc=str(masks_nc),
+        splits_json=str(splits_json),
+        target_region="US-R1",
+        split_type="source_fit",
+        K=None,
+        seed=0,
+        adaptation_setting="target_full_train",
+        freeze_manifest=None,
+        active_region_id="US-R1",
+        tensor_cache_dir=str(cache_dir),
+    )
+    eager = TensorCacheHydroDADataset(**common_kwargs, tensor_cache_load_mode="eager")
+    mmap = TensorCacheHydroDADataset(**common_kwargs, tensor_cache_load_mode="mmap")
+
+    eager_sample = eager[0]
+    mmap_sample = mmap[0]
+
+    for key in (
+        "x",
+        "forecast_surface",
+        "forecast_rootzone",
+        "analysis_surface",
+        "analysis_rootzone",
+        "increment_surface",
+        "increment_rootzone",
+        "base_valid_mask",
+        "label_valid_mask",
+        "region_mask_integer",
+        "active_region_mask",
+        "region_mask",
+        "loss_mask",
+        "metric_mask",
+        "latitude_weight",
+    ):
+        assert eager_sample[key].shape == mmap_sample[key].shape
+        np.testing.assert_allclose(eager_sample[key], mmap_sample[key], equal_nan=True)
+    for key in (
+        "date_str",
+        "month",
+        "season",
+        "time_index",
+        "target_region_id",
+        "active_region_ids",
+        "sample_region_id",
+        "split_role",
+    ):
+        assert eager_sample[key] == mmap_sample[key]
+
+    eager.close()
+    mmap.close()
+
+
 def test_tensor_cache_target_eval_reads_only_manifest_eval_dates(tmp_path):
     from hydroda.data.dataset import TensorCacheHydroDADataset
 
@@ -243,6 +338,74 @@ def test_tensor_cache_dataset_bounds_year_cache_to_limit(tmp_path):
 
     assert list(dataset._year_cache.keys()) == [2021]
     assert len(dataset._year_cache) == 1
+    dataset.close()
+
+
+def test_tensor_cache_input_side_sample_populates_year_cache(tmp_path, monkeypatch):
+    from hydroda.data.dataset import TensorCacheHydroDADataset
+
+    da_nc, masks_nc, splits_json, cache_dir = _build_tiny_cache(tmp_path)
+    dataset = TensorCacheHydroDADataset(
+        da_nc_path=str(da_nc),
+        region_masks_nc=str(masks_nc),
+        splits_json=str(splits_json),
+        target_region="US-R1",
+        split_type="source_fit",
+        K=None,
+        seed=0,
+        adaptation_setting="target_full_train",
+        freeze_manifest=None,
+        active_region_id="US-R1",
+        tensor_cache_dir=str(cache_dir),
+        max_year_cache_entries=1,
+    )
+    load_count = {"input": 0}
+    original_load_tensor = dataset._load_tensor
+
+    def counting_load_tensor(path):
+        if Path(path).name == "input.pt":
+            load_count["input"] += 1
+        return original_load_tensor(path)
+
+    monkeypatch.setattr(dataset, "_load_tensor", counting_load_tensor)
+
+    first = dataset.get_input_side_sample(0)
+    second = dataset.get_input_side_sample(0)
+
+    assert first["sample_region_id"] == "US-R1"
+    assert second["sample_region_id"] == "US-R1"
+    assert load_count["input"] == 1
+    assert list(dataset._year_cache.keys()) == [2015]
+    assert "input" in dataset._year_cache[2015]
+    dataset.close()
+
+
+def test_tensor_cache_full_sample_after_input_side_cache_loads_missing_tensors(tmp_path):
+    from hydroda.data.dataset import TensorCacheHydroDADataset
+
+    da_nc, masks_nc, splits_json, cache_dir = _build_tiny_cache(tmp_path)
+    dataset = TensorCacheHydroDADataset(
+        da_nc_path=str(da_nc),
+        region_masks_nc=str(masks_nc),
+        splits_json=str(splits_json),
+        target_region="US-R1",
+        split_type="source_fit",
+        K=None,
+        seed=0,
+        adaptation_setting="target_full_train",
+        freeze_manifest=None,
+        active_region_id="US-R1",
+        tensor_cache_dir=str(cache_dir),
+        max_year_cache_entries=1,
+    )
+
+    dataset.get_input_side_sample(0)
+    sample = dataset[0]
+
+    assert "target_increment" in dataset._year_cache[2015]
+    assert "target_analysis" in dataset._year_cache[2015]
+    assert "loss_mask" in dataset._year_cache[2015]
+    assert sample["increment_surface"].shape == sample["loss_mask"].shape
     dataset.close()
 
 
@@ -365,6 +528,36 @@ def test_build_hydroda_dataset_tensor_cache_multi_region_backend(tmp_path):
     assert [dataset[i]["sample_region_id"] for i in range(len(dataset))] == ["US-R1", "US-R2"]
     assert len(dataset._date_records) == 2
     assert {record["sample_region_id"] for record in dataset._date_records} == {"US-R1", "US-R2"}
+    dataset.close()
+
+
+def test_build_hydroda_dataset_netcdf_source_region_episode_backend(tmp_path):
+    from hydroda.data.dataset import SourceRegionEpisodeHydroDADataset, build_hydroda_dataset
+
+    da_nc, masks_nc, splits_json, _cache_dir = _build_tiny_cache(tmp_path, regions=["US-R1", "US-R2"])
+    dataset = build_hydroda_dataset(
+        da_nc_path=str(da_nc),
+        region_masks_nc=str(masks_nc),
+        splits_json=str(splits_json),
+        target_region="US-R1",
+        split_type="source_fit",
+        K=None,
+        seed=0,
+        adaptation_setting="target_full_train",
+        freeze_manifest=None,
+        dataset_backend="netcdf",
+        active_region_ids=["US-R1", "US-R2"],
+    )
+
+    assert isinstance(dataset, SourceRegionEpisodeHydroDADataset)
+    assert len(dataset) == 2
+    samples = [dataset[i] for i in range(len(dataset))]
+    assert [sample["sample_region_id"] for sample in samples] == ["US-R1", "US-R2"]
+    assert [sample["active_region_ids"] for sample in samples] == [["US-R1"], ["US-R2"]]
+    assert np.count_nonzero(samples[0]["loss_mask"]) > 0
+    assert np.count_nonzero(samples[1]["loss_mask"]) > 0
+    assert np.all(samples[0]["loss_mask"][samples[0]["region_mask_integer"] == 2] == 0.0)
+    assert np.all(samples[1]["loss_mask"][samples[1]["region_mask_integer"] == 1] == 0.0)
     dataset.close()
 
 

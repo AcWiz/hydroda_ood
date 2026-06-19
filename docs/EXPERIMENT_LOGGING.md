@@ -93,8 +93,16 @@ artifacts/runs/{phase}/{run_name}/
 {
   "normalization_source": "source_fit_only",
   "model_selection_source": "source_val_preregistered",
+  "policy_source": "source_side_episode_calibration",
+  "safe_policy_json": "artifacts/runs/<source_safe_calibration>/safe_policy.json",
+  "safe_policy_json_sha256": "...",
+  "source_episode_regions": ["US-R2", "US-R3"],
+  "rho_policy": "fixed_0.75",
+  "adapt_mix_rho": 0.75,
+  "support_manifest_hash": "...",
+  "support_nesting_hash": "...",
   "target_val_usage": "unused_in_main_protocol",
-  "target_eval_usage": "final_eval_only_no_training_no_selection",
+  "target_eval_usage": "final_eval_only_no_selection",
   "target_context_dates_hash": "...",
   "target_support_dates_hash": "...",
   "target_eval_dates_hash": "...",
@@ -118,16 +126,18 @@ When `--wandb_mode disabled`:
 
 ## HyperDA v1 Experiment Record
 
-HyperDA v1 is the first generated-operator method after the prompt-conditioned
-FiLM baseline. It now follows the V4.4 zero/few-shot split protocol; full-target
-runs are legacy/internal reproduction only.
+HyperDA source-stage training now uses the staged hypernetwork mainline. Stage
+1 is a source-only `source_pooled_global_backbone` checkpoint selected on
+source_val; Stage 2 freezes that source base and trains only the prompt encoder,
+FiLM, and basis-adapter generation modules. Full-target runs are
+legacy/internal reproduction only.
 
 ### Default Development Run
 
 Use one region and one seed first:
 
 ```bash
-bash run/phase4_hyperda.sh US-R1 0 1
+bash run/phase4_hyperda_staged.sh auto US-R1 0 1
 ```
 
 Default settings:
@@ -138,6 +148,7 @@ Default settings:
 - `hyper_n_basis=8`
 - `hyper_adapter_bottleneck=32`
 - `hyper_adapter_scale=1.0`
+- `trainable_scope=source_base_frozen_adapter_film`
 - `batch_size=16`
 - `accum_steps=4`
 - `max_epochs=50`
@@ -151,13 +162,17 @@ Protocol invariants:
 - split artifact: `artifacts/splits/US_loro_zero_few_shot_splits.json`
 - adaptation setting: `zero_shot_context`
 - K: `0` for source-stage default
+- source-stage episode defaults:
+  `source_episode_prompt_policy=context_monthly_prototype`,
+  `source_anchor_blend_calibration=true`, and
+  `hyper_output_head_residual=true`
 
 ### Artifact Paths
 
 Training writes under:
 
 ```text
-artifacts/runs/phase4_prompt_conditioned/phase4_prompt_conditioned_hyperda_basis_adapter_*/
+artifacts/runs/phase4_hyperda_staged/<target_region>/<timestamp>/
 ```
 
 The checkpoint summary and config include:
@@ -166,9 +181,30 @@ The checkpoint summary and config include:
 - `hyper_n_basis`
 - `hyper_adapter_bottleneck`
 - `hyper_adapter_scale`
+- `init_from_source_base_checkpoint`
+- `source_base_checkpoint_sha256`
+- `trainable_scope`
 - `best_selection_metric`
 - `best_selection_value`
 - source/target protocol safety fields
+
+## HyperDA-SAFE Policy Record
+
+Paper-facing K=4 and K=12 runs must provide `SAFE_POLICY_JSON` from source-side
+episode calibration. The export is named `safe_policy.json` and must record
+`policy_source=source_side_episode_calibration`,
+`target_val_usage=unused_in_main_protocol`, and
+`target_eval_usage=final_eval_only_no_selection`.
+
+`run/phase5_hyperda_zero_few_shot_eval.sh` requires this policy for K-shot runs
+by default. K=0 can run without it. For internal diagnostics only, set
+`REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT=0`; such runs should not be used as
+paper-facing HyperDA-SAFE K4/K12 results and must use diagnostic method IDs.
+When `SAFE_POLICY_JSON` is provided, the adaptation runner records the policy
+hash, selected source-policy candidate, source episode regions, and the
+policy-provided `adapt_mix_rho`. Missing policy or rejected Stage 3 candidates
+are saved as the K0 anchor state with `stage3_posterior_decision` explaining the
+fallback.
 
 ### Evaluation
 
@@ -192,8 +228,8 @@ For any table or claim, compare under the same current protocol and method IDs:
 - `prompt_conditioned_shared_backbone`
 - `source_regime_specialist_bank` once US/CN/AU same-regime specialists are available
 - `hyperda_zero_shot_context`
-- `hyperda_few_shot_k4`
-- `hyperda_few_shot_k12`
+- `hyperda_safe_few_shot_k4`
+- `hyperda_safe_few_shot_k12`
 
 Do not use `legacy_all_regions_sanity` or
 `target_full_history_region_oracle` as paper-facing OOD baselines.

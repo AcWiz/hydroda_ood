@@ -21,23 +21,30 @@ ADAPT_BATCH_SIZE="${ADAPT_BATCH_SIZE:-${BATCH_SIZE:-8}}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${BATCH_SIZE:-8}}"
 SPLITS_JSON="${SPLITS_JSON:-artifacts/splits/US_loro_zero_few_shot_splits.json}"
 ADAPT_RECIPE="${ADAPT_RECIPE:-source_anchor}"
-ADAPT_SCOPE="${ADAPT_SCOPE:-all}"
-ADAPT_SOLVER="${ADAPT_SOLVER:-adamw}"
+ADAPT_SCOPE="${ADAPT_SCOPE:-safe_operator}"
+STAGE3_POSTERIOR_POLICY="${STAGE3_POSTERIOR_POLICY:-safe_operator_ablation}"
+SUPPORT_GATE="${SUPPORT_GATE:-policy_default}"
+SUPPORT_GATE_MIN_DELTA="${SUPPORT_GATE_MIN_DELTA:-0.0}"
+SUPPORT_GATE_ROOTZONE_TOLERANCE="${SUPPORT_GATE_ROOTZONE_TOLERANCE:-0.0}"
+SAFE_POLICY_JSON="${SAFE_POLICY_JSON:-}"
+REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT="${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT:-1}"
 SCHEDULE_LABEL="${SCHEDULE_LABEL:-}"
-FREEZE_MONTHLY_GAIN="${FREEZE_MONTHLY_GAIN:-0}"
-RIDGE_LAMBDA="${RIDGE_LAMBDA:-1.0}"
-RIDGE_CLIP_COEFF_NORM="${RIDGE_CLIP_COEFF_NORM:-1.0}"
-RIDGE_TRUST_REGION_RADIUS="${RIDGE_TRUST_REGION_RADIUS:-1.0}"
-RIDGE_MAX_FEATURE_PIXELS="${RIDGE_MAX_FEATURE_PIXELS:-20000}"
-RIDGE_STANDARDIZE_FEATURES="${RIDGE_STANDARDIZE_FEATURES:-0}"
-TRUST_REGION_MODE="${TRUST_REGION_MODE:-none}"
-TRUST_TOTAL_RADIUS="${TRUST_TOTAL_RADIUS:-0.0}"
-TRUST_PROMPT_RADIUS="${TRUST_PROMPT_RADIUS:-0.0}"
-TRUST_GAIN_RADIUS="${TRUST_GAIN_RADIUS:-0.0}"
-TRUST_COEFF_RADIUS="${TRUST_COEFF_RADIUS:-0.0}"
-TRUST_SPATIAL_RADIUS="${TRUST_SPATIAL_RADIUS:-0.0}"
 SUPPORT_LOSS_REDUCTION="${SUPPORT_LOSS_REDUCTION:-global_pixel}"
-ADAPT_MIX_RHO="${ADAPT_MIX_RHO:-1.0}"
+FREEZE_MONTHLY_GAIN="${FREEZE_MONTHLY_GAIN:-0}"
+TARGET_CONTEXT_MAX_SAMPLES="${TARGET_CONTEXT_MAX_SAMPLES:-0}"
+STAGE3_K0_CONTEXT_SHRINKAGE="${STAGE3_K0_CONTEXT_SHRINKAGE:-0}"
+STAGE3_K0_CONTEXT_SHRINKAGE_RHO_CAP="${STAGE3_K0_CONTEXT_SHRINKAGE_RHO_CAP:-1.0}"
+STAGE3_K0_CONTEXT_SHRINKAGE_POLICY="${STAGE3_K0_CONTEXT_SHRINKAGE_POLICY:-variable_reliability_v1}"
+STAGE3_K0_CONTEXT_SHRINKAGE_SURFACE_RHO_CAP="${STAGE3_K0_CONTEXT_SHRINKAGE_SURFACE_RHO_CAP:-${STAGE3_K0_CONTEXT_SHRINKAGE_RHO_CAP}}"
+STAGE3_K0_CONTEXT_SHRINKAGE_ROOTZONE_RHO_CAP="${STAGE3_K0_CONTEXT_SHRINKAGE_ROOTZONE_RHO_CAP:-${STAGE3_K0_CONTEXT_SHRINKAGE_RHO_CAP}}"
+STAGE3_K0_CONTEXT_SHRINKAGE_POLICY_JSON="${STAGE3_K0_CONTEXT_SHRINKAGE_POLICY_JSON:-}"
+ADAPT_MIX_RHO_WAS_SET="${ADAPT_MIX_RHO+x}"
+ADAPT_MIX_RHO="${ADAPT_MIX_RHO:-}"
+if [[ -n "${ADAPT_MIX_RHO_WAS_SET}" ]]; then
+    ADAPT_MIX_RHO_SOURCE="explicit override"
+else
+    ADAPT_MIX_RHO_SOURCE="policy-derived adapt_mix_rho for K-shot; diagnostic K-shot defaults to 0.0"
+fi
 AUDIT_IDENTITY="${AUDIT_IDENTITY:-0}"
 AUDIT_IDENTITY_TOLERANCE="${AUDIT_IDENTITY_TOLERANCE:-1e-8}"
 ANCHOR_ALPHA_K4="${ANCHOR_ALPHA_K4:-0.75}"
@@ -53,6 +60,12 @@ ADAPT_GRAD_CLIP_OVERRIDE="${ADAPT_GRAD_CLIP:-${GRAD_CLIP:-}}"
 cd "$(dirname "$0")/.."
 
 if [[ -z "${SOURCE_CHECKPOINT}" ]]; then
+    SOURCE_CHECKPOINT="$(find "artifacts/runs/phase4_hyperda_staged/${TARGET_REGION}" \
+        -path "*s${SEED}*/checkpoints/checkpoint_best_source_val_transfer_safe_score.pt" \
+        -type f 2>/dev/null | sort | tail -1)"
+fi
+
+if [[ -z "${SOURCE_CHECKPOINT}" ]]; then
     SOURCE_CHECKPOINT="$(find artifacts/runs/phase4_prompt_conditioned \
         -path "*hyperda_basis_adapter_${TARGET_REGION}_*_s${SEED}_*/checkpoints/checkpoint_best_source_val_transfer_safe_score.pt" \
         -type f 2>/dev/null | sort | tail -1)"
@@ -62,10 +75,42 @@ if [[ -z "${SOURCE_CHECKPOINT}" || ! -f "${SOURCE_CHECKPOINT}" ]]; then
     echo "ERROR: source HyperDA checkpoint not found." >&2
     echo "Provide it explicitly:" >&2
     echo "  bash run/phase5_hyperda_zero_few_shot_eval.sh /path/to/source.pt ${TARGET_REGION} ${SEED} ${CUDA_VISIBLE_DEVICES}" >&2
+    echo "Or train the staged source prior first:" >&2
+    echo "  bash run/phase4_hyperda_staged.sh auto ${TARGET_REGION} ${SEED} ${CUDA_VISIBLE_DEVICES}" >&2
     exit 2
 fi
 
 mkdir -p "${OUTPUT_BASE}"
+
+resolve_policy_adapt_mix_rho() {
+python3 - "$1" "$2" "$3" <<'PYTHON_SCRIPT'
+import json
+import sys
+from pathlib import Path
+
+policy_path, adaptation_setting, k_value = sys.argv[1:4]
+if not policy_path:
+    print("1.0" if int(k_value) == 0 else "0.0")
+    raise SystemExit(0)
+
+path = Path(policy_path)
+with path.open(encoding="utf-8") as f:
+    policy = json.load(f)
+
+policies = policy.get("policies", {})
+if not isinstance(policies, dict):
+    print("1.0" if int(k_value) == 0 else "0.0")
+    raise SystemExit(0)
+
+for key in (adaptation_setting, f"K{int(k_value)}", f"k{int(k_value)}"):
+    selected = policies.get(key)
+    if isinstance(selected, dict) and selected.get("adapt_mix_rho") is not None:
+        print(selected["adapt_mix_rho"])
+        raise SystemExit(0)
+
+print("1.0" if int(k_value) == 0 else "0.0")
+PYTHON_SCRIPT
+}
 
 echo "============================================"
 echo "Phase 5 HyperDA Zero/Few-Shot Adapt + Eval"
@@ -74,14 +119,19 @@ echo "  target_region=${TARGET_REGION}"
 echo "  seed=${SEED}"
 echo "  K_LIST=${K_LIST}"
 echo "  ADAPT_RECIPE=${ADAPT_RECIPE}"
-echo "  ADAPT_SCOPE=${ADAPT_SCOPE}"
-echo "  ADAPT_SOLVER=${ADAPT_SOLVER}"
+echo "  ADAPT_SCOPE=${ADAPT_SCOPE} (SAFE Prompt+Coeff+Gain)"
+echo "  STAGE3_POSTERIOR_POLICY=${STAGE3_POSTERIOR_POLICY}"
+echo "  SUPPORT_GATE=${SUPPORT_GATE} min_delta=${SUPPORT_GATE_MIN_DELTA} rootzone_tolerance=${SUPPORT_GATE_ROOTZONE_TOLERANCE}"
+echo "  SAFE_POLICY_JSON=${SAFE_POLICY_JSON:-<none>}"
+echo "  REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT=${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT}"
+echo "  policy_source=source_side_episode_calibration for paper-facing K4/K12 when SAFE_POLICY_JSON is provided"
+echo "  adapt_solver=adamw"
 echo "  SCHEDULE_LABEL=${SCHEDULE_LABEL}"
-echo "  FREEZE_MONTHLY_GAIN=${FREEZE_MONTHLY_GAIN}"
-echo "  RIDGE_LAMBDA=${RIDGE_LAMBDA} RIDGE_CLIP_COEFF_NORM=${RIDGE_CLIP_COEFF_NORM} RIDGE_TRUST_REGION_RADIUS=${RIDGE_TRUST_REGION_RADIUS} RIDGE_MAX_FEATURE_PIXELS=${RIDGE_MAX_FEATURE_PIXELS} RIDGE_STANDARDIZE_FEATURES=${RIDGE_STANDARDIZE_FEATURES}"
-echo "  TRUST_REGION_MODE=${TRUST_REGION_MODE} TRUST_TOTAL_RADIUS=${TRUST_TOTAL_RADIUS} TRUST_PROMPT_RADIUS=${TRUST_PROMPT_RADIUS} TRUST_GAIN_RADIUS=${TRUST_GAIN_RADIUS} TRUST_COEFF_RADIUS=${TRUST_COEFF_RADIUS} TRUST_SPATIAL_RADIUS=${TRUST_SPATIAL_RADIUS}"
 echo "  SUPPORT_LOSS_REDUCTION=${SUPPORT_LOSS_REDUCTION}"
-echo "  ADAPT_MIX_RHO=${ADAPT_MIX_RHO}"
+echo "  FREEZE_MONTHLY_GAIN=${FREEZE_MONTHLY_GAIN}"
+echo "  TARGET_CONTEXT_MAX_SAMPLES=${TARGET_CONTEXT_MAX_SAMPLES} (0 = full target_context)"
+echo "  STAGE3_K0_CONTEXT_SHRINKAGE=${STAGE3_K0_CONTEXT_SHRINKAGE} policy=${STAGE3_K0_CONTEXT_SHRINKAGE_POLICY} rho_cap=${STAGE3_K0_CONTEXT_SHRINKAGE_RHO_CAP} surface_rho_cap=${STAGE3_K0_CONTEXT_SHRINKAGE_SURFACE_RHO_CAP} rootzone_rho_cap=${STAGE3_K0_CONTEXT_SHRINKAGE_ROOTZONE_RHO_CAP} policy_json=${STAGE3_K0_CONTEXT_SHRINKAGE_POLICY_JSON:-<none>}"
+echo "  ADAPT_MIX_RHO=${ADAPT_MIX_RHO} (${ADAPT_MIX_RHO_SOURCE})"
 echo "  AUDIT_IDENTITY=${AUDIT_IDENTITY} tolerance=${AUDIT_IDENTITY_TOLERANCE}"
 echo "  eval_split=target_eval"
 echo "  eval_max_samples=${EVAL_MAX_SAMPLES}"
@@ -97,14 +147,15 @@ echo "============================================"
 
 for K in ${K_LIST}; do
     ADAPT_SCOPE_FOR_K="${ADAPT_SCOPE}"
-    ADAPT_SOLVER_FOR_K="${ADAPT_SOLVER}"
     AUDIT_IDENTITY_FOR_K="0"
     if [[ "${K}" == "0" ]]; then
         ADAPTATION_SETTING="zero_shot_context"
         ADAPTATION_MAX_STEPS="0"
         ADAPTATION_LR="${LR_K0:-${LR:-1e-3}}"
         ANCHOR_ALPHA="0.0"
-        ADAPT_SOLVER_FOR_K="adamw"
+        if [[ "${STAGE3_POSTERIOR_POLICY}" == "conservative_coeff_posterior" ]]; then
+            ADAPT_SCOPE_FOR_K="none"
+        fi
     elif [[ "${K}" == "4" ]]; then
         ADAPTATION_SETTING="few_shot_k4"
         ADAPTATION_MAX_STEPS="${ADAPT_MAX_STEPS_OVERRIDE:-${MAX_STEPS_K4:-${MAX_STEPS:-100}}}"
@@ -119,14 +170,30 @@ for K in ${K_LIST}; do
         echo "ERROR: K_LIST may contain only 0, 4, 12; got ${K}" >&2
         exit 2
     fi
+    if [[ -n "${ADAPT_MIX_RHO_WAS_SET}" ]]; then
+        ADAPT_MIX_RHO_FOR_K="${ADAPT_MIX_RHO}"
+    else
+        ADAPT_MIX_RHO_FOR_K="$(resolve_policy_adapt_mix_rho "${SAFE_POLICY_JSON}" "${ADAPTATION_SETTING}" "${K}")"
+    fi
     if [[ "${AUDIT_IDENTITY}" == "1" || "${AUDIT_IDENTITY,,}" == "true" ]]; then
         if [[ "${K}" == "12" ]]; then
             ADAPT_SCOPE_FOR_K="none"
-            ADAPT_SOLVER_FOR_K="adamw"
             ADAPTATION_MAX_STEPS="0"
             ANCHOR_ALPHA="0.0"
             AUDIT_IDENTITY_FOR_K="1"
         fi
+    fi
+    REQUIRE_SAFE_POLICY_FOR_K="0"
+    if [[ "${K}" != "0" && -n "${SAFE_POLICY_JSON}" ]]; then
+        REQUIRE_SAFE_POLICY_FOR_K="${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT}"
+    elif [[ "${K}" != "0" && "${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT}" == "1" ]]; then
+        echo "ERROR: paper-facing K=${K} requires SAFE_POLICY_JSON from source-side episode calibration." >&2
+        echo "Set SAFE_POLICY_JSON=/path/to/safe_policy.json, or set REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT=0 for diagnostic runs." >&2
+        exit 2
+    elif [[ "${K}" != "0" && "${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT,,}" == "true" ]]; then
+        echo "ERROR: paper-facing K=${K} requires SAFE_POLICY_JSON from source-side episode calibration." >&2
+        echo "Set SAFE_POLICY_JSON=/path/to/safe_policy.json, or set REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT=0 for diagnostic runs." >&2
+        exit 2
     fi
 
     K_DIR="${OUTPUT_BASE}/K${K}"
@@ -136,7 +203,7 @@ for K in ${K_LIST}; do
 
     echo ""
     echo ">>> [K=${K}] Adaptation: ${ADAPTATION_SETTING}"
-    ADAPT_RECIPE="${ADAPT_RECIPE}" ADAPT_SCOPE="${ADAPT_SCOPE_FOR_K}" ADAPT_SOLVER="${ADAPT_SOLVER_FOR_K}" SCHEDULE_LABEL="${SCHEDULE_LABEL}" FREEZE_MONTHLY_GAIN="${FREEZE_MONTHLY_GAIN}" RIDGE_LAMBDA="${RIDGE_LAMBDA}" RIDGE_CLIP_COEFF_NORM="${RIDGE_CLIP_COEFF_NORM}" RIDGE_TRUST_REGION_RADIUS="${RIDGE_TRUST_REGION_RADIUS}" RIDGE_MAX_FEATURE_PIXELS="${RIDGE_MAX_FEATURE_PIXELS}" RIDGE_STANDARDIZE_FEATURES="${RIDGE_STANDARDIZE_FEATURES}" TRUST_REGION_MODE="${TRUST_REGION_MODE}" TRUST_TOTAL_RADIUS="${TRUST_TOTAL_RADIUS}" TRUST_PROMPT_RADIUS="${TRUST_PROMPT_RADIUS}" TRUST_GAIN_RADIUS="${TRUST_GAIN_RADIUS}" TRUST_COEFF_RADIUS="${TRUST_COEFF_RADIUS}" TRUST_SPATIAL_RADIUS="${TRUST_SPATIAL_RADIUS}" SUPPORT_LOSS_REDUCTION="${SUPPORT_LOSS_REDUCTION}" AUDIT_IDENTITY="${AUDIT_IDENTITY_FOR_K}" AUDIT_IDENTITY_TOLERANCE="${AUDIT_IDENTITY_TOLERANCE}" ADAPT_ANCHOR_ALPHA="${ANCHOR_ALPHA}" ADAPT_LR="${ADAPTATION_LR}" ADAPT_MAX_STEPS="${ADAPTATION_MAX_STEPS}" ADAPT_WEIGHT_DECAY="${ADAPT_WEIGHT_DECAY_OVERRIDE}" ADAPT_GRAD_CLIP="${ADAPT_GRAD_CLIP_OVERRIDE}" ADAPT_LAMBDA_PRIOR="${ADAPT_LAMBDA_PRIOR:-${LAMBDA_PRIOR:-}}" ADAPT_LAMBDA_LATENT="${ADAPT_LAMBDA_LATENT:-${LAMBDA_LATENT:-}}" ADAPT_LAMBDA_GAIN="${ADAPT_LAMBDA_GAIN:-${LAMBDA_GAIN:-}}" ADAPT_LAMBDA_GAIN_SMOOTH="${ADAPT_LAMBDA_GAIN_SMOOTH:-${LAMBDA_GAIN_SMOOTH:-}}" ADAPT_LAMBDA_ANALYSIS="${ADAPT_LAMBDA_ANALYSIS:-${LAMBDA_ANALYSIS:-}}" BATCH_SIZE="${ADAPT_BATCH_SIZE}" SPLITS_JSON="${SPLITS_JSON}" OUTPUT_DIR="${ADAPT_DIR}" bash run/phase5_hyperda_zero_few_shot.sh \
+    ADAPT_RECIPE="${ADAPT_RECIPE}" ADAPT_SCOPE="${ADAPT_SCOPE_FOR_K}" STAGE3_POSTERIOR_POLICY="${STAGE3_POSTERIOR_POLICY}" SUPPORT_GATE="${SUPPORT_GATE}" SUPPORT_GATE_MIN_DELTA="${SUPPORT_GATE_MIN_DELTA}" SUPPORT_GATE_ROOTZONE_TOLERANCE="${SUPPORT_GATE_ROOTZONE_TOLERANCE}" FREEZE_MONTHLY_GAIN="${FREEZE_MONTHLY_GAIN}" TARGET_CONTEXT_MAX_SAMPLES="${TARGET_CONTEXT_MAX_SAMPLES}" SAFE_POLICY_JSON="${SAFE_POLICY_JSON}" REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT="${REQUIRE_SAFE_POLICY_FOR_K}" SCHEDULE_LABEL="${SCHEDULE_LABEL}" SUPPORT_LOSS_REDUCTION="${SUPPORT_LOSS_REDUCTION}" AUDIT_IDENTITY="${AUDIT_IDENTITY_FOR_K}" AUDIT_IDENTITY_TOLERANCE="${AUDIT_IDENTITY_TOLERANCE}" ADAPT_ANCHOR_ALPHA="${ANCHOR_ALPHA}" ADAPT_LR="${ADAPTATION_LR}" ADAPT_MAX_STEPS="${ADAPTATION_MAX_STEPS}" ADAPT_WEIGHT_DECAY="${ADAPT_WEIGHT_DECAY_OVERRIDE}" ADAPT_GRAD_CLIP="${ADAPT_GRAD_CLIP_OVERRIDE}" ADAPT_LAMBDA_PRIOR="${ADAPT_LAMBDA_PRIOR:-${LAMBDA_PRIOR:-}}" ADAPT_LAMBDA_LATENT="${ADAPT_LAMBDA_LATENT:-${LAMBDA_LATENT:-}}" ADAPT_LAMBDA_GAIN="${ADAPT_LAMBDA_GAIN:-${LAMBDA_GAIN:-}}" ADAPT_LAMBDA_GAIN_SMOOTH="${ADAPT_LAMBDA_GAIN_SMOOTH:-${LAMBDA_GAIN_SMOOTH:-}}" ADAPT_LAMBDA_ANALYSIS="${ADAPT_LAMBDA_ANALYSIS:-${LAMBDA_ANALYSIS:-}}" BATCH_SIZE="${ADAPT_BATCH_SIZE}" SPLITS_JSON="${SPLITS_JSON}" OUTPUT_DIR="${ADAPT_DIR}" bash run/phase5_hyperda_zero_few_shot.sh \
         "${SOURCE_CHECKPOINT}" \
         "${TARGET_REGION}" \
         "${K}" \
@@ -151,7 +218,22 @@ for K in ${K_LIST}; do
     fi
 
     echo ""
-    echo ">>> [K=${K}] Evaluation on target_eval"
+    echo ">>> [K=${K}] Evaluation on target_eval (adapt_mix_rho=${ADAPT_MIX_RHO_FOR_K})"
+    STAGE3_K0_CONTEXT_SHRINKAGE_ARGS=()
+    if [[ "${K}" == "0" && ( "${STAGE3_K0_CONTEXT_SHRINKAGE}" == "1" || "${STAGE3_K0_CONTEXT_SHRINKAGE,,}" == "true" ) ]]; then
+        STAGE3_K0_CONTEXT_SHRINKAGE_ARGS=(
+            --stage3_k0_context_shrinkage
+            --stage3_k0_context_shrinkage_rho_cap "${STAGE3_K0_CONTEXT_SHRINKAGE_RHO_CAP}"
+            --stage3_k0_context_shrinkage_policy "${STAGE3_K0_CONTEXT_SHRINKAGE_POLICY}"
+            --stage3_k0_context_shrinkage_surface_rho_cap "${STAGE3_K0_CONTEXT_SHRINKAGE_SURFACE_RHO_CAP}"
+            --stage3_k0_context_shrinkage_rootzone_rho_cap "${STAGE3_K0_CONTEXT_SHRINKAGE_ROOTZONE_RHO_CAP}"
+        )
+        if [[ -n "${STAGE3_K0_CONTEXT_SHRINKAGE_POLICY_JSON}" ]]; then
+            STAGE3_K0_CONTEXT_SHRINKAGE_ARGS+=(
+                --stage3_k0_context_shrinkage_policy_json "${STAGE3_K0_CONTEXT_SHRINKAGE_POLICY_JSON}"
+            )
+        fi
+    fi
     PYTHONPATH=. python scripts/eval/evaluate_checkpoint.py \
         --checkpoint "${ADAPTED_CHECKPOINT}" \
         --target_region "${TARGET_REGION}" \
@@ -165,7 +247,8 @@ for K in ${K_LIST}; do
         --output_dir "${EVAL_DIR}" \
         --max_samples "${EVAL_MAX_SAMPLES}" \
         --batch_size "${EVAL_BATCH_SIZE}" \
-        --adapt_mix_rho "${ADAPT_MIX_RHO}" \
+        --adapt_mix_rho "${ADAPT_MIX_RHO_FOR_K}" \
+        "${STAGE3_K0_CONTEXT_SHRINKAGE_ARGS[@]}" \
         2>&1 | tee "${EVAL_DIR}/eval.log"
 done
 
@@ -327,6 +410,8 @@ settings = {
 }
 
 def fmt(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, float) and not math.isfinite(value):
         return "NA"
     if isinstance(value, (int, float)):
@@ -340,6 +425,45 @@ def first_present(mapping, keys):
         if key in mapping and mapping[key] is not None:
             return mapping[key]
     return None
+
+def nested_present(*mappings_and_paths):
+    for mapping, path in mappings_and_paths:
+        value = mapping
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+        if value is not None:
+            return value
+    return None
+
+def stage3_decision_from_artifacts(summary, adapt_metadata):
+    return nested_present(
+        (adapt_metadata, ("stage3_posterior_decision",)),
+        (adapt_metadata, ("stage3_posterior_state", "stage3_posterior_decision")),
+        (summary, ("stage3_protocol", "stage3_posterior_decision")),
+    )
+
+def stage3_overview_status(k, summary_status, summary, adapt_metadata):
+    if summary_status != "ok":
+        return summary_status
+    decision = stage3_decision_from_artifacts(summary, adapt_metadata)
+    paper_facing = nested_present(
+        (adapt_metadata, ("paper_facing_run",)),
+        (summary, ("stage3_protocol", "paper_facing_run")),
+    )
+    try:
+        k_int = int(k)
+    except Exception:
+        k_int = -1
+    if k_int == 0:
+        return "ok"
+    if decision == "rejected_to_k0_anchor":
+        return "rejected_to_k0_anchor"
+    if decision == "accepted" and paper_facing is False:
+        return "diagnostic_accepted"
+    return "ok"
 
 def file_sha256(path):
     import hashlib
@@ -510,7 +634,7 @@ def write_nested_support_diagnostic(seed):
             "This command uses a run-local split manifest derived from the frozen V4.4 manifest. "
             "It does not modify the frozen split artifact and does not use target_eval for support selection.\n\n"
             "```bash\n"
-            f"K_LIST=\"12\" ADAPT_SCOPE=all SPLITS_JSON=\"{nested_split_path}\" "
+            f"K_LIST=\"12\" ADAPT_SCOPE=safe_operator SPLITS_JSON=\"{nested_split_path}\" "
             f"ADAPT_BATCH_SIZE=\"${{ADAPT_BATCH_SIZE:-8}}\" EVAL_BATCH_SIZE=\"${{EVAL_BATCH_SIZE:-8}}\" "
             f"bash run/phase5_hyperda_zero_few_shot_eval.sh \"$SOURCE_CHECKPOINT\" {target_region} {seed} "
             f"\"${{CUDA_VISIBLE_DEVICES:-1}}\" \"{output_base}/K12_nested\"\n"
@@ -542,15 +666,16 @@ for k in k_values:
     if summary_path.exists():
         with open(summary_path, encoding="utf-8") as f:
             summary = json.load(f)
-        status = "ok"
+        summary_status = "ok"
     else:
         summary = {}
-        status = "missing_summary"
+        summary_status = "missing_summary"
     if adapt_metadata_path.exists():
         with open(adapt_metadata_path, encoding="utf-8") as f:
             adapt_metadata = json.load(f)
     else:
         adapt_metadata = {}
+    status = stage3_overview_status(k, summary_status, summary, adapt_metadata)
     row_seed = summary.get("seed", adapt_metadata.get("seed"))
     if row_seed is None:
         row_seed = ""
@@ -561,7 +686,6 @@ for k in k_values:
     drift = adapt_metadata.get("target_parameter_l2_drift", {}) or {}
     pre_anchor_drift = adapt_metadata.get("target_parameter_l2_drift_pre_anchor", {}) or {}
     post_anchor_drift = adapt_metadata.get("target_parameter_l2_drift_post_anchor", drift) or {}
-    trust_diag = adapt_metadata.get("trust_projection_diagnostics", {}) or {}
     row = {
         "target_region": target_region,
         "K": k,
@@ -569,18 +693,39 @@ for k in k_values:
         "adapt_recipe": adapt_metadata.get("adapt_recipe"),
         "adapt_scope": adapt_metadata.get("adapt_scope"),
         "adapt_solver": adapt_metadata.get("adapt_solver"),
-        "trust_region_mode": adapt_metadata.get("trust_region_mode"),
-        "trust_total_radius": adapt_metadata.get("trust_total_radius"),
-        "trust_prompt_radius": adapt_metadata.get("trust_prompt_radius"),
-        "trust_gain_radius": adapt_metadata.get("trust_gain_radius"),
-        "trust_coeff_radius": adapt_metadata.get("trust_coeff_radius"),
-        "trust_spatial_radius": adapt_metadata.get("trust_spatial_radius"),
         "support_loss_reduction": adapt_metadata.get("support_loss_reduction"),
         "adapt_mix_rho": summary.get("adapt_mix_rho"),
-        "freeze_monthly_gain": adapt_metadata.get("freeze_monthly_gain"),
         "audit_identity": adapt_metadata.get("audit_identity"),
         "status": status,
         "method": summary.get("method"),
+        "paper_facing_run": nested_present(
+            (adapt_metadata, ("paper_facing_run",)),
+            (summary, ("stage3_protocol", "paper_facing_run")),
+        ),
+        "diagnostic_run_reason": adapt_metadata.get("diagnostic_run_reason"),
+        "policy_source": adapt_metadata.get("policy_source"),
+        "safe_policy_json_sha256": first_present(adapt_metadata, ["safe_policy_json_sha256", "safe_policy_hash"]),
+        "source_policy_candidate_id": adapt_metadata.get("source_policy_candidate_id"),
+        "stage3_posterior_decision": stage3_decision_from_artifacts(summary, adapt_metadata),
+        "stage3_acceptance_basis": nested_present(
+            (adapt_metadata, ("stage3_acceptance_basis",)),
+            (adapt_metadata, ("stage3_posterior_state", "stage3_acceptance_basis")),
+            (summary, ("stage3_protocol", "stage3_acceptance_basis")),
+        ),
+        "support_gate_status": nested_present(
+            (adapt_metadata, ("support_gate_status",)),
+            (adapt_metadata, ("stage3_posterior_state", "support_gate_status")),
+            (summary, ("stage3_protocol", "support_gate_status")),
+        ),
+        "support_only_gate_status": nested_present(
+            (adapt_metadata, ("support_only_gate_status",)),
+            (adapt_metadata, ("stage3_posterior_state", "support_only_gate_status")),
+            (summary, ("stage3_protocol", "support_only_gate_status")),
+        ),
+        "k0_anchor_state_hash": nested_present(
+            (adapt_metadata, ("k0_anchor_state_hash",)),
+            (adapt_metadata, ("stage3_posterior_state", "k0_anchor_state_hash")),
+        ),
         "split_type": summary.get("split_type"),
         "split_file": summary.get("split_file"),
         "seed": row_seed,
@@ -608,6 +753,8 @@ for k in k_values:
         "lambda_gain_smooth": adapt_metadata.get("lambda_gain_smooth"),
         "lambda_analysis": adapt_metadata.get("lambda_analysis"),
         "source_checkpoint_sha256": adapt_metadata.get("source_checkpoint_sha256"),
+        "staged_source_checkpoint_sha256": adapt_metadata.get("staged_source_checkpoint_sha256"),
+        "source_stage_checkpoint_provenance": adapt_metadata.get("source_stage_checkpoint_provenance"),
         "adapted_checkpoint_sha256": file_sha256(checkpoint_path),
         "source_anchor_hyperparameter_source": adapt_metadata.get("source_anchor_hyperparameter_source"),
         "trainable_parameter_count": adapt_metadata.get("trainable_parameter_count"),
@@ -640,42 +787,12 @@ for k in k_values:
         "support_gradient_negative_fraction": adapt_metadata.get("support_gradient_negative_fraction"),
         "support_cycle_loss_improvement_mean": adapt_metadata.get("support_cycle_loss_improvement_mean"),
         "support_cycle_loss_improvement_std": adapt_metadata.get("support_cycle_loss_improvement_std"),
-        "trust_projection_applied_count": trust_diag.get("trust_projection_applied_count"),
-        "trust_projection_pre_step_drift_max_total": trust_diag.get("trust_projection_pre_step_drift_max_total"),
-        "trust_projection_post_step_drift_max_total": trust_diag.get("trust_projection_post_step_drift_max_total"),
-        "trust_projection_pre_step_drift_last_total": trust_diag.get("trust_projection_pre_step_drift_last_total"),
-        "trust_projection_post_step_drift_last_total": trust_diag.get("trust_projection_post_step_drift_last_total"),
-        "ridge_design_loss_before_sampled_pixels": adapt_metadata.get("ridge_design_loss_before_sampled_pixels"),
-        "ridge_design_loss_after_sampled_pixels": adapt_metadata.get("ridge_design_loss_after_sampled_pixels"),
-        "ridge_design_loss_delta_sampled_pixels": adapt_metadata.get("ridge_design_loss_delta_sampled_pixels"),
-        "ridge_lambda": adapt_metadata.get("ridge_lambda"),
-        "ridge_clip_coeff_norm": adapt_metadata.get("ridge_clip_coeff_norm"),
-        "ridge_trust_region_radius": adapt_metadata.get("ridge_trust_region_radius"),
-        "ridge_max_feature_pixels": adapt_metadata.get("ridge_max_feature_pixels"),
-        "ridge_standardize_features": adapt_metadata.get("ridge_standardize_features"),
-        "ridge_status": adapt_metadata.get("ridge_status"),
-        "ridge_coefficient_norm": adapt_metadata.get("ridge_coefficient_norm"),
-        "ridge_coeff_norm": adapt_metadata.get("ridge_coeff_norm"),
-        "ridge_delta_norm": adapt_metadata.get("ridge_delta_norm"),
-        "ridge_coeff_delta_norm": adapt_metadata.get("ridge_coeff_delta_norm"),
-        "ridge_raw_delta_norm": adapt_metadata.get("ridge_raw_delta_norm"),
-        "ridge_clip_applied": adapt_metadata.get("ridge_clip_applied"),
-        "ridge_trust_region_clipped": adapt_metadata.get("ridge_trust_region_clipped"),
-        "ridge_support_count": adapt_metadata.get("ridge_support_count"),
-        "ridge_masked_pixel_count": adapt_metadata.get("ridge_masked_pixel_count"),
-        "ridge_masked_observation_count": adapt_metadata.get("ridge_masked_observation_count"),
-        "ridge_feature_pixel_count": adapt_metadata.get("ridge_feature_pixel_count"),
-        "ridge_feature_observation_count": adapt_metadata.get("ridge_feature_observation_count"),
-        "ridge_feature_dim": adapt_metadata.get("ridge_feature_dim"),
-        "ridge_condition_number": adapt_metadata.get("ridge_condition_number"),
-        "ridge_rank": adapt_metadata.get("ridge_rank"),
         "target_parameter_l2_drift_total": drift.get("total"),
         "target_parameter_l2_drift_target_prompt": drift.get("target_prompt"),
         "target_parameter_l2_drift_adapter_coeff_bottleneck": drift.get("adapter_coeff_bottleneck"),
         "target_parameter_l2_drift_adapter_coeff_dec2": drift.get("adapter_coeff_dec2"),
         "target_parameter_l2_drift_adapter_coeff_dec1": drift.get("adapter_coeff_dec1"),
         "target_parameter_l2_drift_monthly_gain": first_present(drift, ["monthly_gain", "monthly_residual_gain"]),
-        "target_parameter_l2_drift_spatial_refine": first_present(drift, ["spatial_refine", "target_spatial_refine"]),
         "target_parameter_l2_drift_other": first_present(drift, ["other_target_specific", "other_target_parameters"]),
         "target_parameter_l2_drift_pre_anchor_total": pre_anchor_drift.get("total"),
         "target_parameter_l2_drift_pre_anchor_target_prompt": pre_anchor_drift.get("target_prompt"),
@@ -741,18 +858,21 @@ fieldnames = [
     "adapt_recipe",
     "adapt_scope",
     "adapt_solver",
-    "trust_region_mode",
-    "trust_total_radius",
-    "trust_prompt_radius",
-    "trust_gain_radius",
-    "trust_coeff_radius",
-    "trust_spatial_radius",
     "support_loss_reduction",
     "adapt_mix_rho",
-    "freeze_monthly_gain",
     "audit_identity",
     "status",
     "method",
+    "paper_facing_run",
+    "diagnostic_run_reason",
+    "policy_source",
+    "safe_policy_json_sha256",
+    "source_policy_candidate_id",
+    "stage3_posterior_decision",
+    "stage3_acceptance_basis",
+    "support_gate_status",
+    "support_only_gate_status",
+    "k0_anchor_state_hash",
     "split_type",
     "split_file",
     "seed",
@@ -780,6 +900,8 @@ fieldnames = [
     "lambda_gain_smooth",
     "lambda_analysis",
     "source_checkpoint_sha256",
+    "staged_source_checkpoint_sha256",
+    "source_stage_checkpoint_provenance",
     "adapted_checkpoint_sha256",
     "source_anchor_hyperparameter_source",
     "trainable_parameter_count",
@@ -812,42 +934,12 @@ fieldnames = [
     "support_gradient_negative_fraction",
     "support_cycle_loss_improvement_mean",
     "support_cycle_loss_improvement_std",
-    "trust_projection_applied_count",
-    "trust_projection_pre_step_drift_max_total",
-    "trust_projection_post_step_drift_max_total",
-    "trust_projection_pre_step_drift_last_total",
-    "trust_projection_post_step_drift_last_total",
-    "ridge_design_loss_before_sampled_pixels",
-    "ridge_design_loss_after_sampled_pixels",
-    "ridge_design_loss_delta_sampled_pixels",
-    "ridge_lambda",
-    "ridge_clip_coeff_norm",
-    "ridge_trust_region_radius",
-    "ridge_max_feature_pixels",
-    "ridge_standardize_features",
-    "ridge_status",
-    "ridge_coefficient_norm",
-    "ridge_coeff_norm",
-    "ridge_delta_norm",
-    "ridge_coeff_delta_norm",
-    "ridge_raw_delta_norm",
-    "ridge_clip_applied",
-    "ridge_trust_region_clipped",
-    "ridge_support_count",
-    "ridge_masked_pixel_count",
-    "ridge_masked_observation_count",
-    "ridge_feature_pixel_count",
-    "ridge_feature_observation_count",
-    "ridge_feature_dim",
-    "ridge_condition_number",
-    "ridge_rank",
     "target_parameter_l2_drift_total",
     "target_parameter_l2_drift_target_prompt",
     "target_parameter_l2_drift_adapter_coeff_bottleneck",
     "target_parameter_l2_drift_adapter_coeff_dec2",
     "target_parameter_l2_drift_adapter_coeff_dec1",
     "target_parameter_l2_drift_monthly_gain",
-    "target_parameter_l2_drift_spatial_refine",
     "target_parameter_l2_drift_other",
     "target_parameter_l2_drift_pre_anchor_total",
     "target_parameter_l2_drift_pre_anchor_target_prompt",
@@ -936,10 +1028,15 @@ headers = [
     "adapt_recipe",
     "adapt_scope",
     "adapt_solver",
-    "freeze_monthly_gain",
     "status",
+    "method",
+    "paper_facing_run",
+    "stage3_posterior_decision",
+    "stage3_acceptance_basis",
+    "support_gate_status",
+    "diagnostic_run_reason",
+    "policy_source",
     "schedule_label",
-    "trust_region_mode",
     "adapt_mix_rho",
     "support_loss_reduction",
     "adaptation_steps",
@@ -968,14 +1065,9 @@ headers = [
     "support_gradient_negative_fraction",
     "support_cycle_loss_improvement_mean",
     "support_cycle_loss_improvement_std",
-    "trust_projection_post_step_drift_max_total",
     "support_final_loss",
     "support_loss_delta",
     "k4_support_subset_of_k12",
-    "ridge_status",
-    "ridge_coefficient_norm",
-    "ridge_feature_observation_count",
-    "ridge_masked_observation_count",
     "target_parameter_l2_drift_total",
     "target_parameter_l2_drift_pre_anchor_total",
     "target_parameter_l2_drift_post_anchor_total",
@@ -1015,6 +1107,10 @@ terminal_columns = [
     ("K", "K"),
     ("setting", "adaptation_setting"),
     ("status", "status"),
+    ("method", "method"),
+    ("decision", "stage3_posterior_decision"),
+    ("paper", "paper_facing_run"),
+    ("rho", "adapt_mix_rho"),
     ("surface_WRMSE", "surface_rmse_latw"),
     ("rootzone_WRMSE", "rootzone_rmse_latw"),
 ]
@@ -1029,6 +1125,9 @@ print(f"Overview JSON: {json_path}")
 print()
 print("Quick target_eval WRMSE table:")
 print_markdown_table(rows, terminal_columns)
+if any(row.get("stage3_posterior_decision") == "rejected_to_k0_anchor" for row in rows):
+    print()
+    print("Note: K-shot rows marked rejected_to_k0_anchor are K0-equivalent fallback, not accepted few-shot adaptation.")
 PYTHON_SCRIPT
 
 echo ""

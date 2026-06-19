@@ -25,9 +25,11 @@ target-train mean/monthly/ridge 只作为 internal sanity 或附录。
 
 防御：区域在训练前固定，只使用 input/static/geophysical 信息，不使用 increment 或 model error。
 
-### R6. “HyRAO 是否只是 adapter/LoRA 换名？”
+### R6. “HyperDA-SAFE 是否只是 adapter/LoRA 换名？”
 
-防御：必须展示 input-only descriptor、region latent、sparse support adaptation 的 ablation。
+防御：必须展示 source-trained HyperDA prior、target_context input-only
+monthly prompt prototypes、parameter-space lightweight operator generation 和
+source-anchored K-shot refinement。HyRAO 是旧命名/旧方案，不作为主方法回应审稿。
 
 ---
 
@@ -39,7 +41,7 @@ region quality reports
 zero/few-shot split manifests
 normalization provenance logs
 support date lists
-metric long-form csv
+compact summaries / overview tables
 per-region result tables
 seed variance tables
 ```

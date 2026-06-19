@@ -23,7 +23,7 @@ artifacts/runs/{phase}/
       last.pt                # Most recent checkpoint
     results/
       train_history.json     # Full epoch-by-epoch history
-      metrics_long.csv        # Long-format metrics table
+      metrics_long.csv        # Regenerable long-format metrics table
     reports/
       summary.json           # Final summary (see below)
       {method}_report.md     # Human-readable report
@@ -55,7 +55,7 @@ Components:
 
 ## Artifact Checklist
 
-For each completed run, verify:
+For each completed V4.4 zero/few-shot or HyperDA-SAFE run, verify:
 - [ ] `config.yaml` — all parameters recorded
 - [ ] `git_info.json` — git hash recorded (reproducibility)
 - [ ] `protocol.json` — protocol_freeze_id matches experiment
@@ -63,8 +63,16 @@ For each completed run, verify:
 - [ ] `logs/train_epochs.jsonl` — not empty, valid JSON per line
 - [ ] `checkpoints/best.pt` — exists, model loads correctly
 - [ ] `checkpoints/last.pt` — exists
-- [ ] `reports/summary.json` — all 5 protocol safety fields present
+- [ ] `reports/summary.json` or `overview.json` — compact provenance and metrics present
 - [ ] `reports/summary.json` — leakage_guard_status = "pass"
+- [ ] `protocol.json` / metadata — `target_val_usage = unused_in_main_protocol`
+- [ ] HyperDA-SAFE K=4/K=12 — `safe_policy.json` provenance and policy hash present
+- [ ] HyperDA-SAFE K=4/K=12 — target_eval was final-only and not used for selection
+
+`metrics_long.csv` is a local regenerable payload when compact summaries,
+metadata, config, and protocol files are present. It may be removed during
+medium cleanup; do not remove summaries, configs, protocol metadata, safe
+policies, checkpoints, split manifests, or audit artifacts.
 
 ## Summary.json Required Fields
 
@@ -77,7 +85,8 @@ For each completed run, verify:
   "normalization_source": "source_train_only",
   "early_stopping_source": "train_loss_only",
   "model_selection_source": "best_train_loss",
-  "target_query_usage": "eval_only_no_early_stopping",
+  "target_eval_usage": "final_eval_only_no_selection",
+  "target_query_usage": "deprecated_alias_eval_only_no_early_stopping",
   "leakage_guard_status": "pass",
   "git_hash": "abc1234",
   "timestamp": "2025-05-11T14:30:52Z",
@@ -99,8 +108,11 @@ python scripts/train_source_only_backbone.py \
 
 Each checkpoint (best.pt, last.pt) contains:
 - `tag`: "best" or "last"
-- `epoch`, `loss`, `best_loss`
+- `epoch`, `loss`, `best_loss` or source-val selection metric
 - `experiment_id`, `protocol_freeze_id`, `split_manifest_path`
+- `adaptation_setting`, `K`, `model_selection_source`
+- HyperDA-SAFE K-shot metadata such as `safe_policy_json_sha256`,
+  `policy_source`, `anchor_alpha`, and `adapt_mix_rho`
 - `git_hash`, `timestamp`
 - `model_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`
 - `train_history`

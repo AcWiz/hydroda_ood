@@ -1106,84 +1106,23 @@ def test_phase5_adapt_script_forwards_resume_from():
     assert "checkpoint_epoch_019.pt" not in text
 
 
-def test_phase5_hydro_msr_script_forwards_hydro_msr_flags():
-    script = Path("run/phase5_hydro_msr.sh")
+def test_retired_phase5_variant_wrappers_are_not_active_paper_entrypoints():
+    retired_wrappers = [
+        Path("run/phase5_hydro_msr.sh"),
+        Path("run/phase5_da_gain_adapter.sh"),
+        Path("run/phase5_anchor_soup_gain_adapter.sh"),
+        Path("run/phase5_hydro_msr_rose.sh"),
+    ]
 
-    text = script.read_text()
+    assert not [path for path in retired_wrappers if path.exists()]
 
-    assert "TARGET_SPATIAL_REFINE_TYPE" in text
-    assert 'TARGET_SPATIAL_REFINE_TYPE="${TARGET_SPATIAL_REFINE_TYPE:-hydro_msr}"' in text
-    assert "--target_spatial_refine_type" in text
-    assert "HYDRO_MSR_HIDDEN" in text
-    assert "--hydro_msr_hidden" in text
-    assert "ENABLE_HYDRO_MSR_DA_FILM" in text
-    assert "--enable_hydro_msr_da_film" in text
-    assert "DEVICE" in text
-    assert '--device "${DEVICE}"' in text
-    assert 'ENABLE_TARGET_SPATIAL_REFINE="${ENABLE_TARGET_SPATIAL_REFINE:-1}"' in text
-    assert 'TARGET_SPATIAL_REFINE_ROOTZONE="${TARGET_SPATIAL_REFINE_ROOTZONE:-1}"' in text
-    assert "ENABLE_PIGO" not in text
-    assert "--enable_pigo" not in text
-
-
-def test_phase5_da_gain_adapter_script_forwards_gain_and_stage_flags():
-    script = Path("run/phase5_da_gain_adapter.sh")
-
-    text = script.read_text()
-
-    assert 'TARGET_SPATIAL_REFINE_TYPE="${TARGET_SPATIAL_REFINE_TYPE:-hydro_msr_gain}"' in text
-    assert "ENABLE_DA_REGIME_GAIN_MIXER" in text
-    assert "--enable_da_regime_gain_mixer" in text
-    assert "STAGE1_EPOCHS" in text
-    assert "--stage1_epochs" in text
-    assert "TARGET_SPATIAL_REFINE_GAIN_SPAN" in text
-    assert "--target_spatial_refine_gain_span" in text
-    assert "SELECTION_ROOTZONE_WEIGHT" in text
-    assert "--selection_rootzone_weight" in text
-    assert 'TARGET_SELECTION_METRIC="${TARGET_SELECTION_METRIC:-combined_val_wrmse}"' in text
-    assert 'RUN_NAME="${RUN_NAME:-phase5_hydro_msr_gain_${TARGET_REGION}_s${SEED}}"' in text
-
-
-def test_phase5_anchor_soup_gain_adapter_script_forwards_anchor_soup_defaults():
-    script = Path("run/phase5_anchor_soup_gain_adapter.sh")
-
-    text = script.read_text()
-
-    assert 'export CUDA_VISIBLE_DEVICES="${4:-${CUDA_VISIBLE_DEVICES:-0}}"' in text
-    assert 'TARGET_SPATIAL_REFINE_TYPE="${TARGET_SPATIAL_REFINE_TYPE:-hydro_msr_gain_lite}"' in text
-    assert 'TARGET_SPATIAL_REFINE_GAIN_SPAN="${TARGET_SPATIAL_REFINE_GAIN_SPAN:-0.20}"' in text
-    assert 'STAGE1_EPOCHS="${STAGE1_EPOCHS:-0}"' in text
-    assert 'MAX_EPOCHS="${MAX_EPOCHS:-60}"' in text
-    assert 'LR="${LR:-7.5e-4}"' in text
-    assert 'SURFACE_WEIGHT="${SURFACE_WEIGHT:-4.0}"' in text
-    assert 'ROOTZONE_WEIGHT="${ROOTZONE_WEIGHT:-0.75}"' in text
-    assert 'LAMBDA_ANALYSIS="${LAMBDA_ANALYSIS:-0.35}"' in text
-    assert 'TARGET_SELECTION_METRIC="${TARGET_SELECTION_METRIC:-combined_val_wrmse}"' in text
-    assert 'SELECTION_ROOTZONE_WEIGHT="${SELECTION_ROOTZONE_WEIGHT:-0.25}"' in text
-    assert 'ENABLE_ADAPTER_ANCHOR_SOUP="${ENABLE_ADAPTER_ANCHOR_SOUP:-1}"' in text
-    assert "--enable_adapter_anchor_soup" in text
-    assert 'RUN_NAME="${RUN_NAME:-phase5_anchor_soup_gain_${TARGET_REGION}_s${SEED}}"' in text
-
-
-def test_phase5_hydro_msr_rose_script_forwards_rose_flags():
-    script = Path("run/phase5_hydro_msr_rose.sh")
-
-    text = script.read_text()
-
-    assert 'TARGET_SPATIAL_REFINE_TYPE="${TARGET_SPATIAL_REFINE_TYPE:-hydro_msr_rose}"' in text
-    assert "TARGET_SPATIAL_REFINE_INPUT" in text
-    assert "--target_spatial_refine_input" in text
-    assert "HYDRO_MSR_HIDDEN" in text
-    assert "--hydro_msr_hidden" in text
-    assert "ENABLE_HYDRO_MSR_DA_FILM" in text
-    assert "--enable_hydro_msr_da_film" in text
-    assert "TARGET_SELECTION_METRIC" in text
-    assert "--target_selection_metric" in text
-    assert "RESUME_FROM" in text
-    assert "--resume_from" in text
-    assert 'RUN_NAME="${RUN_NAME:-phase5_hydro_msr_rose_${TARGET_REGION}_s${SEED}}"' in text
-    assert "ENABLE_PIGO" not in text
-    assert "--enable_pigo" not in text
+    safe = Path("run/hyperda_safe_us_r1_seed0.sh").read_text()
+    zero_few = Path("run/phase5_hyperda_zero_few_shot_eval.sh").read_text()
+    assert "HyperDA-SAFE" in safe
+    assert "ADAPT_RECIPE=source_anchor" in safe
+    assert "phase5_hyperda_zero_few_shot_eval.sh" in safe
+    assert 'K_LIST="${K_LIST:-0 4 12}"' in zero_few
+    assert 'ADAPT_RECIPE="${ADAPT_RECIPE:-source_anchor}"' in zero_few
 
 
 def test_target_adaptation_run_config_uses_target_val_dataset_hash():
@@ -1390,6 +1329,698 @@ def test_interpolate_target_adapter_state_uses_source_anchor_alpha():
     assert torch.allclose(interpolated["target_prompt.latent"], torch.tensor([1.0, 3.0]))
     assert torch.allclose(anchor["target_prompt.latent"], torch.tensor([0.0, 2.0]))
     assert torch.allclose(adapted["target_prompt.latent"], torch.tensor([4.0, 6.0]))
+
+
+def test_stage3_prior_snapshot_records_frozen_hyperda_and_monthly_prompt_state():
+    from scripts.train.train_hyperda_few_shot_adapt import build_stage3_prior_snapshot_metadata
+
+    prompt_state = {
+        "schema_version": "target_context_prompt_state_v1",
+        "prompt_source": "target_context_monthly_prompt_prototypes",
+        "label_usage": "none",
+        "context_hash": "ctxhash",
+        "context_date_hash": "ctxhash",
+        "n_samples": 7,
+        "date_start": "2015-01-01",
+        "date_end": "2021-12-01",
+        "monthly_counts": {str(month): (2 if month == 1 else 0) for month in range(1, 13)},
+        "monthly_prototypes": {str(month): (torch.zeros(8) if month == 1 else None) for month in range(1, 13)},
+        "global_prototype": torch.ones(8),
+        "metadata": {},
+    }
+
+    snapshot = build_stage3_prior_snapshot_metadata(
+        source_config={
+            "model_type": "hyperda_basis_adapter",
+            "source_regions": ["US-R2", "US-R3"],
+            "source_stage_checkpoint_provenance": "phase4_hyperda_staged",
+        },
+        prompt_state=prompt_state,
+        source_checkpoint_sha256="abc123",
+        target_region="US-R1",
+        K=4,
+    )
+
+    assert snapshot["schema_version"] == "hyperda_stage3_prior_snapshot_v1"
+    assert snapshot["prior_operator"] == "frozen_source_hyperda"
+    assert snapshot["source_hyperda_trainable_in_stage3"] is False
+    assert snapshot["target_context_label_usage"] == "none"
+    assert snapshot["target_context_hash"] == "ctxhash"
+    assert snapshot["source_checkpoint_sha256"] == "abc123"
+    assert snapshot["monthly_prompt_counts"]["1"] == 2
+    assert snapshot["target_region"] == "US-R1"
+    assert snapshot["K"] == 4
+
+
+def test_stage3_posterior_state_metadata_is_target_only_and_zero_for_k0():
+    from scripts.train.train_hyperda_few_shot_adapt import build_stage3_posterior_state_metadata
+
+    anchor = {
+        "target_prompt.latent": torch.tensor([0.0, 2.0]),
+        "target_adapter_coefficient_residual_b.logit_delta": torch.zeros(3),
+        "residual_gain.logit_gain": torch.zeros(2),
+    }
+    adapted = {name: tensor.clone() for name, tensor in anchor.items()}
+
+    metadata = build_stage3_posterior_state_metadata(
+        anchor_state=anchor,
+        final_state=adapted,
+        K=0,
+        adapt_scope="none",
+        anchor_alpha=0.0,
+        adaptation_steps=0,
+        target_labels_loaded=False,
+        target_labels_used=False,
+    )
+
+    assert metadata["schema_version"] == "hyperda_stage3_target_posterior_v1"
+    assert metadata["posterior_variables"] == [
+        "target_prompt",
+        "adapter_coefficient_residuals",
+        "monthly_residual_gain",
+    ]
+    assert metadata["source_hyperda_parameter_updates"] == 0
+    assert metadata["target_specific_parameter_updates"] == 0
+    assert metadata["target_labels_used_for_adaptation"] is False
+    assert metadata["drift_from_prior"]["total"] == 0.0
+
+    adapted["target_prompt.latent"] = torch.tensor([1.0, 3.0])
+    k4_metadata = build_stage3_posterior_state_metadata(
+        anchor_state=anchor,
+        final_state=adapted,
+        K=4,
+        adapt_scope="safe_operator",
+        anchor_alpha=0.75,
+        adaptation_steps=100,
+        target_labels_loaded=True,
+        target_labels_used=True,
+    )
+
+    assert k4_metadata["target_specific_parameter_updates"] > 0
+    assert k4_metadata["target_labels_used_for_adaptation"] is True
+    assert k4_metadata["safe_anchor_formula"] == "theta_SAFE = theta_prior + alpha_K * (theta_adapt - theta_prior)"
+    assert k4_metadata["anchor_alpha"] == 0.75
+    assert k4_metadata["drift_from_prior"]["target_prompt"] > 0.0
+
+
+def test_stage3_target_posterior_state_dict_is_target_only_and_hashes_are_stable():
+    from scripts.train.train_hyperda_few_shot_adapt import (
+        build_stage3_target_posterior_state,
+        hash_source_prior_state,
+    )
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=2,
+        enable_target_adaptation=True,
+        target_latent_dim=4,
+    )
+    model.freeze_source_prior_for_target_adaptation()
+    source_hash_before = hash_source_prior_state(model)
+    anchor = {
+        name: tensor.detach().clone()
+        for name, tensor in model.state_dict().items()
+        if name.startswith("target_") or name.startswith("residual_gain.")
+    }
+    with torch.no_grad():
+        model.target_prompt.latent.add_(1.0)
+        model.residual_gain.bias[0, 0].add_(0.25)
+    final = {
+        name: tensor.detach().clone()
+        for name, tensor in model.state_dict().items()
+        if name.startswith("target_") or name.startswith("residual_gain.")
+    }
+
+    posterior = build_stage3_target_posterior_state(
+        anchor_state=anchor,
+        final_state=final,
+        K=4,
+        adapt_scope="safe_operator",
+        anchor_alpha=0.75,
+        adaptation_steps=100,
+        target_labels_loaded=True,
+        target_labels_used=True,
+        source_prior_hash_before=source_hash_before,
+        source_prior_hash_after=hash_source_prior_state(model),
+    )
+
+    assert posterior["schema_version"] == "hyperda_stage3_target_posterior_state_v1"
+    assert posterior["source_prior_unchanged"] is True
+    assert posterior["metadata"]["target_specific_parameter_updates"] == 2
+    assert posterior["metadata"]["target_labels_used_for_adaptation"] is True
+    assert set(posterior["target_adapter_state_dict"]) == set(final)
+    assert set(posterior["target_adapter_anchor_state_dict"]) == set(anchor)
+    assert all(
+        name.startswith("target_") or name.startswith("residual_gain.")
+        for name in posterior["target_adapter_state_dict"]
+    )
+    assert posterior["target_adapter_state_hash"] != posterior["target_adapter_anchor_hash"]
+    assert posterior["drift_from_prior"]["total"] > 0.0
+
+
+def test_few_shot_checkpoint_persists_stage3_prior_and_posterior_metadata(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import save_few_shot_checkpoint, write_run_metadata_sidecar
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=2,
+        enable_target_adaptation=True,
+        target_latent_dim=4,
+    )
+    model.freeze_source_prior_for_target_adaptation()
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    state = type("State", (), {})()
+    state.model = model
+    state.prompt_encoder = prompt_encoder
+    state.source_config = {"model_type": "hyperda_basis_adapter"}
+
+    prompt_state = {
+        "schema_version": "target_context_prompt_state_v1",
+        "prompt_source": "target_context_monthly_prompt_prototypes",
+        "label_usage": "none",
+        "context_hash": "ctxhash",
+        "context_date_hash": "ctxhash",
+        "n_samples": 1,
+        "date_start": "2015-01-01",
+        "date_end": "2015-01-01",
+        "monthly_counts": {str(month): (1 if month == 1 else 0) for month in range(1, 13)},
+        "monthly_prototypes": {str(month): (torch.zeros(8) if month == 1 else None) for month in range(1, 13)},
+        "global_prototype": torch.zeros(8),
+        "metadata": {},
+    }
+    anchor = {
+        name: tensor.detach().clone()
+        for name, tensor in model.state_dict().items()
+        if name.startswith("target_") or name.startswith("residual_gain.")
+    }
+    config = {
+        "K": 0,
+        "adaptation_setting": "zero_shot_context",
+        "target_region": "US-R1",
+        "target_adapter_anchor_state": anchor,
+        "stage3_prior_snapshot": {"schema_version": "hyperda_stage3_prior_snapshot_v1"},
+        "stage3_posterior_state": {"schema_version": "hyperda_stage3_target_posterior_v1"},
+    }
+
+    ckpt_path = tmp_path / "checkpoint.pt"
+    saved = save_few_shot_checkpoint(
+        path=ckpt_path,
+        state=state,
+        optimizer_state_dict={},
+        config=config,
+        target_context_prompt_state=prompt_state,
+        train_history=[],
+    )
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+    assert saved["stage3_prior_snapshot"]["schema_version"] == "hyperda_stage3_prior_snapshot_v1"
+    assert saved["stage3_posterior_state"]["schema_version"] == "hyperda_stage3_target_posterior_v1"
+    assert ckpt["config"]["stage3_prior_snapshot"] == saved["stage3_prior_snapshot"]
+    assert ckpt["config"]["stage3_posterior_state"] == saved["stage3_posterior_state"]
+    assert ckpt["stage3_posterior_state_dict"]["schema_version"] == "hyperda_stage3_target_posterior_state_v1"
+    assert ckpt["stage3_posterior_state_dict"]["source_prior_unchanged"] is True
+    assert ckpt["config"]["stage3_source_prior_hash_before"] == ckpt["config"]["stage3_source_prior_hash_after"]
+    assert ckpt["config"]["stage3_posterior_state"]["source_prior_unchanged"] is True
+
+    write_run_metadata_sidecar(tmp_path, ckpt_path, saved)
+    metadata = __import__("json").loads((tmp_path / "metadata.json").read_text())
+    assert metadata["stage3_prior_snapshot"] == saved["stage3_prior_snapshot"]
+    assert metadata["stage3_posterior_state"] == saved["stage3_posterior_state"]
+    assert metadata["stage3_source_prior_hash_before"] == metadata["stage3_source_prior_hash_after"]
+
+
+def test_prompt_predictor_exposes_stage3_protocol_metadata(tmp_path):
+    from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+    from scripts.train.train_hyperda_few_shot_adapt import (
+        build_stage3_target_posterior_state,
+        hash_source_prior_state,
+    )
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=2,
+        enable_target_adaptation=True,
+        target_latent_dim=4,
+        zero_raw_increment_init=True,
+    )
+    model.freeze_source_prior_for_target_adaptation()
+    prompt_encoder = RegionPromptEncoder(num_regions=5, input_channels=12, hidden_dim=8)
+    prompt_state = {
+        "schema_version": "target_context_prompt_state_v1",
+        "prompt_source": "target_context_monthly_prompt_prototypes",
+        "label_usage": "none",
+        "context_hash": "contexthash",
+        "monthly_counts": {str(i): 0 for i in range(1, 13)},
+        "global_prototype": torch.zeros(8),
+        "monthly_prototypes": {str(i): None for i in range(1, 13)},
+        "metadata": {},
+    }
+    anchor = {
+        name: tensor.detach().clone()
+        for name, tensor in model.state_dict().items()
+        if name.startswith("target_") or name.startswith("residual_gain.")
+    }
+    source_hash = hash_source_prior_state(model)
+    posterior = build_stage3_target_posterior_state(
+        anchor_state=anchor,
+        final_state=anchor,
+        K=0,
+        adapt_scope="none",
+        anchor_alpha=0.0,
+        adaptation_steps=0,
+        target_labels_loaded=False,
+        target_labels_used=False,
+        source_prior_hash_before=source_hash,
+        source_prior_hash_after=source_hash,
+        stage3_posterior_policy="conservative_coeff_posterior",
+        stage3_posterior_decision="no_update",
+        support_gate_status="skipped_k0_no_support",
+    )
+    ckpt_path = tmp_path / "stage3.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "target_context_prompt_state": prompt_state,
+            "stage3_posterior_state_dict": posterior,
+            "config": {
+                "model_type": "hyperda_basis_adapter_target_adapt",
+                "method": "hyperda_zero_shot_context",
+                "adaptation_setting": "zero_shot_context",
+                "K": 0,
+                "width": 4,
+                "prompt_dim": 8,
+                "hyper_n_basis": 3,
+                "hyper_adapter_bottleneck": 2,
+                "hyper_adapter_scale": 1.0,
+                "zero_raw_increment_init": True,
+                "num_regions": 5,
+                "target_latent_dim": 4,
+                "source_region_global_indices": [1, 2, 3, 4, 5],
+                "ch_mean": [0.0] * 12,
+                "ch_std": [1.0] * 12,
+                "inc_mean": [0.0, 0.0],
+                "inc_std": [1.0, 1.0],
+                "stage3_posterior_state": posterior["metadata"],
+                "stage3_source_prior_hash_before": source_hash,
+                "stage3_source_prior_hash_after": source_hash,
+            },
+        },
+        ckpt_path,
+    )
+
+    predictor = PromptConditionedBackbonePredictor(
+        checkpoint_path=str(ckpt_path),
+        device="cpu",
+        target_region="US-R1",
+    )
+
+    assert predictor.stage3_protocol_metadata["posterior_state_schema"] == "hyperda_stage3_target_posterior_state_v1"
+    assert predictor.stage3_protocol_metadata["source_prior_unchanged"] is True
+    assert predictor.stage3_protocol_metadata["K"] == 0
+    assert predictor.stage3_protocol_metadata["target_labels_used_for_adaptation"] is False
+    assert predictor.stage3_protocol_metadata["stage3_posterior_policy"] == "conservative_coeff_posterior"
+    assert predictor.stage3_protocol_metadata["stage3_posterior_decision"] == "no_update"
+    assert predictor.stage3_protocol_metadata["support_gate_status"] == "skipped_k0_no_support"
+
+
+def test_evaluation_summary_includes_stage3_protocol_metadata(monkeypatch, tmp_path):
+    from scripts.eval import evaluate_checkpoint
+
+    class DummyDataset:
+        def __init__(self, *args, **kwargs):
+            self._split_entry = {
+                "target_context_dates_hash": "ctxhash",
+                "target_support_dates_hash": "supporthash",
+                "target_eval_dates_hash": "evalhash",
+            }
+
+        def __len__(self):
+            return 1
+
+        def close(self):
+            return None
+
+    class DummyPredictor:
+        method_name = "hyperda_zero_shot_context"
+        stage3_protocol_metadata = {
+            "posterior_state_schema": "hyperda_stage3_target_posterior_state_v1",
+            "source_prior_unchanged": True,
+            "K": 0,
+            "target_labels_used_for_adaptation": False,
+            "stage3_posterior_policy": "conservative_coeff_posterior",
+            "stage3_posterior_decision": "no_update",
+            "support_gate_status": "skipped_k0_no_support",
+        }
+        _target_prompt_metadata = {"label_usage": "none"}
+
+        def __init__(self, *args, **kwargs):
+            return None
+
+    rows = [
+        {
+            "target_region_id": "US-R1",
+            "variable": "surface",
+            "metric": "rmse",
+            "value": 1.0,
+            "season": "ALL",
+        }
+    ]
+    eval_hashes = {
+        "prediction_content_hash": "predhash",
+        "prediction_record_count": 1,
+        "metric_content_hash": "metrichash",
+        "metric_values_content_hash": "valuehash",
+    }
+    summary_metrics = {
+        "surface": {
+            "skill_primary": 0.0,
+            "skill_latw_primary": 0.0,
+            "skill_median": 0.0,
+            "rmse_latw_mean": 1.0,
+            "corr_latw_mean": 0.0,
+        },
+        "rootzone": {
+            "skill_primary": 0.0,
+            "skill_latw_primary": 0.0,
+            "skill_median": 0.0,
+            "rmse_latw_mean": 1.0,
+            "corr_latw_mean": 0.0,
+        },
+    }
+
+    monkeypatch.setattr(evaluate_checkpoint, "HydroDADataset", DummyDataset)
+    monkeypatch.setattr(evaluate_checkpoint, "resolve_device", lambda *args, **kwargs: torch.device("cpu"))
+    monkeypatch.setattr(evaluate_checkpoint, "compute_sha256", lambda path: "splitsha")
+    monkeypatch.setattr(evaluate_checkpoint, "evaluate_split", lambda **kwargs: (rows, eval_hashes))
+    monkeypatch.setattr(evaluate_checkpoint, "summarize_metric_rows", lambda df: summary_metrics)
+    monkeypatch.setattr(
+        "hydroda.baselines.prompt_conditioned.PromptConditionedBackbonePredictor",
+        DummyPredictor,
+    )
+    ckpt = tmp_path / "ckpt.pt"
+    ckpt.write_bytes(b"placeholder")
+    policy_json = tmp_path / "m2_4a_policy.json"
+    policy_json.write_text(
+        __import__("json").dumps(
+            {
+                "schema_version": "stage3_k0_m2_4a_source_episode_policy_v1",
+                "policy": "source_episode_calibrated_v1",
+                "policy_source": "source_episode_calibrated_v1",
+                "rho_surface_cap": 0.25,
+                "rho_rootzone_cap": 0.75,
+                "policy_hash": "policyhash",
+                "source_episode_regions": ["US-R2", "US-R3"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_checkpoint.py",
+            "--checkpoint",
+            str(ckpt),
+            "--target_region",
+            "US-R1",
+            "--adaptation_setting",
+            "zero_shot_context",
+            "--K",
+            "0",
+            "--split_type",
+            "target_eval",
+            "--predictor_type",
+            "hyperda_target_adapt",
+            "--output_dir",
+            str(tmp_path / "eval"),
+            "--max_samples",
+            "1",
+            "--device",
+            "cpu",
+        ],
+    )
+
+    evaluate_checkpoint.main()
+
+    summary = __import__("json").loads((tmp_path / "eval" / "US-R1" / "summary.json").read_text())
+    diagnostics = __import__("json").loads((tmp_path / "eval" / "US-R1" / "diagnostics.json").read_text())
+    assert summary["stage3_protocol"]["posterior_state_schema"] == "hyperda_stage3_target_posterior_state_v1"
+    assert summary["stage3_protocol"]["source_prior_unchanged"] is True
+    assert summary["stage3_protocol"]["stage3_posterior_policy"] == "conservative_coeff_posterior"
+    assert summary["stage3_protocol"]["stage3_posterior_decision"] == "no_update"
+    assert summary["stage3_protocol"]["support_gate_status"] == "skipped_k0_no_support"
+    assert diagnostics["stage3_protocol"]["target_labels_used_for_adaptation"] is False
+
+
+def test_evaluation_summary_records_stage3_k0_context_shrinkage_metadata(monkeypatch, tmp_path):
+    from scripts.eval import evaluate_checkpoint
+
+    class DummyDataset:
+        def __init__(self, *args, **kwargs):
+            self._split_entry = {
+                "target_context_dates_hash": "ctxhash",
+                "target_support_dates_hash": "supporthash",
+                "target_eval_dates_hash": "evalhash",
+            }
+
+        def __len__(self):
+            return 1
+
+        def close(self):
+            return None
+
+    class DummyPredictor:
+        method_name = "hyperda_zero_shot_context"
+        stage3_protocol_metadata = {
+            "posterior_state_schema": "hyperda_stage3_target_posterior_state_v1",
+            "source_prior_unchanged": True,
+            "K": 0,
+            "target_labels_used_for_adaptation": False,
+            "stage3_posterior_policy": "conservative_coeff_posterior",
+            "stage3_posterior_decision": "no_update",
+            "support_gate_status": "skipped_k0_no_support",
+        }
+        stage3_k0_context_shrinkage_metadata = {"enabled": False}
+        _target_prompt_metadata = {"label_usage": "none"}
+
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def enable_stage3_k0_context_shrinkage(
+            self,
+            *,
+            source_calibrated_rho_cap,
+            policy,
+            surface_rho_cap,
+            rootzone_rho_cap,
+            policy_json_path="",
+        ):
+            self.stage3_k0_context_shrinkage_metadata = {
+                "enabled": True,
+                "stage3_variant": "M2_4_target_context_conservative_hyperda",
+                "policy": policy,
+                "rho_cap": float(source_calibrated_rho_cap),
+                "rho_surface_cap": float(surface_rho_cap),
+                "rho_rootzone_cap": float(rootzone_rho_cap),
+                "policy_source": "source_episode_calibrated_v1",
+                "policy_hash": "policyhash",
+                "source_episode_regions": ["US-R2", "US-R3"],
+                "target_labels_used_for_adaptation": False,
+                "target_val_usage": "unused_in_main_protocol",
+                "target_eval_usage": "final_eval_only_no_selection",
+                "target_eval_input_stats_used_for_update": False,
+            }
+
+    rows = [
+        {
+            "target_region_id": "US-R1",
+            "variable": "surface",
+            "metric": "rmse",
+            "value": 1.0,
+            "season": "ALL",
+        }
+    ]
+    eval_hashes = {
+        "prediction_content_hash": "predhash",
+        "prediction_record_count": 1,
+        "metric_content_hash": "metrichash",
+        "metric_values_content_hash": "valuehash",
+        "stage3_k0_context_shrinkage": {
+            "enabled": True,
+            "rho_mean": 0.5,
+            "rho_min": 0.5,
+            "rho_max": 0.5,
+            "rho_surface_mean": 0.25,
+            "rho_surface_min": 0.25,
+            "rho_surface_max": 0.25,
+            "rho_rootzone_mean": 0.75,
+            "rho_rootzone_min": 0.75,
+            "rho_rootzone_max": 0.75,
+        },
+    }
+    summary_metrics = {
+        "surface": {
+            "skill_primary": 0.0,
+            "skill_latw_primary": 0.0,
+            "skill_median": 0.0,
+            "rmse_latw_mean": 1.0,
+            "corr_latw_mean": 0.0,
+        },
+        "rootzone": {
+            "skill_primary": 0.0,
+            "skill_latw_primary": 0.0,
+            "skill_median": 0.0,
+            "rmse_latw_mean": 1.0,
+            "corr_latw_mean": 0.0,
+        },
+    }
+
+    monkeypatch.setattr(evaluate_checkpoint, "HydroDADataset", DummyDataset)
+    monkeypatch.setattr(evaluate_checkpoint, "resolve_device", lambda *args, **kwargs: torch.device("cpu"))
+    monkeypatch.setattr(evaluate_checkpoint, "compute_sha256", lambda path: "splitsha")
+    monkeypatch.setattr(evaluate_checkpoint, "evaluate_split", lambda **kwargs: (rows, eval_hashes))
+    monkeypatch.setattr(evaluate_checkpoint, "summarize_metric_rows", lambda df: summary_metrics)
+    monkeypatch.setattr(
+        "hydroda.baselines.prompt_conditioned.PromptConditionedBackbonePredictor",
+        DummyPredictor,
+    )
+    ckpt = tmp_path / "ckpt.pt"
+    ckpt.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_checkpoint.py",
+            "--checkpoint",
+            str(ckpt),
+            "--target_region",
+            "US-R1",
+            "--adaptation_setting",
+            "zero_shot_context",
+            "--K",
+            "0",
+            "--split_type",
+            "target_eval",
+            "--predictor_type",
+            "hyperda_target_adapt",
+            "--output_dir",
+            str(tmp_path / "eval"),
+            "--max_samples",
+            "1",
+            "--device",
+            "cpu",
+            "--stage3_k0_context_shrinkage",
+            "--stage3_k0_context_shrinkage_rho_cap",
+            "0.5",
+            "--stage3_k0_context_shrinkage_policy",
+            "source_episode_calibrated_v1",
+            "--stage3_k0_context_shrinkage_surface_rho_cap",
+            "0.25",
+            "--stage3_k0_context_shrinkage_rootzone_rho_cap",
+            "0.75",
+            "--stage3_k0_context_shrinkage_policy_json",
+            str(policy_json),
+        ],
+    )
+
+    evaluate_checkpoint.main()
+
+    summary = __import__("json").loads((tmp_path / "eval" / "US-R1" / "summary.json").read_text())
+    diagnostics = __import__("json").loads((tmp_path / "eval" / "US-R1" / "diagnostics.json").read_text())
+    shrinkage = summary["stage3_k0_context_shrinkage"]
+    assert shrinkage["enabled"] is True
+    assert shrinkage["stage3_variant"] == "M2_4_target_context_conservative_hyperda"
+    assert shrinkage["rho_cap"] == 0.5
+    assert shrinkage["rho_surface_cap"] == 0.25
+    assert shrinkage["rho_rootzone_cap"] == 0.75
+    assert shrinkage["rho_mean"] == 0.5
+    assert shrinkage["rho_surface_mean"] == 0.25
+    assert shrinkage["rho_rootzone_mean"] == 0.75
+    assert shrinkage["policy_source"] == "source_episode_calibrated_v1"
+    assert shrinkage["policy_hash"] == "policyhash"
+    assert shrinkage["source_episode_regions"] == ["US-R2", "US-R3"]
+    assert shrinkage["target_labels_used_for_adaptation"] is False
+    assert shrinkage["target_eval_input_stats_used_for_update"] is False
+    assert diagnostics["stage3_k0_context_shrinkage"]["enabled"] is True
+
+
+def test_evaluation_rejects_target_context_prompt_hash_mismatch(monkeypatch, tmp_path):
+    from scripts.eval import evaluate_checkpoint
+
+    class DummyDataset:
+        def __init__(self, *args, **kwargs):
+            self._split_entry = {
+                "target_context_dates_hash": "split-context-hash",
+                "target_support_dates_hash": "supporthash",
+                "target_eval_dates_hash": "evalhash",
+            }
+
+        def __len__(self):
+            return 1
+
+        def close(self):
+            return None
+
+    class DummyPredictor:
+        method_name = "hyperda_zero_shot_context"
+        stage3_protocol_metadata = {}
+        _target_prompt_metadata = {
+            "schema_version": "target_context_prompt_state_v1",
+            "context_hash": "checkpoint-context-hash",
+            "context_date_hash": "checkpoint-context-hash",
+            "label_usage": "none",
+        }
+
+        def __init__(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(evaluate_checkpoint, "HydroDADataset", DummyDataset)
+    monkeypatch.setattr(evaluate_checkpoint, "resolve_device", lambda *args, **kwargs: torch.device("cpu"))
+    monkeypatch.setattr(evaluate_checkpoint, "compute_sha256", lambda path: "splitsha")
+    monkeypatch.setattr(
+        "hydroda.baselines.prompt_conditioned.PromptConditionedBackbonePredictor",
+        DummyPredictor,
+    )
+    ckpt = tmp_path / "ckpt.pt"
+    ckpt.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_checkpoint.py",
+            "--checkpoint",
+            str(ckpt),
+            "--target_region",
+            "US-R1",
+            "--adaptation_setting",
+            "zero_shot_context",
+            "--K",
+            "0",
+            "--split_type",
+            "target_eval",
+            "--predictor_type",
+            "hyperda_target_adapt",
+            "--output_dir",
+            str(tmp_path / "eval"),
+            "--max_samples",
+            "1",
+            "--device",
+            "cpu",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="target_context_dates_hash"):
+        evaluate_checkpoint.main()
 
 
 def test_greedy_anchor_soup_accepts_only_target_val_improvements():

@@ -1,5 +1,6 @@
-method_name: HyperDA
+method_name: HyperDA-SAFE
 method_version: v4.0
+paper_name: "HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement"
 
 backbone:
   first_version: SmallResUNet
@@ -17,6 +18,111 @@ parameter_generation:
     - optional_film_parameters
   factorization: basis_factorized
   formula: zeta_R_l = zeta_0_l + sum_m alpha_R_l_m * B_l_m
+  active_ablation_modules:
+    - shared_layer_aware_rank_gated_coefficients
+    - dora_like_identity_centered_basis_gain
+    - source_calibrated_layer_basis_saliency_gate_prior
+  default_ablation_preset: M2_1_rank_gated_dora_stable
+  main_source_prior:
+    ablation_id: M2_1_rank_gated_dora_stable
+    paper_method_phrase: stable rank-gated bounded-DoRA HyperDA prior + SAFE refinement
+    hyper_coeff_generator: shared_layer_aware_rank_gated_stable
+    hyper_adapter_param_style: dora_like_gain_bounded
+    hyper_rank_gate_temperature_init: 2.0
+    use_amp: 0
+    lr: 2e-4
+    status: paper_facing_source_prior
+  rank_gated_defaults:
+    hyper_coeff_generator: shared_layer_aware_rank_gated
+    hyper_rank_gate_top_k: 4
+    hyper_rank_gate_temperature_init: 1.0
+    hyper_adapter_param_style: dora_like_gain
+    hyper_reliability_gate: prompt_scalar
+  source_saliency_prior_defaults:
+    ablation_id: M2_2_source_saliency_prior
+    status: secondary diagnostic
+    saliency_source_allowed:
+      - source_fit
+      - source_side_pseudo_episodes
+    forbidden_saliency_sources:
+      - source_val_for_training_saliency
+      - target_val
+      - target_eval
+    prior_shape: adapter_layer_by_basis
+    injection: legacy_gate_logit_bias_before_top_k_diagnostic_only
+    beta_selection: fixed_or_source_side_preregistered
+    prompt_manifold_reliability: input_side_context_features_only
+  source_safe_residual_defaults:
+    ablation_id: M2_3_source_safe_residual_hyperda
+    status: negative_diagnostic_source_safe_residual_ablation
+    mainline_status: do_not_replace_m2_1_current_us_r1_k0_target_eval_worse
+    starts_from: M2_1_rank_gated_dora_stable
+    zero_shot_prior_form: source_base_residual_reliability_gated
+    formula: pred = source_base(x) + rho * reliability_gate(prompt, context) * hyper_residual(x, prompt)
+    rho_selection: source_val_regionwise_safe_episode_only
+    target_val_usage: unused_in_main_protocol
+    target_labels_used_for_adaptation: false
+    saliency_prior_application: soft_regularization_metadata_no_hard_topk_routing
+    regularizers:
+      - residual_magnitude_penalty
+      - coefficient_entropy_floor
+  da_aware_prompt_only_defaults:
+    ablation_id: M2_5a_da_aware_prompt_only
+    status: negative_diagnostic_non_strict_prompt_only
+    starts_from: M2_1_rank_gated_dora_stable
+    failure_interpretation: source_val_improved_target_k0_degraded
+    non_strict_contrast_reasons:
+      - operator_form_was_direct_hyper_rho0_not_m2_1_source_base_residual_anchor
+      - normalized_domain_tb_innovation_not_physical_raw_innovation
+    hyper_coeff_generator: shared_layer_aware_rank_gated_stable
+    hyper_adapter_param_style: dora_like_gain_bounded
+    hyper_rank_gate_top_k: 4
+    hyper_rank_gate_temperature_init: 2.0
+    use_amp: 0
+    lr: 2e-4
+    context_encoder: robust_input_side_da_diagnostics
+    prompt_feature_source: input_side_target_context_or_current_input_only
+    prompt_diagnostics:
+      - tb_h_v_innovation
+      - observation_error_confidence
+      - h_v_polarization_contrast
+      - mwrtm_vegopacity
+      - soil_and_surface_temperature
+      - forecast_surface_rootzone_state
+      - finite_input_coverage
+      - bounded_base_valid_mask_diagnostic_coverage
+    forbidden_sources:
+      - target_labels
+      - target_val
+      - target_eval_statistics
+    base_valid_mask_usage: bounded_diagnostic_feature_only_not_loss_metric_obs_or_region_mask
+  da_aware_conservative_router_defaults:
+    ablation_id: M2_5b_da_aware_conservative_router
+    status: diagnostic_not_paper_main_until_source_and_target_eval_gates_pass
+    starts_from: M2_1_rank_gated_dora_stable
+    hyper_coeff_generator: shared_layer_aware_rank_gated_stable
+    hyper_adapter_param_style: dora_like_gain_bounded
+    hyper_rank_gate_top_k: 4
+    hyper_rank_gate_temperature_init: 2.0
+    use_amp: 0
+    lr: 2e-4
+    context_encoder: robust_input_side_da_diagnostics_raw
+    prompt_diagnostic_input_domain: raw_input_side
+    backbone_input_domain: normalized_x_norm
+    zero_shot_prior_form: source_base_residual_reliability_gated
+    source_residual_rho: 1.0
+    source_residual_gate_init: 0.90
+    hyper_prompt_manifold_reliability: 1
+    hyper_prompt_manifold_reliability_strength: 0.25
+    m2_5a_failure_interpretation: source_val_improved_target_k0_degraded
+    promotion_rule: source_val_gate_then_final_target_eval_only
+    forbidden_sources:
+      - target_labels
+      - target_val
+      - target_eval_statistics
+    base_valid_mask_usage: bounded_diagnostic_feature_only_not_loss_metric_obs_or_region_mask
+  safe_refinement_formula: theta_SAFE = theta_prior + alpha_K * (theta_adapt - theta_prior)
+  safe_refinement_selection: source_val_preregistered_only
 
 prompt:
   token_types:
@@ -36,7 +142,7 @@ prompt:
   target_context_policy:
     main: target_context_monthly_prompt_prototypes
     context_period: 2015-2021
-    input_usage: normalized_input_summary_only
+    input_usage: normalized_input_summary_only_or_raw_input_side_for_explicit_raw_da_encoder
     label_usage: none
     eval_input_usage: none_for_prompt_update
     eval_month_usage: known_seasonal_phase_selector_only
@@ -50,20 +156,46 @@ variants:
     generated_parameters: target_specific_lightweight_operator
     selection_data: source_val_2022_preregistered_only
     final_eval_data: target_eval_2023_2025_offline_only
+  M2_4_TargetContextConservative_K0:
+    ablation_id: M2_4_target_context_conservative_hyperda
+    name: Stage 3 K=0 target-context conservative shrinkage diagnostic
+    status: diagnostic_not_paper_main_not_a_source_stage_ablation
+    stage: stage3_k0_target_context_adaptation_diagnostic
+    K: 0
+    starts_from: frozen_M2_1_rank_gated_dora_stable
+    source_prior: M2_1_rank_gated_dora_stable
+    extra_source_finetune: false
+    target_context_signal: input_side_monthly_prototype_reliability_only
+    shrinkage_policy: source_leave_one_region_worst_case_non_degradation_vs_m2_1
+    formula: pred = source_base + shrinkage(context_reliability) * M2_1_hyper_residual
+    target_labels_used_for_adaptation: false
+    target_val_usage: unused_in_main_protocol
+    target_eval_usage: final_eval_only_no_selection
+    target_eval_input_stats_used_for_update: false
   HyperDA_FewShot_K4:
+    paper_name: HyperDA-SAFE
+    refinement: Source-Anchored Few-Shot Operator Refinement
     K: 4
     labels: up_to_4_labeled_target_support_cycles_2015_2021
     prompt: target_context_monthly_prompt_prototypes_2015_2021_input_side_only
     trainable:
-      - target_prompt
       - adapter_coefficient_residuals
+    source_policy_optional_trainable:
+      - monthly_residual_gain
+    default_frozen:
+      - target_prompt
       - monthly_residual_gain
     steps: 100_fixed_preregistered
     source_anchor_alpha: 0.75_fixed_from_source_side_episodic_validation
     lr: 1e-3_fixed_preregistered
+    posterior_policy_options:
+      - conservative_coeff_posterior
+      - source_calibrated_mix
     selection_data: source_val_2022_preregistered_only
     target_val_usage: unused_in_main_protocol
   HyperDA_FewShot_K12:
+    paper_name: HyperDA-SAFE
+    refinement: Source-Anchored Few-Shot Operator Refinement
     K: 12
     labels: up_to_12_labeled_target_support_cycles_2015_2021
     prompt: target_context_monthly_prompt_prototypes_2015_2021_input_side_only
@@ -73,12 +205,18 @@ variants:
       - hypernetwork
       - adapter_basis_bank
     trainable:
-      - target_prompt
       - adapter_coefficient_residuals
+    source_policy_optional_trainable:
+      - monthly_residual_gain
+    default_frozen:
+      - target_prompt
       - monthly_residual_gain
     steps: 80_fixed_preregistered
     source_anchor_alpha: 0.25_fixed_from_source_side_episodic_validation
     lr: 3e-4_fixed_preregistered
+    posterior_policy_options:
+      - conservative_coeff_posterior
+      - source_calibrated_mix
     selection_data: source_val_2022_preregistered_only
     target_val_usage: unused_in_main_protocol
     final_eval_data: target_eval_2023_2025_offline_only
@@ -86,6 +224,22 @@ variants:
     status: legacy_internal_explicit_opt_in_only
     labels: all_labeled_target_train_cycles_2015_2021
     prompt: legacy_target_2015_2021_input_side_summary_plus_full_train_tokens
+
+retired_failed_explorations:
+  M2_rank_gated_dora:
+    status: retired_failed_exploration_not_paper_main
+    note: AMP skip/numerical failure
+  phase6_surface_residual_ridge:
+    status: retired_failed_exploration_not_paper_main
+    note: not a paper-main method
+  phase6_bora_residual_adapter:
+    status: retired_failed_exploration_not_paper_main
+    note: not a paper-main method
+  phase7_hyperda_apo:
+    status: retired_failed_exploration_not_paper_main
+    note: not a paper-main method
+future_source_side_ablations:
+  - Hessian/Fisher/top-parameter selection
 
 loss:
   DA_loss: masked_balanced_Huber

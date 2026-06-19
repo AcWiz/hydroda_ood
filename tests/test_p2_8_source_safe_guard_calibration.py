@@ -53,9 +53,11 @@ def test_guard_candidate_enumeration_defaults_to_compact_budgeted_grid():
     candidates = calib.enumerate_guard_candidates()
     base_configs = calib.enumerate_guard_base_configs()
 
-    assert len(base_configs) == 6
-    assert [c["base_config_id"] for c in base_configs] == [f"C{i}" for i in range(6)]
-    assert len(candidates) == 42
+    assert len(base_configs) == 12
+    assert [c["base_config_id"] for c in base_configs] == [
+        f"C{i}_{scope}" for i in range(6) for scope in ("coeff_gain", "safe_operator")
+    ]
+    assert len(candidates) == 84
     assert {c["rho_policy"] for c in candidates} == {
         "fixed_1.0",
         "fixed_0.75",
@@ -65,7 +67,7 @@ def test_guard_candidate_enumeration_defaults_to_compact_budgeted_grid():
         "rule_b",
         "rule_c",
     }
-    assert all(c["K"] == 12 and c["adapt_scope"] == "all" for c in candidates)
+    assert all(c["K"] == 12 and c["adapt_scope"] in {"coeff_gain", "safe_operator"} for c in candidates)
     assert len({c["candidate_id"] for c in candidates}) == len(candidates)
 
 
@@ -74,10 +76,26 @@ def test_full_candidate_set_is_retained_behind_explicit_full_v1():
 
     candidates = calib.enumerate_guard_candidates(candidate_set="full_v1")
 
-    assert len(candidates) == 84
+    assert len(candidates) == 168
     assert {c["schedule_label"] for c in candidates} == {"original_K12", "K4_schedule_on_K12"}
     assert {c["support_loss_reduction"] for c in candidates} == {"global_pixel", "cycle_balanced"}
     assert {c["trust_policy"] for c in candidates} == {"none", "mild_groupwise", "strong_groupwise"}
+    assert {c["adapt_scope"] for c in candidates} == {"coeff_gain", "safe_operator"}
+
+
+def test_stage3_conservative_candidate_set_excludes_safe_operator_scope():
+    from scripts.eval import calibrate_source_safe_guard as calib
+
+    base_configs = calib.enumerate_guard_base_configs(candidate_set="stage3_conservative_v1")
+    logical = calib.enumerate_guard_candidates(candidate_set="stage3_conservative_v1")
+
+    assert base_configs
+    assert logical
+    assert {row["K"] for row in base_configs} == {4, 12}
+    assert {row["K"] for row in logical} == {4, 12}
+    assert {row["adapt_scope"] for row in logical} <= {"coeff_only", "coeff_gain", "none"}
+    assert "safe_operator" not in {row["adapt_scope"] for row in logical}
+    assert len({row["candidate_id"] for row in logical}) == len(logical)
 
 
 @pytest.mark.parametrize(
@@ -129,6 +147,155 @@ def test_source_safe_score_and_ranking_are_exact_for_synthetic_rows(tmp_path):
     assert by_id["B"]["mean_regret_vs_K0"] == pytest.approx(0.01 / 3.0)
     assert by_id["B"]["score"] == pytest.approx(0.02 - 0.5 * (0.01 / 3.0) - 0.05 * (1.0 / 3.0))
     assert calib.rank_candidates(summaries)[0]["candidate_id"] == "B"
+
+
+def test_m2_4_context_reliability_shrinkage_is_bounded_and_monotone():
+    from scripts.eval import calibrate_source_safe_guard as calib
+
+    high_reliability = [1.0, 1.0, 1.0, 0.95, 0.05]
+    medium_reliability = [0.6, 1.0, 0.8, 0.75, 0.30]
+    low_reliability = [0.1, 0.0, 0.5, 0.40, 0.90]
+
+    high = calib.compute_m2_4_context_shrinkage(high_reliability, source_calibrated_rho_cap=0.8)
+    medium = calib.compute_m2_4_context_shrinkage(medium_reliability, source_calibrated_rho_cap=0.8)
+    low = calib.compute_m2_4_context_shrinkage(low_reliability, source_calibrated_rho_cap=0.8)
+
+    assert 0.0 <= low <= medium <= high <= 0.8
+    assert calib.compute_m2_4_context_shrinkage(high_reliability, source_calibrated_rho_cap=2.0) <= 1.0
+    assert calib.compute_m2_4_context_shrinkage(high_reliability, source_calibrated_rho_cap=-1.0) == 0.0
+
+
+def test_m2_4_source_episode_selection_uses_worst_case_non_degradation_vs_m2_1():
+    from scripts.eval import calibrate_source_safe_guard as calib
+
+    rows = []
+    for episode in ("US-R2_e0", "US-R3_e0"):
+        rows.append(
+            {
+                **_row(episode, "M2_1_frozen_prior", 0.50, K=0, schedule_label="M2_1_frozen_prior"),
+                "surface_skill_primary": 0.50,
+                "rootzone_skill_primary": 0.50,
+            }
+        )
+    rows.extend(
+        [
+            {
+                **_row("US-R2_e0", "rho1_mean_good_but_bad_worst_case", 0.65, K=0),
+                "surface_skill_primary": 0.65,
+                "rootzone_skill_primary": 0.65,
+                "context_shrinkage_rho": 1.0,
+            },
+            {
+                **_row("US-R3_e0", "rho1_mean_good_but_bad_worst_case", 0.59, K=0),
+                "surface_skill_primary": 0.70,
+                "rootzone_skill_primary": 0.48,
+                "context_shrinkage_rho": 1.0,
+            },
+            {
+                **_row("US-R2_e0", "rho05_safe", 0.535, K=0),
+                "surface_skill_primary": 0.55,
+                "rootzone_skill_primary": 0.52,
+                "context_shrinkage_rho": 0.5,
+            },
+            {
+                **_row("US-R3_e0", "rho05_safe", 0.495, K=0),
+                "surface_skill_primary": 0.50,
+                "rootzone_skill_primary": 0.49,
+                "context_shrinkage_rho": 0.5,
+            },
+        ]
+    )
+
+    summaries = calib.score_m2_4_source_episode_candidates(rows, safe_score_floor_ratio=0.98)
+    by_id = {row["candidate_id"]: row for row in summaries}
+
+    assert by_id["rho1_mean_good_but_bad_worst_case"]["mean_delta_vs_m2_1"] > by_id["rho05_safe"][
+        "mean_delta_vs_m2_1"
+    ]
+    assert by_id["rho1_mean_good_but_bad_worst_case"]["safe_against_m2_1_98pct"] is False
+    assert by_id["rho1_mean_good_but_bad_worst_case"]["worst_rootzone_ratio_vs_m2_1"] == pytest.approx(0.96)
+    assert by_id["rho05_safe"]["safe_against_m2_1_98pct"] is True
+    assert by_id["rho05_safe"]["worst_variable_ratio_vs_m2_1"] == pytest.approx(0.98)
+
+    selected = calib.select_m2_4_conservative_candidate(rows, safe_score_floor_ratio=0.98)
+    assert selected["candidate_id"] == "rho05_safe"
+    assert selected["selection_baseline_candidate_id"] == "M2_1_frozen_prior"
+    assert selected["target_labels_used_for_adaptation"] is False
+    assert selected["target_val_usage"] == "unused_in_main_protocol"
+    assert selected["target_eval_usage"] == "final_eval_only_no_selection"
+    assert selected["target_eval_input_stats_used_for_update"] is False
+
+
+def test_m2_4a_variable_source_episode_selection_exports_surface_rootzone_caps():
+    from scripts.eval import calibrate_source_safe_guard as calib
+
+    rows = []
+    for episode in ("US-R2_e0", "US-R3_e0"):
+        rows.append(
+            {
+                **_row(episode, "M2_1_frozen_prior", 0.50, K=0, schedule_label="M2_1_frozen_prior"),
+                "surface_skill_primary": 0.50,
+                "rootzone_skill_primary": 0.50,
+            }
+        )
+    rows.extend(
+        [
+            {
+                **_row("US-R2_e0", "m2_4a_s05_r025", 0.53, K=0),
+                "surface_skill_primary": 0.56,
+                "rootzone_skill_primary": 0.50,
+                "context_shrinkage_policy": "source_episode_calibrated_v1",
+                "context_shrinkage_rho_surface": 0.5,
+                "context_shrinkage_rho_rootzone": 0.25,
+            },
+            {
+                **_row("US-R3_e0", "m2_4a_s05_r025", 0.52, K=0),
+                "surface_skill_primary": 0.54,
+                "rootzone_skill_primary": 0.50,
+                "context_shrinkage_policy": "source_episode_calibrated_v1",
+                "context_shrinkage_rho_surface": 0.5,
+                "context_shrinkage_rho_rootzone": 0.25,
+            },
+            {
+                **_row("US-R2_e0", "m2_4a_s075_r075", 0.56, K=0),
+                "surface_skill_primary": 0.58,
+                "rootzone_skill_primary": 0.54,
+                "context_shrinkage_policy": "source_episode_calibrated_v1",
+                "context_shrinkage_rho_surface": 0.75,
+                "context_shrinkage_rho_rootzone": 0.75,
+            },
+            {
+                **_row("US-R3_e0", "m2_4a_s075_r075", 0.51, K=0),
+                "surface_skill_primary": 0.56,
+                "rootzone_skill_primary": 0.46,
+                "context_shrinkage_policy": "source_episode_calibrated_v1",
+                "context_shrinkage_rho_surface": 0.75,
+                "context_shrinkage_rho_rootzone": 0.75,
+            },
+        ]
+    )
+
+    selected = calib.select_m2_4a_variable_conservative_candidate(rows, safe_score_floor_ratio=0.98)
+    policy = calib.build_stage3_k0_m2_4a_policy_json(
+        selected,
+        final_target_region="US-R1",
+        seed=0,
+    )
+
+    assert selected["candidate_id"] == "m2_4a_surface_0.75__rootzone_0.25"
+    assert selected["rho_surface_cap"] == pytest.approx(0.75)
+    assert selected["rho_rootzone_cap"] == pytest.approx(0.25)
+    assert selected["safe_against_m2_1_98pct"] is True
+    assert selected["source_episode_regions"] == ["US-R2", "US-R3"]
+    assert policy["schema_version"] == "stage3_k0_m2_4a_source_episode_policy_v1"
+    assert policy["policy_source"] == "source_episode_calibrated_v1"
+    assert policy["policy"] == "source_episode_calibrated_v1"
+    assert policy["rho_surface_cap"] == pytest.approx(0.75)
+    assert policy["rho_rootzone_cap"] == pytest.approx(0.25)
+    assert policy["source_episode_regions"] == ["US-R2", "US-R3"]
+    assert policy["target_labels_used_for_adaptation"] is False
+    assert policy["target_eval_input_stats_used_for_update"] is False
+    assert policy["policy_hash"] == calib.compute_stage3_k0_m2_4a_policy_hash(policy)
 
 
 def test_calibration_rejects_target_eval_rows_even_when_marked_diagnostic(tmp_path):
@@ -278,7 +445,7 @@ def test_calibration_audit_reports_counts_missing_candidates_and_hashes(tmp_path
     assert audit["candidate_count_observed"] == 1
     assert audit["candidate_count_expected"] == len(calib.enumerate_guard_candidates())
     assert "A" in audit["unexpected_candidate_ids"]
-    assert "schedule_original_K12__loss_global_pixel__rho_fixed_1.0__trust_none" in audit["missing_candidate_ids"]
+    assert "scope_coeff_gain__schedule_original_K12__loss_global_pixel__rho_fixed_1.0__trust_none" in audit["missing_candidate_ids"]
     assert audit["candidate_episode_ratio"] == pytest.approx(1 / 2)
 
 
@@ -422,15 +589,15 @@ def test_top_candidate_ids_map_to_unique_required_base_configs():
     from scripts.eval import calibrate_source_safe_guard as calib
 
     logical = calib.enumerate_guard_candidates(candidate_set="compact_v1")
-    c0_ids = [row["candidate_id"] for row in logical if row["base_config_id"] == "C0"][:3]
-    c2_id = next(row["candidate_id"] for row in logical if row["base_config_id"] == "C2")
+    c0_ids = [row["candidate_id"] for row in logical if row["base_config_id"] == "C0_coeff_gain"][:3]
+    c2_id = next(row["candidate_id"] for row in logical if row["base_config_id"] == "C2_coeff_gain")
 
     required = calib.base_configs_for_logical_candidate_ids(
         candidate_set="compact_v1",
         candidate_ids=[*c0_ids, c2_id],
     )
 
-    assert [row["base_config_id"] for row in required] == ["C0", "C2"]
+    assert [row["base_config_id"] for row in required] == ["C0_coeff_gain", "C2_coeff_gain"]
     assert all(row["rho_policy"] == "fixed_1.0" for row in required)
 
 
@@ -630,68 +797,263 @@ def test_guard_config_hash_is_stable_and_selected_schema_is_locked():
     assert config["guard_config_hash"] != calib.compute_guard_config_hash(changed)
 
 
-def test_p2_8_wrappers_declare_source_safe_and_diagnostic_contracts():
-    diag = Path("run/phase5_hyperda_p2_8_cycle_balanced_diagnostics.sh").read_text()
-    calib_wrapper = Path("run/phase5_hyperda_p2_8_source_safe_guard_calibration.sh").read_text()
-    locked = Path("run/phase5_hyperda_p2_8_locked_guard_target_eval.sh").read_text()
+def test_build_safe_policy_json_from_source_calibration_config():
+    from scripts.eval import calibrate_source_safe_guard as calib
 
-    assert "diagnostic_only=true" in diag
-    assert "target_eval_usage=diagnostic_only_not_for_calibration" in diag
-    assert "SUPPORT_LOSS_REDUCTION=cycle_balanced" in diag
-    assert 'run_row "A0_k12_all_original_cycle_balanced"' in diag
-    assert 'run_row "A1_k12_all_k4_schedule_cycle_balanced"' in diag
-    assert 'run_row "A2_k12_all_k4_schedule_cycle_balanced_trust_rho_0_5"' in diag
-    assert 'run_row "A3_k4_all_original_cycle_balanced"' in diag
+    selected_config = {
+        "candidate_id": "schedule_original_K12__loss_cycle_balanced__rho_fixed_1.0__trust_none",
+        "guard_config_hash": "guardhash",
+        "adapt_scope": "coeff_gain",
+        "adapt_solver": "adamw",
+        "lr": 3e-4,
+        "adaptation_steps": 80,
+        "anchor_alpha": 0.25,
+        "support_loss_reduction": "cycle_balanced",
+        "trust_region_mode": "groupwise",
+        "trust_total_radius": 2.0,
+        "trust_prompt_radius": 1.0,
+        "trust_gain_radius": 0.25,
+        "trust_coeff_radius": 0.5,
+        "trust_spatial_radius": 0.0,
+        "source_safety_evidence_level": "source_heldout_strict",
+        "source_metadata": {"pseudo_target_regions": ["US-R2", "US-R3"]},
+    }
 
-    assert "calibrate_source_safe_guard.py" in calib_wrapper
-    assert "source_val" in calib_wrapper
-    assert "ALLOW_IN_CHECKPOINT_SOURCE_EPISODES" in calib_wrapper
-    assert "CALIB_MAX_QUERY_SAMPLES" in calib_wrapper
-    assert 'CANDIDATE_SET="${CANDIDATE_SET:-compact_v1}"' in calib_wrapper
-    assert 'CALIBRATION_STAGE="${CALIBRATION_STAGE:-coarse}"' in calib_wrapper
-    assert 'SOURCE_QUERY_MAX_SAMPLES="${SOURCE_QUERY_MAX_SAMPLES:-256}"' in calib_wrapper
-    assert 'RESUME="${RESUME:-1}"' in calib_wrapper
-    assert 'SKIP_EXISTING="${SKIP_EXISTING:-1}"' in calib_wrapper
-    assert "DRY_RUN_MANIFEST" in calib_wrapper
-    assert "invalid_existing_rows.csv" in calib_wrapper
-    assert "trap on_source_rows_error ERR" in calib_wrapper
-    assert "writing resume manifest before exit" in calib_wrapper
-    for artifact in [
-        "candidate_manifest.csv",
-        "completed_rows.csv",
-        "missing_rows.csv",
-        "resume_commands.md",
-        "top5_stability.csv",
-        "top5_candidates.csv",
-        "coarse_source_safe_calibration_summary",
-        "final_source_safe_calibration_summary",
-        "final_candidate_rankings.csv",
-        "leave_one_source_region_out_stability.csv",
-    ]:
-        assert artifact in calib_wrapper
-    assert "MAX_EPISODES" in calib_wrapper
-    assert 'mkdir -p "${row_dir}"' in calib_wrapper
-    assert "target_eval" not in calib_wrapper.lower().split("calibrate_source_safe_guard.py", 1)[-1]
+    policy = calib.build_safe_policy_json(
+        selected_config,
+        final_target_region="US-R1",
+        seed=0,
+    )
 
-    assert "selected_guard_config" in locked
-    assert "K_LIST=\"0 4 12\"" in locked
-    assert "compute_rho_for_policy" in locked
-    assert "target_support gradient diagnostics" in locked
-    assert "--split_type target_eval" in locked
-    assert "never from target_eval" in locked
-    for field in [
-        "overall_skill_primary",
-        "delta_vs_K0_overall_skill",
-        "delta_vs_K4_overall_skill",
-        "negative_transfer_vs_K0",
-        "support_gradient_cosine_mean",
-        "support_gradient_negative_fraction",
-        "trust_projection_pre_step_drift_max_total",
-        "trust_projection_post_step_drift_max_total",
-        "guard_config_hash",
-        "selected_guard_config_hash",
-    ]:
-        assert field in locked
+    assert policy["schema_version"] == "hyperda_safe_policy_v1"
+    assert policy["policy_source"] == "source_side_episode_calibration"
+    assert policy["target_val_usage"] == "unused_in_main_protocol"
+    assert policy["target_eval_usage"] == "final_eval_only_no_selection"
+    assert policy["source_episode_regions"] == ["US-R2", "US-R3"]
+    assert policy["source_calibration"]["guard_config_hash"] == "guardhash"
+    assert policy["policies"]["few_shot_k4"]["adapt_scope"] == "coeff_gain"
+    assert policy["policies"]["few_shot_k4"]["adaptation_steps"] == 80
+    assert policy["policies"]["few_shot_k12"]["support_loss_reduction"] == "cycle_balanced"
+    assert policy["policy_hash"] == calib.compute_safe_policy_hash(policy)
+
+    changed = json.loads(json.dumps(policy, sort_keys=True))
+    changed["policies"]["few_shot_k12"]["anchor_alpha"] = 0.5
+    changed.pop("policy_hash")
+    assert policy["policy_hash"] != calib.compute_safe_policy_hash(changed)
+
+
+def test_per_k_source_safe_policy_can_select_different_k4_and_k12_configs():
+    from scripts.eval import calibrate_source_safe_guard as calib
+
+    rows = []
+    for episode in ("US-R2_e0", "US-R3_e0"):
+        rows.append(_row(episode, "K0_identity", 0.50, K=0, schedule_label="identity_base"))
+        rows.append(
+            {
+                **_row(
+                    episode,
+                    "K4_conservative_coeff_only",
+                    0.52,
+                    K=4,
+                    schedule_label="source_safe_K4_conservative",
+                    rho_policy="fixed_0.5",
+                    trust_policy="strong_groupwise",
+                ),
+                "adapt_scope": "coeff_only",
+                "lr": 3e-4,
+                "adaptation_steps": 20,
+                "anchor_alpha": 0.25,
+                "support_loss_reduction": "cycle_balanced",
+                "target_parameter_l2_drift_post_anchor_total": 0.10,
+            }
+        )
+        rows.append(
+            {
+                **_row(
+                    episode,
+                    "K4_aggressive_surface_only",
+                    0.55,
+                    K=4,
+                    schedule_label="source_safe_K4_aggressive",
+                    rho_policy="fixed_1.0",
+                ),
+                "adapt_scope": "safe_operator",
+                "surface_skill_primary": 0.70,
+                "rootzone_skill_primary": 0.40,
+                "lr": 1e-3,
+                "adaptation_steps": 100,
+                "anchor_alpha": 0.75,
+                "target_parameter_l2_drift_post_anchor_total": 5.0,
+            }
+        )
+        rows.append(
+            {
+                **_row(
+                    episode,
+                    "K12_cycle_balanced_coeff_gain",
+                    0.60,
+                    K=12,
+                    schedule_label="source_safe_K12_cycle_balanced",
+                    rho_policy="fixed_0.75",
+                    trust_policy="mild_groupwise",
+                ),
+                "adapt_scope": "coeff_gain",
+                "lr": 2e-4,
+                "adaptation_steps": 60,
+                "anchor_alpha": 0.20,
+                "support_loss_reduction": "cycle_balanced",
+                "target_parameter_l2_drift_post_anchor_total": 0.50,
+            }
+        )
+
+    selected_by_k = calib.select_per_k_safe_policy_configs(
+        rows,
+        trust_radii=calib.derive_trust_radii(rows),
+        final_target_region="US-R1",
+        seed=0,
+        evidence_level="source_heldout_strict",
+        source_metadata={"pseudo_target_regions": ["US-R2", "US-R3"]},
+    )
+    policy = calib.build_safe_policy_json(
+        selected_by_k[12],
+        final_target_region="US-R1",
+        seed=0,
+        selected_configs_by_k=selected_by_k,
+    )
+
+    k4_policy = policy["policies"]["few_shot_k4"]
+    k12_policy = policy["policies"]["few_shot_k12"]
+    assert k4_policy["adapt_scope"] == "coeff_only"
+    assert k4_policy["adaptation_steps"] == 20
+    assert k4_policy["anchor_alpha"] == pytest.approx(0.25)
+    assert k4_policy["adapt_mix_rho"] == pytest.approx(0.5)
+    assert k12_policy["adapt_scope"] == "coeff_gain"
+    assert k12_policy["support_loss_reduction"] == "cycle_balanced"
+    assert k12_policy["adaptation_steps"] == 60
+    assert k12_policy["anchor_alpha"] == pytest.approx(0.20)
+    assert k4_policy != k12_policy
+    assert policy["source_calibration"]["selected_config_by_k"]["4"]["candidate_id"] == "K4_conservative_coeff_only"
+    assert policy["source_calibration"]["selected_config_by_k"]["12"]["candidate_id"] == "K12_cycle_balanced_coeff_gain"
+    assert policy["target_val_usage"] == "unused_in_main_protocol"
+    assert policy["target_eval_usage"] == "final_eval_only_no_selection"
+    assert policy["policy_hash"] == calib.compute_safe_policy_hash(policy)
+
+
+def test_expand_prediction_records_applies_rho_candidates_to_k4_and_k12(tmp_path, monkeypatch):
+    from scripts.eval import calibrate_source_safe_guard as calib
+
+    k0_path = tmp_path / "k0.jsonl"
+    k4_path = tmp_path / "k4.jsonl"
+    k12_path = tmp_path / "k12.jsonl"
+    for path in (k0_path, k4_path, k12_path):
+        path.write_text("{}\n", encoding="utf-8")
+
+    def fake_mix(k0_record_path, adapted_record_path, *, rho, candidate_id):
+        return {
+            "summary": {
+                "surface": {"skill_primary": 0.1 + float(rho)},
+                "rootzone": {"skill_primary": 0.2 + float(rho)},
+            },
+            "mixed_prediction_content_hash": f"mixed-{adapted_record_path.name}-{rho:g}",
+            "source_prediction_record_hash": "source-hash",
+            "metric_content_hash": "metric-hash",
+            "metric_values_content_hash": "metric-values-hash",
+        }
+
+    import scripts.eval.mix_prediction_records as mixer
+
+    monkeypatch.setattr(mixer, "mix_prediction_record_files", fake_mix)
+
+    rows = [
+        {
+            **_row("US-R2_e0", "K0_identity", 0.10, K=0, schedule_label="identity_base"),
+            "prediction_record_path": str(k0_path),
+        },
+        {
+            **_row(
+                "US-R2_e0",
+                "K4_base",
+                0.11,
+                K=4,
+                schedule_label="source_safe_K4_conservative",
+            ),
+            "adapt_scope": "coeff_only",
+            "prediction_record_path": str(k4_path),
+        },
+        {
+            **_row(
+                "US-R2_e0",
+                "K12_base",
+                0.12,
+                K=12,
+                schedule_label="source_safe_K12_conservative",
+            ),
+            "adapt_scope": "coeff_gain",
+            "prediction_record_path": str(k12_path),
+        },
+    ]
+
+    expanded = calib.expand_logical_candidate_rows_from_prediction_records(
+        rows,
+        candidate_set="stage3_conservative_v1",
+    )
+
+    expanded_by_k = {4: [], 12: []}
+    for row in expanded:
+        if row.get("logical_offline_mix") is True:
+            expanded_by_k[int(row["K"])].append(row)
+
+    assert {row["rho_policy"] for row in expanded_by_k[4]} >= {"fixed_0.75", "fixed_0.5", "rule_a"}
+    assert {row["rho_policy"] for row in expanded_by_k[12]} >= {"fixed_0.75", "fixed_0.5", "rule_a"}
+    assert all(row["adapt_mix_rho"] is not None for row in expanded_by_k[4] + expanded_by_k[12])
+
+
+def test_per_k_scoring_allows_source_calibrated_no_update_when_k4_overupdates():
+    from scripts.eval import calibrate_source_safe_guard as calib
+
+    rows = []
+    for episode in ("US-R2_e0", "US-R3_e0"):
+        rows.append(_row(episode, "K0_identity", 0.50, K=0, schedule_label="identity_base"))
+        rows.append(
+            {
+                **_row(episode, "K4_overupdate", 0.55, K=4, schedule_label="source_safe_K4_aggressive"),
+                "surface_skill_primary": 0.75,
+                "rootzone_skill_primary": 0.35,
+                "adapt_scope": "safe_operator",
+                "lr": 1e-3,
+                "adaptation_steps": 100,
+                "anchor_alpha": 0.75,
+                "target_parameter_l2_drift_post_anchor_total": 10.0,
+            }
+        )
+
+    ranked = calib.rank_candidates(calib.score_candidates_for_k(rows, K=4, include_no_update=True))
+
+    assert ranked[0]["candidate_id"] == "K4_source_calibrated_no_update"
+    assert ranked[0]["adapt_scope"] == "none"
+    assert ranked[0]["adaptation_steps"] == 0
+    assert ranked[0]["anchor_alpha"] == pytest.approx(0.0)
+
+
+def test_p2_8_probe_wrappers_are_removed_from_active_run_entries():
+    retired_wrappers = [
+        "run/phase5_hyperda_p2_8_cycle_balanced_diagnostics.sh",
+        "run/phase5_hyperda_p2_8_source_safe_guard_calibration.sh",
+        "run/phase5_hyperda_p2_8_locked_guard_target_eval.sh",
+        "run/phase5_hyperda_p2_6_schedule_drift_probe.sh",
+        "run/phase5_hyperda_p2_7_conservative_guard_probe.sh",
+    ]
+
+    assert not [path for path in retired_wrappers if Path(path).exists()]
+
+    calibration = Path("scripts/eval/calibrate_source_safe_guard.py").read_text()
+    assert "FORBIDDEN_TARGET_EVAL_ROLES" in calibration
+    assert "target_eval" in calibration
+    assert "target_query" in calibration
+    assert "target_val" in calibration
+    assert "target_full_train" in calibration
+    assert "bash run/phase5_hyperda_p2_8_source_safe_guard_calibration.sh" not in calibration
+    assert "python scripts/eval/calibrate_source_safe_guard.py" in calibration
 
 
 def test_evaluate_checkpoint_exposes_source_only_active_region_override():

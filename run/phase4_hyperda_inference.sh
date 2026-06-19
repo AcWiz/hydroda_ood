@@ -6,7 +6,7 @@
 #   bash run/phase4_hyperda_inference.sh /path/to/checkpoint.pt US-R1 0 1
 #   bash run/phase4_hyperda_inference.sh /path/to/checkpoint.pt US-R1 0 1 /path/to/output_dir
 #
-# Evaluates the HyperDA basis-adapter checkpoint on:
+# Evaluates the staged HyperDA basis-adapter checkpoint on:
 #   - source_test:  2023-2025 held-out source regions
 #   - target_eval:  2023-2025 target-region pixels
 
@@ -23,11 +23,14 @@ ALLOW_LEGACY_TARGET_LABEL_CALIBRATION="${ALLOW_LEGACY_TARGET_LABEL_CALIBRATION:-
 
 cd "$(dirname "$0")/.."
 
-# Auto-detect latest HyperDA checkpoint if not provided.
+# Auto-detect latest staged HyperDA checkpoint if not provided.
 if [[ -z "$CHECKPOINT_PATH" ]]; then
-    LATEST_RUN=$(ls -td artifacts/runs/phase4_prompt_conditioned/phase4_prompt_conditioned_hyperda_basis_adapter_* 2>/dev/null | head -1)
+    LATEST_RUN=$(find "artifacts/runs/phase4_hyperda_staged/${TARGET_REGION}" \
+        -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr | head -1 | cut -d' ' -f2-)
     if [[ -z "$LATEST_RUN" ]]; then
-        echo "ERROR: No HyperDA run found. Provide checkpoint path manually."
+        echo "ERROR: No staged HyperDA run found under artifacts/runs/phase4_hyperda_staged/${TARGET_REGION}."
+        echo "Provide checkpoint path manually or run: bash run/phase4_hyperda_staged.sh auto ${TARGET_REGION} ${SEED} ${CUDA_VISIBLE_DEVICES}"
         exit 1
     fi
     if [[ -f "${LATEST_RUN}/checkpoints/checkpoint_best_source_val_transfer_safe_score.pt" ]]; then

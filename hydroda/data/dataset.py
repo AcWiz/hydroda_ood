@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover
 
 _ALL_US_REGIONS = ["US-R1", "US-R2", "US-R3", "US-R4", "US-R5", "US-R6"]
 _TENSOR_CACHE_MASK_CONTRACT = "region_and_finite_forecast_analysis_no_base_valid_gate"
+_TENSOR_CACHE_LOAD_MODES = ("eager", "mmap")
 _SPLIT_TYPE_TO_DATES_KEY = {
     "source_train": "source_train_dates",
     "source_fit": "source_train_dates",
@@ -375,6 +376,7 @@ class HydroDADataset(Dataset):
             "region_mask": (self._active_region_mask > 0.5).astype(np.float32),
             "latitude": self._latitude,
             "latitude_weight": self._latitude_weight,
+            "sample_region_id": self._active_region_ids[0] if len(self._active_region_ids) == 1 else None,
         }
         sample.update(self._base_sample_metadata(time_index, date_str))
         return sample
@@ -508,6 +510,7 @@ class TensorCacheHydroDADataset(Dataset):
         active_region_id: Optional[str] = None,
         tensor_cache_dir: str = "artifacts/region_crops/US",
         max_year_cache_entries: int = 1,
+        tensor_cache_load_mode: str = "eager",
     ) -> None:
         if split_type not in _SPLIT_TYPE_TO_DATES_KEY:
             raise ValueError(f"Unknown split_type={split_type!r}")
@@ -541,6 +544,12 @@ class TensorCacheHydroDADataset(Dataset):
         self._active_region_ids = [self.active_region_id]
         self.tensor_cache_dir = Path(tensor_cache_dir)
         self.max_year_cache_entries = max(0, int(max_year_cache_entries))
+        if tensor_cache_load_mode not in _TENSOR_CACHE_LOAD_MODES:
+            raise ValueError(
+                f"Unsupported tensor_cache_load_mode={tensor_cache_load_mode!r}; "
+                f"expected one of {_TENSOR_CACHE_LOAD_MODES}"
+            )
+        self.tensor_cache_load_mode = str(tensor_cache_load_mode)
         self.regime_id = HydroDADataset._load_regime_id(self, freeze_manifest)
         self._split_entry = HydroDADataset._load_split_entry(self)
         if self.adaptation_setting is None:
@@ -631,9 +640,11 @@ class TensorCacheHydroDADataset(Dataset):
                 )
             self._year_metadata[year] = meta
 
-    @staticmethod
-    def _load_tensor(path: Path) -> torch.Tensor:
-        return torch.load(path, map_location="cpu", weights_only=True)
+    def _load_tensor(self, path: Path) -> torch.Tensor:
+        kwargs: Dict[str, Any] = {"map_location": "cpu", "weights_only": True}
+        if self.tensor_cache_load_mode == "mmap":
+            kwargs["mmap"] = True
+        return torch.load(path, **kwargs)
 
     def _resolve_time_location(self, record: Dict[str, Any]) -> Dict[str, int]:
         date_str = record.get("date_str", "")
@@ -665,7 +676,8 @@ class TensorCacheHydroDADataset(Dataset):
 
     def _load_year_tensors(self, year: int) -> Dict[str, torch.Tensor]:
         cached = self._year_cache.get(year)
-        if cached is not None:
+        required_names = {"input", "target_increment", "target_analysis", "loss_mask"}
+        if cached is not None and required_names.issubset(cached):
             self._year_cache.move_to_end(year)
             return cached
         year_dir = self.region_dir / "da_full" / str(year)
@@ -678,7 +690,10 @@ class TensorCacheHydroDADataset(Dataset):
         missing = [str(path) for path in required.values() if not path.exists()]
         if missing:
             raise FileNotFoundError(f"tensor cache files missing for {self.active_region_id} {year}: {missing}")
-        tensors = {name: self._load_tensor(path) for name, path in required.items()}
+        tensors = dict(cached) if cached is not None else {}
+        for name, path in required.items():
+            if name not in tensors:
+                tensors[name] = self._load_tensor(path)
         self._validate_year_tensor_shapes(year, tensors)
         if self.max_year_cache_entries > 0:
             self._year_cache[year] = tensors
@@ -706,6 +721,11 @@ class TensorCacheHydroDADataset(Dataset):
                 f"tensor cache shape mismatch for {self.active_region_id} {year} input: "
                 f"expected {expected}, got {tuple(tensor.shape)}"
             )
+        if self.max_year_cache_entries > 0:
+            self._year_cache[year] = {"input": tensor}
+            self._year_cache.move_to_end(year)
+            while len(self._year_cache) > self.max_year_cache_entries:
+                self._year_cache.popitem(last=False)
         return tensor
 
     def _validate_year_tensor_shapes(self, year: int, tensors: Dict[str, torch.Tensor]) -> None:
@@ -858,6 +878,7 @@ class MultiRegionTensorCacheHydroDADataset(Dataset):
         active_region_ids: Sequence[str],
         tensor_cache_dir: str = "artifacts/region_crops/US",
         max_year_cache_entries: int = 1,
+        tensor_cache_load_mode: str = "eager",
         **kwargs: Any,
     ) -> None:
         if not active_region_ids:
@@ -869,6 +890,7 @@ class MultiRegionTensorCacheHydroDADataset(Dataset):
                 active_region_id=region_id,
                 tensor_cache_dir=tensor_cache_dir,
                 max_year_cache_entries=max_year_cache_entries,
+                tensor_cache_load_mode=tensor_cache_load_mode,
             )
             for region_id in self._active_region_ids
         ]
@@ -913,6 +935,13 @@ class MultiRegionTensorCacheHydroDADataset(Dataset):
         dataset, local_idx = self._resolve_dataset_index(idx)
         return dataset[local_idx]
 
+    def get_input_side_sample(self, idx: int) -> Dict[str, Any]:
+        dataset, local_idx = self._resolve_dataset_index(idx)
+        sample = dataset.get_input_side_sample(local_idx)
+        sample["sample_region_id"] = dataset.active_region_id
+        sample["active_region_ids"] = [dataset.active_region_id]
+        return sample
+
     def set_active_region(self, region_id: str) -> None:
         if region_id not in self._active_region_ids:
             raise ValueError(
@@ -931,6 +960,93 @@ class MultiRegionTensorCacheHydroDADataset(Dataset):
         return {idx: self[idx] for idx in range(len(self))}
 
 
+class SourceRegionEpisodeHydroDADataset(Dataset):
+    """HydroDADataset-compatible netCDF reader with one sample per source region.
+
+    The base netCDF dataset can expose all non-target source regions at once.
+    Stage-2 HyperDA source training needs deployment-like episodes instead:
+    each source region gets its own active region mask and loss mask for every
+    source_fit/source_val cycle.
+    """
+
+    def __init__(self, *, active_region_ids: Sequence[str], **kwargs: Any) -> None:
+        if not active_region_ids:
+            raise ValueError("active_region_ids must contain at least one source episode region")
+        self._active_region_ids = list(active_region_ids)
+        self.datasets: List[HydroDADataset] = []
+        for region_id in self._active_region_ids:
+            dataset = HydroDADataset(**kwargs)
+            dataset.set_active_region(region_id)
+            self.datasets.append(dataset)
+
+        self._offsets: List[tuple[int, HydroDADataset]] = []
+        self._date_records: List[Dict[str, Any]] = []
+        start = 0
+        for dataset in self.datasets:
+            self._offsets.append((start, dataset))
+            region_id = dataset._active_region_ids[0]
+            for local_idx, record in enumerate(dataset._date_records):
+                enriched = dict(record)
+                enriched["sample_region_id"] = region_id
+                enriched["active_region_ids"] = [region_id]
+                enriched["local_index"] = local_idx
+                self._date_records.append(enriched)
+            start += len(dataset)
+        self._length = start
+        first = self.datasets[0]
+        self.da_nc_path = first.da_nc_path
+        self.region_masks_nc = first.region_masks_nc
+        self.splits_json = first.splits_json
+        self.target_region = first.target_region
+        self.split_type = first.split_type
+        self.K = first.K
+        self.seed = first.seed
+        self.adaptation_setting = first.adaptation_setting
+        self.regime_id = first.regime_id
+        self._split_entry = first._split_entry
+        self.split_manifest_sha256 = first.split_manifest_sha256
+
+    def __len__(self) -> int:
+        return self._length
+
+    def _resolve_dataset_index(self, idx: int) -> tuple[HydroDADataset, int]:
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} out of range for dataset of size {len(self)}")
+        for start, dataset in reversed(self._offsets):
+            if idx >= start:
+                return dataset, idx - start
+        raise IndexError(f"Index {idx} out of range for dataset of size {len(self)}")
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        dataset, local_idx = self._resolve_dataset_index(idx)
+        return dataset[local_idx]
+
+    def get_input_side_sample(self, idx: int) -> Dict[str, Any]:
+        dataset, local_idx = self._resolve_dataset_index(idx)
+        sample = dataset.get_input_side_sample(local_idx)
+        region_id = dataset._active_region_ids[0]
+        sample["sample_region_id"] = region_id
+        sample["active_region_ids"] = [region_id]
+        return sample
+
+    def set_active_region(self, region_id: str) -> None:
+        if region_id not in self._active_region_ids:
+            raise ValueError(
+                f"SourceRegionEpisodeHydroDADataset does not contain {region_id}; "
+                f"available regions: {self._active_region_ids}"
+            )
+
+    def set_active_all_regions(self) -> None:
+        raise ValueError("SourceRegionEpisodeHydroDADataset uses explicit source-region episodes")
+
+    def close(self) -> None:
+        for dataset in self.datasets:
+            dataset.close()
+
+    def preload(self) -> Dict[int, Dict[str, Any]]:
+        return {idx: self[idx] for idx in range(len(self))}
+
+
 def build_hydroda_dataset(
     *,
     dataset_backend: str = "netcdf",
@@ -938,10 +1054,20 @@ def build_hydroda_dataset(
     active_region_ids: Optional[Sequence[str]] = None,
     tensor_cache_dir: str = "artifacts/region_crops/US",
     max_year_cache_entries: int = 1,
+    tensor_cache_load_mode: str = "eager",
     **kwargs: Any,
 ) -> Dataset:
     """Build a HydroDA dataset backend with a shared constructor surface."""
     if dataset_backend == "netcdf":
+        if active_region_ids is not None:
+            region_ids = list(active_region_ids)
+            if len(region_ids) == 1:
+                active_region_id = region_ids[0]
+            else:
+                return SourceRegionEpisodeHydroDADataset(
+                    **kwargs,
+                    active_region_ids=region_ids,
+                )
         dataset = HydroDADataset(**kwargs)
         if active_region_id is not None:
             dataset.set_active_region(active_region_id)
@@ -957,11 +1083,13 @@ def build_hydroda_dataset(
                     active_region_ids=region_ids,
                     tensor_cache_dir=tensor_cache_dir,
                     max_year_cache_entries=max_year_cache_entries,
+                    tensor_cache_load_mode=tensor_cache_load_mode,
                 )
         return TensorCacheHydroDADataset(
             **kwargs,
             active_region_id=active_region_id,
             tensor_cache_dir=tensor_cache_dir,
             max_year_cache_entries=max_year_cache_entries,
+            tensor_cache_load_mode=tensor_cache_load_mode,
         )
     raise ValueError(f"Unknown dataset_backend={dataset_backend!r}; expected 'netcdf' or 'tensor_cache'")

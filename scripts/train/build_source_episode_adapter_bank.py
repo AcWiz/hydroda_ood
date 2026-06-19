@@ -110,6 +110,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ridge_lambda", type=float, default=1.0)
     parser.add_argument("--ridge_clip_coeff_norm", type=float, default=1.0)
     parser.add_argument("--ridge_trust_region_radius", type=float, default=1.0)
+    parser.add_argument(
+        "--ridge_max_feature_pixels",
+        type=int,
+        default=20000,
+        help="Deterministic cap on support feature observations used by ridge coefficient adaptation; 0 means all.",
+    )
+    parser.add_argument(
+        "--ridge_standardize_features",
+        action="store_true",
+        help="Scale ridge design columns by their support RMS before solving.",
+    )
     parser.add_argument("--surface_weight", type=float, default=3.0)
     parser.add_argument("--rootzone_weight", type=float, default=1.0)
     parser.add_argument("--use_lat_weighted_loss", action="store_true", default=True)
@@ -130,6 +141,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--ridge_clip_coeff_norm must be non-negative")
     if args.ridge_trust_region_radius < 0:
         parser.error("--ridge_trust_region_radius must be non-negative")
+    if args.ridge_max_feature_pixels < 0:
+        parser.error("--ridge_max_feature_pixels must be non-negative")
     return args
 
 
@@ -538,6 +551,8 @@ def _build_episode(
                 ridge_lambda=args.ridge_lambda,
                 ridge_clip_coeff_norm=args.ridge_clip_coeff_norm,
                 ridge_trust_region_radius=args.ridge_trust_region_radius,
+                ridge_max_feature_pixels=args.ridge_max_feature_pixels,
+                ridge_standardize_features=args.ridge_standardize_features,
                 surface_weight=args.surface_weight,
                 rootzone_weight=args.rootzone_weight,
                 use_lat_weighted_loss=args.use_lat_weighted_loss,
@@ -685,6 +700,8 @@ def main() -> None:
             "ridge_lambda": float(args.ridge_lambda),
             "ridge_clip_coeff_norm": float(args.ridge_clip_coeff_norm),
             "ridge_trust_region_radius": float(args.ridge_trust_region_radius),
+            "ridge_max_feature_pixels": int(args.ridge_max_feature_pixels),
+            "ridge_standardize_features": bool(args.ridge_standardize_features),
             "max_query_samples": int(args.max_query_samples),
             "allow_regions_not_in_checkpoint": bool(args.allow_regions_not_in_checkpoint),
             "checkpoint_source_regions": list(checkpoint_source_regions),

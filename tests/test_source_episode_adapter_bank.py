@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -73,6 +74,9 @@ def test_parse_args_accepts_bank_builder_options(monkeypatch, tmp_path):
             "0.5",
             "--ridge_trust_region_radius",
             "0.25",
+            "--ridge_max_feature_pixels",
+            "1234",
+            "--ridge_standardize_features",
             "--device",
             "cpu",
         ],
@@ -87,6 +91,8 @@ def test_parse_args_accepts_bank_builder_options(monkeypatch, tmp_path):
     assert args.ridge_lambda == pytest.approx(2.0)
     assert args.ridge_clip_coeff_norm == pytest.approx(0.5)
     assert args.ridge_trust_region_radius == pytest.approx(0.25)
+    assert args.ridge_max_feature_pixels == 1234
+    assert args.ridge_standardize_features is True
 
 
 def test_episode_metadata_schema_requires_protocol_fields():
@@ -262,3 +268,110 @@ def test_pseudo_query_dataset_overrides_target_eval_metadata():
     assert sample["target_eval_dates_hash"] == "not_used_source_val_query"
     assert sample["target_region_id"] == "US-R2"
     assert sample["active_region_ids"] == ["US-R2"]
+
+
+def test_kshot_episode_passes_ridge_feature_options(monkeypatch, tmp_path):
+    from scripts.train import build_source_episode_adapter_bank as bank
+
+    class FakeDataset:
+        def __init__(self, *args, split_type: str, **kwargs):
+            self.split_type = split_type
+            self._split_entry = {
+                "target_context_dates": [{"date_str": "2019-01-01"}],
+                "target_support_dates": [{"date_str": "2019-02-01"}],
+                "source_val_dates": [{"date_str": "2022-01-01"}],
+                "target_context_dates_hash": "context_hash",
+                "target_support_dates_hash": "support_hash",
+                "source_val_dates_hash": "query_hash",
+            }
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            assert idx == 0
+            return {"date_str": "2022-01-01", "split_role": self.split_type}
+
+        def get_input_side_sample(self, idx):
+            assert idx == 0
+            return {"x": torch.zeros(12, 1, 1).numpy(), "month": 1, "date_str": "2019-01-01"}
+
+        def set_active_region(self, region):
+            self.active_region = region
+
+        def close(self):
+            pass
+
+    class FakeModel:
+        pass
+
+    fake_state = SimpleNamespace(model=FakeModel(), normalization={"inc_mean": [0.0, 0.0]})
+    captured = {}
+
+    def fake_run_ridge_coeff_adaptation(
+        *,
+        ridge_max_feature_pixels,
+        ridge_standardize_features,
+        **kwargs,
+    ):
+        captured["ridge_max_feature_pixels"] = ridge_max_feature_pixels
+        captured["ridge_standardize_features"] = ridge_standardize_features
+        return {"status": "solved"}
+
+    monkeypatch.setattr(bank, "HydroDADataset", FakeDataset)
+    monkeypatch.setattr(bank, "load_source_checkpoint_for_few_shot", lambda **kwargs: fake_state)
+    monkeypatch.setattr(bank, "apply_adapt_scope", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bank, "coefficient_residual_vector", lambda model: torch.zeros(9))
+    monkeypatch.setattr(bank, "build_few_shot_target_context_prompt_state", lambda **kwargs: {"prompt": "state"})
+    monkeypatch.setattr(bank, "target_context_prompt_metadata", lambda state: {"n_samples": 1, "label_usage": "none"})
+    monkeypatch.setattr(bank, "_loader", lambda dataset, batch_size, num_workers, shuffle: ["support_batch"])
+    monkeypatch.setattr(bank, "run_ridge_coeff_adaptation", fake_run_ridge_coeff_adaptation)
+    monkeypatch.setattr(bank, "evaluate_split", lambda **kwargs: [])
+    monkeypatch.setattr(bank, "_query_skill_from_rows", lambda rows: {"surface": {"skill_primary": 0.0}})
+    monkeypatch.setattr(
+        bank,
+        "save_adapter_coefficient_artifact",
+        lambda *args, **kwargs: {
+            "parameter_names": ["a"],
+            "adapter_vector_dim": 9,
+            "adapter_delta_norm": 0.0,
+        },
+    )
+
+    args = SimpleNamespace(
+        source_checkpoint="source.pt",
+        target_latent_dim=32,
+        device="cpu",
+        da_nc="da.nc",
+        region_masks_nc="regions.nc",
+        splits_json="splits.json",
+        freeze_manifest="freeze.json",
+        seed=0,
+        batch_size=4,
+        num_workers=0,
+        max_query_samples=0,
+        ridge_lambda=1.0,
+        ridge_clip_coeff_norm=0.5,
+        ridge_trust_region_radius=0.25,
+        ridge_max_feature_pixels=1234,
+        ridge_standardize_features=True,
+        surface_weight=3.0,
+        rootzone_weight=1.0,
+        use_lat_weighted_loss=True,
+        allow_regions_not_in_checkpoint=False,
+    )
+
+    bank._build_episode(
+        args=args,
+        output_dir=tmp_path,
+        pseudo_target_region="US-R2",
+        K=4,
+        checkpoint_source_regions=["US-R2", "US-R3"],
+        checkpoint_hash="ckpt_hash",
+        split_manifest_hash="split_hash",
+    )
+
+    assert captured == {
+        "ridge_max_feature_pixels": 1234,
+        "ridge_standardize_features": True,
+    }

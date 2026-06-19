@@ -442,6 +442,30 @@ def load_source_checkpoint_for_target_adaptation(
         hyper_n_basis=int(source_config.get("hyper_n_basis", 8)),
         hyper_adapter_bottleneck=source_config.get("hyper_adapter_bottleneck"),
         hyper_adapter_scale=float(source_config.get("hyper_adapter_scale", 1.0)),
+        hyper_coeff_generator=source_config.get("hyper_coeff_generator", "per_adapter"),
+        hyper_rank_gate_top_k=int(source_config.get("hyper_rank_gate_top_k", 4)),
+        hyper_rank_gate_temperature_init=float(source_config.get("hyper_rank_gate_temperature_init", 1.0)),
+        hyper_adapter_param_style=source_config.get("hyper_adapter_param_style", "basis_1x1"),
+        hyper_reliability_gate=source_config.get("hyper_reliability_gate", "none"),
+        hyper_reliability_init=float(source_config.get("hyper_reliability_init", 0.95)),
+        hyper_source_saliency_prior=source_config.get("hyper_source_saliency_prior"),
+        hyper_source_saliency_prior_beta=float(source_config.get("hyper_source_saliency_prior_beta", 0.0)),
+        hyper_source_saliency_prior_path=source_config.get("hyper_source_saliency_prior_path", ""),
+        hyper_source_saliency_prior_application=source_config.get(
+            "hyper_source_saliency_prior_application",
+            "soft_regularization_metadata",
+        ),
+        hyper_prompt_manifold_reliability=bool(source_config.get("hyper_prompt_manifold_reliability", False)),
+        hyper_prompt_manifold_reliability_strength=float(
+            source_config.get("hyper_prompt_manifold_reliability_strength", 0.0)
+        ),
+        hyper_enable_film=bool(source_config.get("hyper_enable_film", True)),
+        hyper_enable_adapters=bool(source_config.get("hyper_enable_adapters", True)),
+        zero_shot_prior_form=source_config.get("zero_shot_prior_form", "direct_hyper"),
+        source_residual_rho=float(source_config.get("source_residual_rho", source_config.get("zero_shot_rho", 1.0))),
+        source_residual_gate=source_config.get("source_residual_gate", "prompt_reliability_scalar"),
+        source_residual_gate_init=float(source_config.get("source_residual_gate_init", 0.95)),
+        source_residual_reliability_dim=int(source_config.get("source_residual_reliability_dim", 5)),
         zero_raw_increment_init=bool(source_config.get("zero_raw_increment_init", False)),
         enable_target_adaptation=True,
         target_latent_dim=target_latent_dim,
@@ -762,10 +786,15 @@ def _model_forward(
     z: torch.Tensor,
     months: torch.Tensor,
     x_raw: torch.Tensor,
+    reliability_features: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if "x_raw" in inspect.signature(model.forward).parameters:
-        return model(x_norm, z, month=months, x_raw=x_raw)
-    return model(x_norm, z, month=months)
+    parameters = inspect.signature(model.forward).parameters
+    kwargs: Dict[str, Any] = {"month": months}
+    if "x_raw" in parameters:
+        kwargs["x_raw"] = x_raw
+    if "reliability_features" in parameters and reliability_features is not None:
+        kwargs["reliability_features"] = reliability_features
+    return model(x_norm, z, **kwargs)
 
 
 def adaptation_regularization(

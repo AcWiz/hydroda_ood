@@ -3,6 +3,7 @@
 #
 # Usage:
 #   bash run/phase4_source_only_inference.sh [TARGET_REGION] [CHECKPOINT_PATH] [OUTPUT_DIR] [GPU_ID]
+#   bash run/phase4_source_only_inference.sh [CHECKPOINT_PATH] [TARGET_REGION] [OUTPUT_DIR] [GPU_ID]
 #
 # Evaluates the source-only backbone on:
 #   - source_test:  2023-2025 held-out source regions (in-domain baseline, NOT target)
@@ -10,10 +11,50 @@
 
 set -euo pipefail
 
-TARGET_REGION="${1:-US-R1}"
-CHECKPOINT_PATH="${2:-}"
-OUTPUT_DIR_OVERRIDE="${3:-}"
-GPU_ID="${4:-1}"
+DEFAULT_TARGET_REGION="US-R1"
+DEFAULT_GPU_ID="1"
+
+looks_like_checkpoint_path() {
+    local value="$1"
+    [[ -n "$value" && ( -f "$value" || "$value" == *.pt || "$value" == */checkpoints/* ) ]]
+}
+
+is_region_id() {
+    local value="$1"
+    [[ "$value" =~ ^[A-Z]{2}-R[0-9]+$ || "$value" == "US-ALL" ]]
+}
+
+infer_target_region_from_checkpoint() {
+    local value="$1"
+    if [[ "$value" =~ ([A-Z]{2}-R[0-9]+) ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    else
+        printf '%s\n' "${DEFAULT_TARGET_REGION}"
+    fi
+}
+
+ARG1="${1:-}"
+ARG2="${2:-}"
+ARG3="${3:-}"
+ARG4="${4:-}"
+
+if looks_like_checkpoint_path "$ARG1"; then
+    CHECKPOINT_PATH="$ARG1"
+    if is_region_id "$ARG2"; then
+        TARGET_REGION="$ARG2"
+        OUTPUT_DIR_OVERRIDE="$ARG3"
+        GPU_ID="${ARG4:-$DEFAULT_GPU_ID}"
+    else
+        TARGET_REGION="$(infer_target_region_from_checkpoint "$CHECKPOINT_PATH")"
+        OUTPUT_DIR_OVERRIDE="$ARG2"
+        GPU_ID="${ARG3:-$DEFAULT_GPU_ID}"
+    fi
+else
+    TARGET_REGION="${ARG1:-$DEFAULT_TARGET_REGION}"
+    CHECKPOINT_PATH="$ARG2"
+    OUTPUT_DIR_OVERRIDE="$ARG3"
+    GPU_ID="${ARG4:-$DEFAULT_GPU_ID}"
+fi
 
 cd "$(dirname "$0")/.."
 
@@ -67,6 +108,11 @@ echo "  target_region=${TARGET_REGION}  adaptation_setting=zero_shot_context  K=
 echo "  output_base=${OUTPUT_BASE}"
 echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "============================================"
+
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "DRY_RUN=1; skipping evaluation."
+    exit 0
+fi
 
 # Create output directory
 mkdir -p "${OUTPUT_BASE}"

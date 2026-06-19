@@ -2,8 +2,8 @@
 
 Date: 2026-05-28
 
-This audit records the conservative cleanup policy for HydroDA-OOD after the
-protocol migration to V4.4 zero/few-shot target generalization.
+This audit records the medium cleanup policy for HydroDA-OOD after the protocol
+migration to V4.4 zero/few-shot target generalization and HyperDA-SAFE.
 
 ## Active Research Contract
 
@@ -20,8 +20,12 @@ target_val: unused in main protocol
 target_eval: 2023-2025
 ```
 
-Any document, script, test, or report that treats `target_full_train` or
-target_val-based target selection as the main protocol is historical or legacy.
+The only active paper-facing protocol surface is V4.4 zero/few-shot plus
+HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement. Any document,
+script, test, or report that treats HyRAO, K-date selection,
+`target_full_train`, target_val-based target selection, phase6 residual ridge /
+BORA adapters, or phase7 APO as the main protocol is historical, legacy, or
+retired failed exploration.
 
 ## File Classes
 
@@ -46,9 +50,14 @@ Legacy but retained:
 ```text
 scripts/legacy/
 reports/forecast_only_latw_audit/target_context_k12/
+artifacts/splits/US_loro_zero_few_shot_splits.json
 artifacts/splits/US_loro_kdate_splits.json
 artifacts/splits/US_loro_target_train_splits.json
 ```
+
+`artifacts/splits/US_loro_zero_few_shot_splits.json` is the canonical active
+split artifact and must be retained. The target-train and K-date manifests are
+retained only for historical reproduction and compatibility.
 
 Generated or local-only:
 
@@ -61,7 +70,15 @@ artifacts/runs/
 artifacts/metrics/
 artifacts/experiments/
 artifacts/checkpoints/
+artifacts/tmp/
+artifacts/cache/source_context_monthly_prototypes/
 ```
+
+Delete local `metrics_long.csv` only when the same run or parent directory has
+a compact `summary*`, `overview*`, `metadata.json`, or `config.yaml` sufficient
+to identify provenance and reproduce the table. Keep checkpoints, run configs,
+protocol metadata, safe policies, compact summaries, audits, split manifests,
+geolocation files, and region masks.
 
 Canonical region artifacts currently tracked for US development:
 
@@ -86,6 +103,9 @@ tests. Revisit this only if the project moves to external artifact storage.
 4. Prefer `target_context`, `target_support`, and `target_eval` in all new docs,
    scripts, result schemas, and test names.
 5. Leave compatibility aliases in code paths that must read old manifests.
+6. Do not restore retired active entrypoints for HyperDA+ source-prior matrix,
+   P2.6-P2.8 probe wrappers, episode-prior eval wrappers, phase6 residual
+   ridge/BORA adapters, or phase7 APO.
 
 ## Risks To Monitor
 
@@ -94,11 +114,18 @@ Legacy leakage risk:
 Old reports may contain 2022 `target_context` evaluations or `K=12` fields.
 They must not be used as main-protocol evidence.
 
+Retired-method confusion risk:
+
+HyRAO, K-date, `target_full_train`, phase6 residual ridge/BORA, and phase7 APO
+may still appear in compatibility notes, old artifact names, or retained tests.
+Those mentions must be labeled legacy, diagnostic, internal, or retired; they
+must not appear as active wrappers or paper-main method IDs.
+
 Artifact drift risk:
 
-The new zero/few-shot split file is not generated until
-`scripts/data/build_zero_few_shot_splits.py` is run. Tests that require this
-artifact should skip or use synthetic manifests until the artifact is frozen.
+The canonical split artifact is
+`artifacts/splits/US_loro_zero_few_shot_splits.json`. Nested support manifests
+may be removed only when their SHA256 matches this canonical file exactly.
 
 Review risk:
 

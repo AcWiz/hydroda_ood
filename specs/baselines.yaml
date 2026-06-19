@@ -5,8 +5,8 @@ paper_main_baselines:
     - prompt_conditioned_shared_backbone
     - source_regime_specialist_bank
     - hyperda_zero_shot_context
-    - hyperda_few_shot_k4
-    - hyperda_few_shot_k12
+    - hyperda_safe_few_shot_k4
+    - hyperda_safe_few_shot_k12
 
 baseline_definitions:
   source_pooled_global_backbone:

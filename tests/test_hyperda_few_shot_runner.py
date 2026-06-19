@@ -47,6 +47,110 @@ def _write_source_checkpoint(path: Path) -> None:
     )
 
 
+def _write_rank_gated_source_checkpoint(path: Path) -> None:
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=5,
+        hyper_adapter_bottleneck=2,
+        hyper_coeff_generator="shared_layer_aware_rank_gated",
+        hyper_rank_gate_top_k=2,
+        hyper_adapter_param_style="dora_like_gain",
+        zero_raw_increment_init=True,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=5, input_channels=12, hidden_dim=8)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "config": {
+                "model_type": "hyperda_basis_adapter",
+                "width": 4,
+                "prompt_dim": 8,
+                "hyper_n_basis": 5,
+                "hyper_adapter_bottleneck": 2,
+                "hyper_adapter_scale": 1.0,
+                "hyper_coeff_generator": "shared_layer_aware_rank_gated",
+                "hyper_rank_gate_top_k": 2,
+                "hyper_rank_gate_temperature_init": 1.0,
+                "hyper_adapter_param_style": "dora_like_gain",
+                "zero_raw_increment_init": True,
+                "num_regions": 5,
+                "ch_mean": [0.0] * 12,
+                "ch_std": [1.0] * 12,
+                "inc_mean": [0.0, 0.0],
+                "inc_std": [1.0, 1.0],
+                "source_regions": ["US-R2", "US-R3", "US-R4", "US-R5", "US-R6"],
+                "source_region_global_indices": [1, 2, 3, 4, 5],
+            },
+        },
+        path,
+    )
+
+
+def _write_source_saliency_prior_checkpoint(path: Path) -> None:
+    prior = torch.tensor(
+        [
+            [0.0, 1.0, -1.0, 0.5, -0.5],
+            [1.0, 0.0, -1.0, 0.5, -0.5],
+            [-1.0, 0.0, 1.0, -0.5, 0.5],
+        ],
+        dtype=torch.float32,
+    )
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=5,
+        hyper_adapter_bottleneck=2,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_source_saliency_prior=prior,
+        hyper_source_saliency_prior_beta=0.5,
+        hyper_prompt_manifold_reliability=True,
+        hyper_prompt_manifold_reliability_strength=0.25,
+        zero_raw_increment_init=True,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=5, input_channels=12, hidden_dim=8)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "config": {
+                "model_type": "hyperda_basis_adapter",
+                "width": 4,
+                "prompt_dim": 8,
+                "hyper_n_basis": 5,
+                "hyper_adapter_bottleneck": 2,
+                "hyper_adapter_scale": 1.0,
+                "hyper_coeff_generator": "shared_layer_aware_rank_gated_stable",
+                "hyper_rank_gate_top_k": 2,
+                "hyper_rank_gate_temperature_init": 2.0,
+                "hyper_adapter_param_style": "dora_like_gain_bounded",
+                "hyper_source_saliency_prior": prior.tolist(),
+                "hyper_source_saliency_prior_beta": 0.5,
+                "hyper_source_saliency_prior_path": "artifacts/prior/source_fit.pt",
+                "hyper_prompt_manifold_reliability": True,
+                "hyper_prompt_manifold_reliability_strength": 0.25,
+                "zero_raw_increment_init": True,
+                "num_regions": 5,
+                "ch_mean": [0.0] * 12,
+                "ch_std": [1.0] * 12,
+                "inc_mean": [0.0, 0.0],
+                "inc_std": [1.0, 1.0],
+                "source_regions": ["US-R2", "US-R3", "US-R4", "US-R5", "US-R6"],
+                "source_region_global_indices": [1, 2, 3, 4, 5],
+            },
+        },
+        path,
+    )
+
+
 def _write_robust_source_checkpoint(path: Path) -> None:
     model = HyperAdapterConditionalResUNet(
         in_channels=12,
@@ -65,6 +169,43 @@ def _write_robust_source_checkpoint(path: Path) -> None:
             "config": {
                 "model_type": "hyperda_basis_adapter",
                 "context_encoder": "robust_input_side_da_diagnostics",
+                "width": 4,
+                "prompt_dim": 8,
+                "hyper_n_basis": 3,
+                "hyper_adapter_bottleneck": 2,
+                "hyper_adapter_scale": 1.0,
+                "zero_raw_increment_init": True,
+                "num_regions": 5,
+                "ch_mean": [0.0] * 12,
+                "ch_std": [1.0] * 12,
+                "inc_mean": [0.0, 0.0],
+                "inc_std": [1.0, 1.0],
+                "source_regions": ["US-R2", "US-R3", "US-R4", "US-R5", "US-R6"],
+                "source_region_global_indices": [1, 2, 3, 4, 5],
+            },
+        },
+        path,
+    )
+
+
+def _write_raw_robust_source_checkpoint(path: Path) -> None:
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=2,
+        zero_raw_increment_init=True,
+    )
+    prompt_encoder = RobustInputSideDAPromptEncoder(num_regions=5, input_channels=12, hidden_dim=8)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "config": {
+                "model_type": "hyperda_basis_adapter",
+                "context_encoder": "robust_input_side_da_diagnostics_raw",
                 "width": 4,
                 "prompt_dim": 8,
                 "hyper_n_basis": 3,
@@ -111,6 +252,8 @@ def test_few_shot_parse_args_uses_preregistered_steps_and_no_target_val(monkeypa
     assert args.target_val_usage == "unused_in_main_protocol"
     assert args.model_selection_source == "source_val_preregistered"
     assert args.enable_target_spatial_refine is False
+    assert args.adapt_scope == "safe_operator"
+    assert args.adapt_solver == "adamw"
 
 
 def test_k12_parse_args_uses_conservative_source_anchor_defaults(monkeypatch, tmp_path):
@@ -141,6 +284,258 @@ def test_k12_parse_args_uses_conservative_source_anchor_defaults(monkeypatch, tm
     assert args.adapt_recipe == "source_anchor"
     assert args.anchor_alpha == pytest.approx(0.25)
     assert args.source_anchor_hyperparameter_source == "source_side_episodic_validation_preregistered"
+    assert args.adapt_scope == "safe_operator"
+    assert args.safe_policy_json is None
+    assert args.policy_source == "preregistered_default"
+
+
+def test_parse_args_applies_source_side_safe_policy_json(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    policy_path = tmp_path / "safe_policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hyperda_safe_policy_v1",
+                "policy_source": "source_side_episode_calibration",
+                "target_val_usage": "unused_in_main_protocol",
+                "target_eval_usage": "final_eval_only_no_selection",
+                "source_episode_regions": ["US-R2", "US-R3"],
+                "policies": {
+                    "few_shot_k4": {
+                        "adapt_scope": "coeff_only",
+                        "lr": 7e-4,
+                        "adaptation_steps": 9,
+                        "anchor_alpha": 0.5,
+                        "rho_policy": "fixed_0.75",
+                        "adapt_mix_rho": 0.75,
+                        "support_loss_reduction": "cycle_balanced",
+                        "lambda_analysis": 0.4,
+                        "freeze_monthly_gain": True,
+                        "source_calibrated_candidate_id": "K4_conservative",
+                        "source_calibrated_guard_config_hash": "guardhash4",
+                    },
+                    "few_shot_k12": {
+                        "adapt_scope": "coeff_only",
+                        "lr": 2e-4,
+                        "adaptation_steps": 11,
+                        "anchor_alpha": 0.2,
+                        "support_loss_reduction": "cycle_balanced",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "4",
+            "--seed",
+            "0",
+            "--safe_policy_json",
+            str(policy_path),
+        ],
+    )
+
+    args = runner.parse_args()
+
+    assert args.policy_source == "source_side_episode_calibration"
+    assert args.safe_policy_json == str(policy_path)
+    assert args.safe_policy_json_sha256
+    assert args.safe_policy["schema_version"] == "hyperda_safe_policy_v1"
+    assert args.source_episode_regions == ["US-R2", "US-R3"]
+    assert args.adapt_scope == "coeff_only"
+    assert args.lr == pytest.approx(7e-4)
+    assert args.adaptation_steps == 9
+    assert args.anchor_alpha == pytest.approx(0.5)
+    assert args.rho_policy == "fixed_0.75"
+    assert args.adapt_mix_rho == pytest.approx(0.75)
+    assert args.support_loss_reduction == "cycle_balanced"
+    assert args.lambda_analysis == pytest.approx(0.4)
+    assert args.freeze_monthly_gain is True
+    assert args.source_policy_candidate_id == "K4_conservative"
+    assert args.source_policy_guard_config_hash == "guardhash4"
+    assert args.target_val_usage == "unused_in_main_protocol"
+    assert args.target_eval_usage == "final_eval_only_no_selection"
+
+
+def test_source_calibrated_mix_policy_accepts_source_side_safe_policy_json(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    policy_path = tmp_path / "safe_policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "policy_source": "source_side_episode_calibration",
+                "target_val_usage": "unused_in_main_protocol",
+                "target_eval_usage": "final_eval_only_no_selection",
+                "policies": {
+                    "few_shot_k4": {
+                        "adapt_scope": "coeff_only",
+                        "lr": 5e-4,
+                        "steps": 40,
+                        "anchor_alpha": 0.5,
+                        "adapt_mix_rho": 0.75,
+                        "trust_region_mode": "groupwise",
+                        "trust_coeff_radius": 0.2,
+                        "trust_gain_radius": 0.1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "4",
+            "--stage3_posterior_policy",
+            "source_calibrated_mix",
+            "--require_safe_policy_json_for_kshot",
+            "--safe_policy_json",
+            str(policy_path),
+        ],
+    )
+
+    args = runner.parse_args()
+
+    assert args.stage3_posterior_policy == "source_calibrated_mix"
+    assert args.adapt_scope == "coeff_only"
+    assert args.adaptation_steps == 40
+    assert args.lr == pytest.approx(5e-4)
+    assert args.anchor_alpha == pytest.approx(0.5)
+    assert args.adapt_mix_rho == pytest.approx(0.75)
+    assert args.trust_region_mode == "groupwise"
+    assert args.trust_coeff_radius == pytest.approx(0.2)
+    assert args.trust_gain_radius == pytest.approx(0.1)
+    assert args.safe_policy_json_sha256
+
+
+def test_source_policy_can_explicitly_enable_monthly_gain_for_conservative_stage3(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    policy_path = tmp_path / "safe_policy_gain.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "policy_source": "source_side_episode_calibration",
+                "target_val_usage": "unused_in_main_protocol",
+                "target_eval_usage": "final_eval_only_no_selection",
+                "policies": {
+                    "few_shot_k12": {
+                        "adapt_scope": "coeff_gain",
+                        "lr": 2e-4,
+                        "adaptation_steps": 12,
+                        "anchor_alpha": 0.25,
+                        "adapt_mix_rho": 0.4,
+                        "freeze_monthly_gain": False,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "12",
+            "--stage3_posterior_policy",
+            "conservative_coeff_posterior",
+            "--require_safe_policy_json_for_kshot",
+            "--safe_policy_json",
+            str(policy_path),
+        ],
+    )
+
+    args = runner.parse_args()
+
+    assert args.policy_source == "source_side_episode_calibration"
+    assert args.adapt_scope == "coeff_gain"
+    assert args.freeze_monthly_gain is False
+    assert args.adapt_mix_rho == pytest.approx(0.4)
+
+
+def test_parse_args_rejects_target_side_safe_policy_json(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    policy_path = tmp_path / "unsafe_policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "policy_source": "target_val_grid_search",
+                "target_val_usage": "used_for_selection",
+                "policies": {"few_shot_k4": {"lr": 1e-3}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "4",
+            "--safe_policy_json",
+            str(policy_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        runner.parse_args()
+
+
+def test_parse_args_rejects_kshot_without_policy_when_paper_facing(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "4",
+            "--require_safe_policy_json_for_kshot",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        runner.parse_args()
 
 
 def test_parse_args_accepts_adapt_scope_and_identity_audit(monkeypatch, tmp_path):
@@ -164,6 +559,8 @@ def test_parse_args_accepts_adapt_scope_and_identity_audit(monkeypatch, tmp_path
             "0.0",
             "--adapt_scope",
             "none",
+            "--stage3_posterior_policy",
+            "conservative_coeff_posterior",
             "--audit_identity",
             "--audit_identity_tolerance",
             "1e-7",
@@ -172,6 +569,7 @@ def test_parse_args_accepts_adapt_scope_and_identity_audit(monkeypatch, tmp_path
 
     args = runner.parse_args()
     assert args.adapt_scope == "none"
+    assert args.stage3_posterior_policy == "conservative_coeff_posterior"
     assert args.audit_identity is True
     assert args.audit_identity_tolerance == pytest.approx(1e-7)
 
@@ -240,6 +638,127 @@ def test_parse_args_accepts_freeze_monthly_gain(monkeypatch, tmp_path):
     assert args.freeze_monthly_gain is True
 
 
+def test_source_policy_must_define_adapt_mix_rho_for_kshot(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    policy_path = tmp_path / "safe_policy_missing_rho.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "policy_source": "source_side_episode_calibration",
+                "target_val_usage": "unused_in_main_protocol",
+                "target_eval_usage": "final_eval_only_no_selection",
+                "policies": {
+                    "few_shot_k4": {
+                        "adapt_scope": "coeff_only",
+                        "lr": 5e-4,
+                        "steps": 40,
+                        "anchor_alpha": 0.5,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "4",
+            "--safe_policy_json",
+            str(policy_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        runner.parse_args()
+
+
+def test_source_policy_can_select_k4_no_update_for_conservative_stage3(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    policy_path = tmp_path / "safe_policy_no_update.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "policy_source": "source_side_episode_calibration",
+                "target_val_usage": "unused_in_main_protocol",
+                "target_eval_usage": "final_eval_only_no_selection",
+                "policies": {
+                    "few_shot_k4": {
+                        "adapt_scope": "none",
+                        "lr": 0.0,
+                        "adaptation_steps": 0,
+                        "anchor_alpha": 0.0,
+                        "adapt_mix_rho": 0.0,
+                        "source_calibrated_candidate_id": "K4_source_calibrated_no_update",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "4",
+            "--stage3_posterior_policy",
+            "conservative_coeff_posterior",
+            "--require_safe_policy_json_for_kshot",
+            "--safe_policy_json",
+            str(policy_path),
+        ],
+    )
+
+    args = runner.parse_args()
+
+    assert args.adapt_scope == "none"
+    assert args.adaptation_steps == 0
+    assert args.anchor_alpha == pytest.approx(0.0)
+    assert args.adapt_mix_rho == pytest.approx(0.0)
+    assert args.source_policy_candidate_id == "K4_source_calibrated_no_update"
+
+
+def test_source_calibrated_kshot_no_update_summary_is_not_k0_rejection():
+    from scripts.train.train_hyperda_few_shot_adapt import (
+        is_source_calibrated_kshot_no_update,
+        support_gate_summary_for_source_calibrated_no_update,
+    )
+
+    class Args:
+        K = 4
+        policy_source = "source_side_episode_calibration"
+        adapt_scope = "none"
+        adaptation_steps = 0
+        anchor_alpha = 0.0
+        adapt_mix_rho = 0.0
+        source_policy_candidate_id = "K4_source_calibrated_no_update"
+
+    assert is_source_calibrated_kshot_no_update(Args()) is True
+
+    summary = support_gate_summary_for_source_calibrated_no_update(Args())
+
+    assert summary["stage3_posterior_decision"] == "no_update"
+    assert summary["support_gate_status"] == "source_calibrated_no_update"
+    assert summary["support_gate_policy_role"] == "source_side_policy_selected_no_update"
+    assert summary["support_gate_reject_reason"] == []
+
+
 def test_parse_args_accepts_trust_region_and_cycle_balanced_loss(monkeypatch, tmp_path):
     from scripts.train import train_hyperda_few_shot_adapt as runner
 
@@ -282,6 +801,99 @@ def test_parse_args_accepts_trust_region_and_cycle_balanced_loss(monkeypatch, tm
     assert args.support_loss_reduction == "cycle_balanced"
 
 
+def test_parse_args_conservative_stage3_rejects_prompt_or_full_operator_scope(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "4",
+            "--stage3_posterior_policy",
+            "conservative_coeff_posterior",
+            "--adapt_scope",
+            "safe_operator",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        runner.parse_args()
+
+
+def test_parse_args_conservative_stage3_defaults_to_coeff_only_with_support_gate(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "12",
+            "--stage3_posterior_policy",
+            "conservative_coeff_posterior",
+            "--support_gate",
+            "auto",
+            "--support_gate_min_delta",
+            "0.001",
+            "--support_gate_rootzone_tolerance",
+            "0.02",
+        ],
+    )
+
+    args = runner.parse_args()
+
+    assert args.stage3_posterior_policy == "conservative_coeff_posterior"
+    assert args.adapt_scope == "coeff_only"
+    assert args.freeze_monthly_gain is True
+    assert args.support_gate == "auto"
+    assert args.support_gate_min_delta == pytest.approx(0.001)
+    assert args.support_gate_rootzone_tolerance == pytest.approx(0.02)
+
+
+def test_k0_conservative_stage3_requires_no_update(monkeypatch, tmp_path):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+
+    source_checkpoint = tmp_path / "source.pt"
+    source_checkpoint.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(source_checkpoint),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "0",
+            "--stage3_posterior_policy",
+            "conservative_coeff_posterior",
+            "--adapt_scope",
+            "none",
+        ],
+    )
+
+    args = runner.parse_args()
+
+    assert args.K == 0
+    assert args.stage3_posterior_policy == "conservative_coeff_posterior"
+    assert args.adapt_scope == "none"
+    assert args.adaptation_steps == 0
+    assert args.anchor_alpha == pytest.approx(0.0)
+
+
 def test_parse_args_rejects_ridge_coeff_without_coeff_only_scope(monkeypatch, tmp_path):
     from scripts.train import train_hyperda_few_shot_adapt as runner
 
@@ -306,6 +918,162 @@ def test_parse_args_rejects_ridge_coeff_without_coeff_only_scope(monkeypatch, tm
 
     with pytest.raises(SystemExit):
         runner.parse_args()
+
+
+def test_support_gate_accepts_only_support_objective_improvement_without_rootzone_regression():
+    from scripts.train.train_hyperda_few_shot_adapt import decide_support_gate
+
+    before = {
+        "standard_support_objective_full_support": 1.0,
+        "standard_support_loss_full_support": 0.8,
+        "standard_support_surface_loss_full_support": 0.4,
+        "standard_support_rootzone_loss_full_support": 0.4,
+    }
+
+    accepted = decide_support_gate(
+        before=before,
+        after={
+            "standard_support_objective_full_support": 0.9,
+            "standard_support_loss_full_support": 0.7,
+            "standard_support_surface_loss_full_support": 0.3,
+            "standard_support_rootzone_loss_full_support": 0.39,
+        },
+        enabled=True,
+        min_delta=0.0,
+        rootzone_tolerance=0.0,
+    )
+    assert accepted["stage3_posterior_decision"] == "accepted"
+    assert accepted["support_gate_status"] == "accepted"
+    assert accepted["support_objective_delta"] == pytest.approx(-0.1)
+
+    no_improvement = decide_support_gate(
+        before=before,
+        after={
+            "standard_support_objective_full_support": 1.0,
+            "standard_support_loss_full_support": 0.8,
+            "standard_support_surface_loss_full_support": 0.4,
+            "standard_support_rootzone_loss_full_support": 0.4,
+        },
+        enabled=True,
+        min_delta=0.0,
+        rootzone_tolerance=0.0,
+    )
+    assert no_improvement["stage3_posterior_decision"] == "rejected_to_k0_anchor"
+    assert no_improvement["support_gate_status"] == "support_only_rejected_to_k0_anchor"
+    assert no_improvement["support_gate_reject_reason"] == ["objective_not_improved"]
+
+    rootzone_regression = decide_support_gate(
+        before=before,
+        after={
+            "standard_support_objective_full_support": 0.9,
+            "standard_support_loss_full_support": 0.7,
+            "standard_support_surface_loss_full_support": 0.2,
+            "standard_support_rootzone_loss_full_support": 0.5,
+        },
+        enabled=True,
+        min_delta=0.0,
+        rootzone_tolerance=0.0,
+    )
+    assert rootzone_regression["stage3_posterior_decision"] == "rejected_to_k0_anchor"
+    assert rootzone_regression["support_gate_status"] == "support_only_rejected_to_k0_anchor"
+    assert rootzone_regression["support_gate_reject_reason"] == ["rootzone_regression"]
+
+
+def test_stage3_k0_posterior_metadata_declares_no_update_contract(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import build_stage3_target_posterior_state
+
+    anchor = {
+        "target_prompt.latent": torch.zeros(2),
+        "residual_gain.log_gain": torch.zeros(2, 12),
+    }
+    posterior = build_stage3_target_posterior_state(
+        anchor_state=anchor,
+        final_state={name: tensor.clone() for name, tensor in anchor.items()},
+        K=0,
+        adapt_scope="none",
+        anchor_alpha=0.0,
+        adaptation_steps=0,
+        target_labels_loaded=False,
+        target_labels_used=False,
+        source_prior_hash_before="sourcehash",
+        source_prior_hash_after="sourcehash",
+        stage3_posterior_policy="conservative_coeff_posterior",
+        stage3_posterior_decision="no_update",
+        support_gate_status="skipped_k0_no_support",
+    )
+    metadata = posterior["metadata"]
+
+    assert metadata["stage3_no_update_contract"] == "K0_fixed_no_update_source_prior_identity"
+    assert metadata["source_prior_unchanged"] is True
+    assert metadata["k0_target_drift_zero"] is True
+    assert metadata["target_labels_used_for_adaptation"] is False
+    assert metadata["support_gate_policy_role"] == "not_applicable_k0_no_support"
+
+
+def test_stage3_kshot_metadata_marks_support_gate_as_diagnostic():
+    from scripts.train.train_hyperda_few_shot_adapt import build_stage3_target_posterior_state
+
+    anchor = {"target_prompt.latent": torch.zeros(2)}
+    final = {"target_prompt.latent": torch.ones(2)}
+    posterior = build_stage3_target_posterior_state(
+        anchor_state=anchor,
+        final_state=final,
+        K=4,
+        adapt_scope="coeff_gain",
+        anchor_alpha=0.5,
+        adaptation_steps=10,
+        target_labels_loaded=True,
+        target_labels_used=True,
+        source_prior_hash_before="sourcehash",
+        source_prior_hash_after="sourcehash",
+        stage3_posterior_policy="conservative_coeff_posterior",
+        stage3_posterior_decision="accepted",
+        support_gate_status="accepted",
+    )
+
+    assert posterior["metadata"]["paper_selection_basis"] == "source_side_safe_policy_only"
+    assert posterior["metadata"]["support_gate_policy_role"] == "target_support_only_diagnostic_not_paper_selection"
+
+
+def test_stage3_rejected_metadata_records_k0_anchor_hash():
+    from scripts.train.train_hyperda_few_shot_adapt import build_stage3_target_posterior_state
+
+    anchor = {"target_adapter_coefficient_residual_b.logit_delta": torch.zeros(3)}
+    posterior = build_stage3_target_posterior_state(
+        anchor_state=anchor,
+        final_state={name: tensor.clone() for name, tensor in anchor.items()},
+        K=12,
+        adapt_scope="coeff_only",
+        anchor_alpha=0.25,
+        adaptation_steps=80,
+        target_labels_loaded=True,
+        target_labels_used=True,
+        source_prior_hash_before="sourcehash",
+        source_prior_hash_after="sourcehash",
+        stage3_posterior_policy="conservative_coeff_posterior",
+        stage3_posterior_decision="rejected_to_k0_anchor",
+        support_gate_status="support_only_rejected_to_k0_anchor",
+        paper_selection_basis="source_policy_or_gate_rejected_to_k0_anchor",
+    )
+    metadata = posterior["metadata"]
+
+    assert metadata["stage3_posterior_decision"] == "rejected_to_k0_anchor"
+    assert metadata["support_only_gate_status"] == "support_only_rejected_to_k0_anchor"
+    assert metadata["k0_anchor_state_hash"] == posterior["target_adapter_anchor_hash"]
+    assert metadata["stage3_acceptance_basis"] == "source_policy_or_gate_rejected_to_k0_anchor"
+
+
+def test_rejected_kshot_metadata_is_diagnostic_not_paper_facing():
+    from scripts.train.train_hyperda_few_shot_adapt import paper_facing_status_for_stage3
+
+    status = paper_facing_status_for_stage3(
+        K=4,
+        policy_source="source_side_episode_calibration",
+        stage3_posterior_decision="rejected_to_k0_anchor",
+    )
+
+    assert status["paper_facing_run"] is False
+    assert status["diagnostic_run_reason"] == "source_policy_or_gate_rejected_to_k0_anchor"
 
 
 def test_k0_parse_args_disables_target_label_training(monkeypatch, tmp_path):
@@ -385,6 +1153,86 @@ def test_load_source_checkpoint_for_few_shot_preserves_robust_context_encoder(tm
     )
 
     assert isinstance(state.prompt_encoder, RobustInputSideDAPromptEncoder)
+    assert state.source_config["context_encoder"] == "robust_input_side_da_diagnostics"
+
+
+def test_few_shot_target_context_prompt_state_uses_raw_domain_for_raw_da_encoder(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import (
+        build_few_shot_target_context_prompt_state,
+        load_source_checkpoint_for_few_shot,
+    )
+
+    ckpt_path = tmp_path / "source_raw_robust.pt"
+    _write_raw_robust_source_checkpoint(ckpt_path)
+    state = load_source_checkpoint_for_few_shot(
+        checkpoint_path=str(ckpt_path),
+        device=torch.device("cpu"),
+        target_latent_dim=4,
+    )
+    state.normalization["ch_mean"] = [100.0] * 12
+    state.normalization["ch_std"] = [10.0] * 12
+    x = np.zeros((12, 2, 2), dtype=np.float32)
+    x[5] = 10.0
+    x[9] = 4.0
+
+    prompt_state = build_few_shot_target_context_prompt_state(
+        state=state,
+        samples=[
+            {
+                "x": x,
+                "month": 1,
+                "date_str": "2015-01-15",
+                "region_mask": np.ones((2, 2), dtype=np.float32),
+            }
+        ],
+        target_region="US-R1",
+        device=torch.device("cpu"),
+        context_hash="ctxhash",
+    )
+
+    assert isinstance(state.prompt_encoder, RobustInputSideDAPromptEncoder)
+    assert state.source_config["context_encoder"] == "robust_input_side_da_diagnostics_raw"
+    assert prompt_state["metadata"]["prompt_diagnostic_input_domain"] == "raw_input_side"
+    assert prompt_state["metadata"]["normalized_input_used_for_prompt_diagnostics"] is False
+
+
+def test_load_source_checkpoint_for_few_shot_preserves_rank_gated_hyperda_config(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import load_source_checkpoint_for_few_shot
+
+    ckpt_path = tmp_path / "source_rank_gated.pt"
+    _write_rank_gated_source_checkpoint(ckpt_path)
+    state = load_source_checkpoint_for_few_shot(
+        checkpoint_path=str(ckpt_path),
+        device=torch.device("cpu"),
+        target_latent_dim=4,
+    )
+
+    assert state.model.hyper_coeff_generator == "shared_layer_aware_rank_gated"
+    assert state.model.hyper_rank_gate_top_k == 2
+    assert state.model.hyper_adapter_param_style == "dora_like_gain"
+    assert state.model.shared_coeff_generator is not None
+    assert state.model.hyper_adapter_b.basis_gain_delta is not None
+
+
+def test_load_source_checkpoint_for_few_shot_preserves_source_saliency_prior_config(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import load_source_checkpoint_for_few_shot
+
+    ckpt_path = tmp_path / "source_saliency.pt"
+    _write_source_saliency_prior_checkpoint(ckpt_path)
+    state = load_source_checkpoint_for_few_shot(
+        checkpoint_path=str(ckpt_path),
+        device=torch.device("cpu"),
+        target_latent_dim=4,
+    )
+
+    assert state.model.hyper_coeff_generator == "shared_layer_aware_rank_gated_stable"
+    assert state.model.hyper_source_saliency_prior_beta == pytest.approx(0.5)
+    assert state.model.hyper_source_saliency_prior_path == "artifacts/prior/source_fit.pt"
+    assert state.model.hyper_prompt_manifold_reliability is True
+    assert state.model.hyper_prompt_manifold_reliability_strength == pytest.approx(0.25)
+    assert state.model.shared_coeff_generator is not None
+    assert torch.isfinite(state.model.shared_coeff_generator.saliency_prior).all()
+    assert tuple(state.model.shared_coeff_generator.saliency_prior.shape) == (3, 5)
 
 
 def test_apply_adapt_scope_controls_trainable_target_variables(tmp_path):
@@ -404,6 +1252,16 @@ def test_apply_adapt_scope_controls_trainable_target_variables(tmp_path):
 
     expected = {
         "none": [],
+        "safe_operator": [
+            "target_prompt.latent",
+            "target_prompt.proj.weight",
+            "target_prompt.proj.bias",
+            "target_adapter_coefficient_residual_b.logit_delta",
+            "target_adapter_coefficient_residual_d2.logit_delta",
+            "target_adapter_coefficient_residual_d1.logit_delta",
+            "residual_gain.gain_delta",
+            "residual_gain.bias",
+        ],
         "prompt_only": [
             "target_prompt.latent",
             "target_prompt.proj.weight",
@@ -439,6 +1297,38 @@ def test_apply_adapt_scope_controls_trainable_target_variables(tmp_path):
     assert counts["adapter_coeff_dec1"] == 3
     assert counts["monthly_gain"] == 48
     assert counts["total"] == 57
+
+
+def test_apply_adapt_scope_safe_operator_excludes_spatial_refine_and_source_prior(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import apply_adapt_scope, load_source_checkpoint_for_few_shot
+
+    ckpt_path = tmp_path / "source.pt"
+    _write_source_checkpoint(ckpt_path)
+    state = load_source_checkpoint_for_few_shot(
+        checkpoint_path=str(ckpt_path),
+        device=torch.device("cpu"),
+        target_latent_dim=4,
+        enable_target_spatial_refine=True,
+    )
+
+    trainable = apply_adapt_scope(state.model, "safe_operator")
+
+    assert trainable == [
+        "target_prompt.latent",
+        "target_prompt.proj.weight",
+        "target_prompt.proj.bias",
+        "target_adapter_coefficient_residual_b.logit_delta",
+        "target_adapter_coefficient_residual_d2.logit_delta",
+        "target_adapter_coefficient_residual_d1.logit_delta",
+        "residual_gain.gain_delta",
+        "residual_gain.bias",
+    ]
+    assert not any(name.startswith("target_spatial_refine.") for name in trainable)
+    assert not any(
+        name.startswith(prefix)
+        for name in trainable
+        for prefix in ("enc", "dec", "bottleneck", "film", "hyper_adapter", "head")
+    )
 
 
 def test_adapt_scope_all_keeps_current_target_variables_trainable(tmp_path):
@@ -530,6 +1420,74 @@ def test_freeze_monthly_gain_drift_stays_zero_when_other_groups_change(tmp_path)
     assert drift["monthly_gain"] == pytest.approx(0.0)
     assert drift["target_prompt"] > 0.0
     assert drift["adapter_coeff_bottleneck"] > 0.0
+
+
+def test_conservative_coeff_gain_trainable_groups_exclude_prompt(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import (
+        apply_adapt_scope,
+        load_source_checkpoint_for_few_shot,
+        trainable_target_groups_for_names,
+    )
+
+    ckpt_path = tmp_path / "source.pt"
+    _write_source_checkpoint(ckpt_path)
+    state = load_source_checkpoint_for_few_shot(
+        checkpoint_path=str(ckpt_path),
+        device=torch.device("cpu"),
+        target_latent_dim=4,
+    )
+
+    trainable = apply_adapt_scope(state.model, "coeff_gain")
+
+    assert trainable_target_groups_for_names(trainable) == [
+        "adapter_coefficient_residuals",
+        "monthly_residual_gain",
+    ]
+    assert not any(name.startswith("target_prompt.") for name in trainable)
+    assert any(name.startswith("residual_gain.") for name in trainable)
+
+
+def test_conservative_coeff_posterior_trainable_groups_are_coeff_only_by_default(tmp_path, monkeypatch):
+    from scripts.train import train_hyperda_few_shot_adapt as runner
+    from scripts.train.train_hyperda_few_shot_adapt import (
+        apply_adapt_scope,
+        load_source_checkpoint_for_few_shot,
+        trainable_target_groups_for_names,
+    )
+
+    ckpt_path = tmp_path / "source.pt"
+    _write_source_checkpoint(ckpt_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_hyperda_few_shot_adapt.py",
+            "--source_checkpoint",
+            str(ckpt_path),
+            "--target_region",
+            "US-R1",
+            "--K",
+            "4",
+            "--stage3_posterior_policy",
+            "conservative_coeff_posterior",
+        ],
+    )
+
+    args = runner.parse_args()
+    state = load_source_checkpoint_for_few_shot(
+        checkpoint_path=str(ckpt_path),
+        device=torch.device("cpu"),
+        target_latent_dim=4,
+    )
+    trainable = apply_adapt_scope(state.model, args.adapt_scope, freeze_monthly_gain=args.freeze_monthly_gain)
+
+    assert args.adapt_scope == "coeff_only"
+    assert args.freeze_monthly_gain is True
+    assert trainable == [
+        "target_adapter_coefficient_residual_b.logit_delta",
+        "target_adapter_coefficient_residual_d2.logit_delta",
+        "target_adapter_coefficient_residual_d1.logit_delta",
+    ]
+    assert trainable_target_groups_for_names(trainable) == ["adapter_coefficient_residuals"]
 
 
 def test_save_few_shot_checkpoint_metadata(tmp_path):
@@ -630,8 +1588,8 @@ def test_save_few_shot_checkpoint_metadata(tmp_path):
             "target_parameter_count_by_group": {"target_prompt": 44, "total": 101},
             "requires_grad_parameter_count": 101,
             "optimizer_parameter_count": 44,
-            "adapt_scope": "prompt_only",
-            "adapt_solver": "ridge_coeff",
+            "adapt_scope": "safe_operator",
+            "adapt_solver": "adamw",
             "freeze_monthly_gain": True,
             "ridge_lambda": 2.0,
             "ridge_clip_coeff_norm": 0.75,
@@ -653,7 +1611,32 @@ def test_save_few_shot_checkpoint_metadata(tmp_path):
                 "rank": 9,
             },
             "audit_identity": False,
+            "stage3_posterior_policy": "conservative_coeff_posterior",
+            "stage3_posterior_decision": "accepted",
+            "support_gate_enabled": True,
+            "support_gate_status": "accepted",
+            "support_gate_reject_reason": [],
+            "support_objective_before": 0.14,
+            "support_objective_after": 0.11,
+            "support_objective_delta": -0.03,
+            "support_surface_loss_before": 0.05,
+            "support_surface_loss_after": 0.04,
+            "support_rootzone_loss_before": 0.05,
+            "support_rootzone_loss_after": 0.045,
+            "paper_facing_run": True,
+            "policy_source": "source_side_episode_calibration",
+            "safe_policy_json": "/tmp/safe_policy.json",
+            "safe_policy_json_sha256": "policysha",
+            "safe_policy": {
+                "schema_version": "hyperda_safe_policy_v1",
+                "policy_hash": "embedded_policy_hash",
+                "policy_source": "source_side_episode_calibration",
+            },
+            "source_episode_regions": ["US-R2", "US-R3"],
             "source_checkpoint_sha256": "abc123",
+            "staged_source_checkpoint_sha256": "abc123",
+            "source_stage_checkpoint_provenance": "phase4_hyperda_staged",
+            "support_manifest_hash": "support_manifest_sha",
             "target_support_count": 2,
             "target_labels_loaded_for_adaptation": True,
             "target_labels_used_for_adaptation": True,
@@ -713,8 +1696,8 @@ def test_save_few_shot_checkpoint_metadata(tmp_path):
     assert cfg["target_parameter_count_by_group"]["target_prompt"] == 44
     assert cfg["requires_grad_parameter_count"] == 101
     assert cfg["optimizer_parameter_count"] == 44
-    assert cfg["adapt_scope"] == "prompt_only"
-    assert cfg["adapt_solver"] == "ridge_coeff"
+    assert cfg["adapt_scope"] == "safe_operator"
+    assert cfg["adapt_solver"] == "adamw"
     assert cfg["freeze_monthly_gain"] is True
     assert cfg["ridge_lambda"] == pytest.approx(2.0)
     assert cfg["ridge_max_feature_pixels"] == 2048
@@ -724,7 +1707,37 @@ def test_save_few_shot_checkpoint_metadata(tmp_path):
     assert cfg["ridge_masked_observation_count"] == 20
     assert cfg["ridge_feature_pixel_count"] == 8
     assert cfg["ridge_feature_observation_count"] == 16
+    assert cfg["stage3_posterior_policy"] == "conservative_coeff_posterior"
+    assert cfg["stage3_posterior_decision"] == "accepted"
+    assert cfg["support_gate_enabled"] is True
+    assert cfg["support_gate_status"] == "accepted"
+    assert cfg["support_gate_reject_reason"] == []
+    assert cfg["support_objective_before"] == pytest.approx(0.14)
+    assert cfg["support_objective_after"] == pytest.approx(0.11)
+    assert cfg["support_objective_delta"] == pytest.approx(-0.03)
+    assert cfg["support_surface_loss_before"] == pytest.approx(0.05)
+    assert cfg["support_surface_loss_after"] == pytest.approx(0.04)
+    assert cfg["support_rootzone_loss_before"] == pytest.approx(0.05)
+    assert cfg["support_rootzone_loss_after"] == pytest.approx(0.045)
+    assert cfg["paper_facing_run"] is True
+    assert cfg["policy_source"] == "source_side_episode_calibration"
+    assert cfg["safe_policy_json_sha256"] == "policysha"
+    assert cfg["safe_policy_hash"] == "embedded_policy_hash"
+    assert cfg["stage3_acceptance_basis"] == "source_side_safe_policy_only"
+    assert cfg["support_only_gate_status"] == "accepted"
+    assert cfg["k0_anchor_state_hash"] == saved["stage3_posterior_state_dict"]["target_adapter_anchor_hash"]
+    assert cfg["source_policy_candidate_id"] == ""
+    assert cfg["source_episode_regions"] == ["US-R2", "US-R3"]
+    assert cfg["support_manifest_hash"] == "support_manifest_sha"
+    assert cfg["stage3_posterior_state"]["stage3_posterior_policy"] == "conservative_coeff_posterior"
+    assert cfg["stage3_posterior_state"]["stage3_posterior_decision"] == "accepted"
+    assert cfg["stage3_posterior_state"]["support_gate_status"] == "accepted"
+    assert saved["stage3_posterior_state_dict"]["metadata"]["stage3_posterior_policy"] == "conservative_coeff_posterior"
+    assert saved["stage3_posterior_state_dict"]["metadata"]["stage3_posterior_decision"] == "accepted"
+    assert saved["stage3_posterior_state_dict"]["metadata"]["support_gate_status"] == "accepted"
     assert cfg["source_checkpoint_sha256"] == "abc123"
+    assert cfg["staged_source_checkpoint_sha256"] == "abc123"
+    assert cfg["source_stage_checkpoint_provenance"] == "phase4_hyperda_staged"
     assert cfg["target_support_count"] == 2
     assert cfg["target_labels_loaded_for_adaptation"] is True
     assert cfg["target_labels_used_for_adaptation"] is True
@@ -741,6 +1754,19 @@ def test_save_few_shot_checkpoint_metadata(tmp_path):
     assert saved["target_context_prompt_state"]["context_hash"] == "contexthash"
     assert cfg["trainable_parameter_names"]
     assert not any(name.startswith("prompt_encoder") for name in cfg["trainable_parameter_names"])
+    assert cfg["frozen_source_groups"] == [
+        "source_backbone",
+        "source_head",
+        "prompt_encoder",
+        "film",
+        "basis_adapter_hypernetwork",
+        "adapter_basis_bank",
+    ]
+    assert cfg["trainable_target_groups"] == [
+        "target_prompt",
+        "adapter_coefficient_residuals",
+        "monthly_residual_gain",
+    ]
 
 
 def test_save_few_shot_checkpoint_records_setting_specific_method_and_context_date_hash(tmp_path):
@@ -798,10 +1824,60 @@ def test_save_few_shot_checkpoint_records_setting_specific_method_and_context_da
 
     saved = torch.load(out, map_location="cpu", weights_only=False)
     cfg = saved["config"]
-    assert cfg["method"] == "hyperda_few_shot_k12"
+    assert cfg["method"] == "hyperda_diagnostic_few_shot_k12"
+    assert cfg["paper_facing_run"] is False
+    assert cfg["diagnostic_run_reason"] == "missing_source_side_safe_policy_json"
     assert saved["target_context_prompt_state"]["context_date_hash"] == "contexthash"
     assert saved["target_context_prompt_state"]["context_hash"] == "contexthash"
     assert cfg["target_context_prompt_state"]["context_date_hash"] == "contexthash"
+
+
+def test_save_few_shot_checkpoint_rejects_target_context_hash_mismatch(tmp_path):
+    from scripts.train.train_hyperda_few_shot_adapt import (
+        FewShotAdaptationState,
+        load_source_checkpoint_for_few_shot,
+        save_few_shot_checkpoint,
+    )
+
+    ckpt_path = tmp_path / "source.pt"
+    _write_source_checkpoint(ckpt_path)
+    loaded = load_source_checkpoint_for_few_shot(
+        checkpoint_path=str(ckpt_path),
+        device=torch.device("cpu"),
+        target_latent_dim=4,
+    )
+    state = FewShotAdaptationState(
+        model=loaded.model,
+        prompt_encoder=loaded.prompt_encoder,
+        source_checkpoint=loaded.source_checkpoint,
+        source_config=loaded.source_config,
+        normalization=loaded.normalization,
+    )
+    prompt_state = {
+        "schema_version": "target_context_prompt_state_v1",
+        "prompt_source": "target_context_monthly_prompt_prototypes",
+        "label_usage": "none",
+        "context_hash": "prompt-context-hash",
+        "monthly_counts": {str(i): 0 for i in range(1, 13)},
+        "global_prototype": torch.zeros(8),
+        "monthly_prototypes": {str(i): None for i in range(1, 13)},
+        "metadata": {},
+    }
+
+    with pytest.raises(ValueError, match="target_context_dates_hash"):
+        save_few_shot_checkpoint(
+            path=tmp_path / "checkpoint_final_preregistered.pt",
+            state=state,
+            optimizer_state_dict={},
+            config={
+                "K": 0,
+                "adaptation_setting": "zero_shot_context",
+                "target_region": "US-R1",
+                "target_context_dates_hash": "split-context-hash",
+            },
+            target_context_prompt_state=prompt_state,
+            train_history=[],
+        )
 
 
 def test_build_context_prompt_state_reads_only_input_side_fields(tmp_path):
@@ -1605,7 +2681,7 @@ def test_prompt_predictor_uses_main_hyperda_method_ids_for_zero_few_shot_checkpo
             "target_context_prompt_state": prompt_state,
             "config": {
                 "model_type": "hyperda_basis_adapter_target_adapt",
-                "method": "hyperda_few_shot_k4",
+                "method": "hyperda_safe_few_shot_k4",
                 "adaptation_setting": "few_shot_k4",
                 "K": 4,
                 "width": 4,
@@ -1632,7 +2708,7 @@ def test_prompt_predictor_uses_main_hyperda_method_ids_for_zero_few_shot_checkpo
         target_region="US-R1",
     )
 
-    assert predictor.method_name == "hyperda_few_shot_k4"
+    assert predictor.method_name == "hyperda_safe_few_shot_k4"
 
 
 def test_prompt_predictor_requires_saved_context_prompt_state_for_main_hyperda_checkpoint(tmp_path):
@@ -1704,8 +2780,13 @@ def test_few_shot_run_metadata_sidecar_contains_protocol_fields(tmp_path):
         "target_context_dates_hash": "contexthash",
         "target_support_dates_hash": "supporthash",
         "target_support_dates": [],
+        "support_manifest_hash": "support_manifest_sha",
+        "support_nesting_hash": "nesting_sha",
+        "support_nesting_status": "K0_no_support",
         "target_eval_dates_hash": "evalhash",
         "target_context_prompt_state": {"schema_version": "target_context_prompt_state_v1"},
+        "frozen_source_groups": ["source_backbone", "prompt_encoder", "adapter_basis_bank"],
+        "trainable_target_groups": ["target_prompt", "adapter_coefficient_residuals", "monthly_residual_gain"],
         "trainable_parameter_count": 123,
         "trainable_parameter_names": ["target_prompt.latent"],
         "target_parameter_count_by_group": {"target_prompt": 123, "total": 123},
@@ -1729,6 +2810,17 @@ def test_few_shot_run_metadata_sidecar_contains_protocol_fields(tmp_path):
         "actual_optimizer_steps": 0,
         "support_batch_count": 0,
         "effective_support_passes": 0.0,
+        "policy_source": "source_side_episode_calibration",
+        "safe_policy_json": "/tmp/safe_policy.json",
+        "safe_policy_json_sha256": "policysha",
+        "safe_policy": {
+            "schema_version": "hyperda_safe_policy_v1",
+            "policy_hash": "embedded_policy_hash",
+            "policy_source": "source_side_episode_calibration",
+        },
+        "source_episode_regions": ["US-R2", "US-R3"],
+        "rho_policy": "fixed_1.0",
+        "adapt_mix_rho": 1.0,
         "standard_support_loss_before_full_support": None,
         "standard_support_loss_after_full_support": None,
         "standard_support_loss_delta_full_support": None,
@@ -1768,12 +2860,15 @@ def test_few_shot_run_metadata_sidecar_contains_protocol_fields(tmp_path):
         "audit_identity_tolerance": 1e-8,
         "source_checkpoint": "/tmp/source.pt",
         "source_checkpoint_sha256": "sourcesha",
+        "staged_source_checkpoint_sha256": "sourcesha",
+        "source_stage_checkpoint_provenance": "phase4_hyperda_staged",
         "target_support_count": 0,
         "target_labels_loaded_for_adaptation": False,
         "target_labels_used_for_adaptation": False,
         "normalization_source": "source_fit_only_from_source_checkpoint",
         "model_selection_source": "source_val_preregistered",
         "target_val_usage": "unused_in_main_protocol",
+        "target_eval_usage": "final_eval_only_no_selection",
     }
 
     write_run_metadata_sidecar(tmp_path, checkpoint_path, config)
@@ -1785,6 +2880,9 @@ def test_few_shot_run_metadata_sidecar_contains_protocol_fields(tmp_path):
     assert metadata["target_context_dates_hash"] == "contexthash"
     assert metadata["target_support_dates_hash"] == "supporthash"
     assert metadata["target_support_dates"] == []
+    assert metadata["support_manifest_hash"] == "support_manifest_sha"
+    assert metadata["support_nesting_hash"] == "nesting_sha"
+    assert metadata["support_nesting_status"] == "K0_no_support"
     assert metadata["target_eval_dates_hash"] == "evalhash"
     assert metadata["model_selection_source"] == "source_val_preregistered"
     assert metadata["target_val_usage"] == "unused_in_main_protocol"
@@ -1811,6 +2909,13 @@ def test_few_shot_run_metadata_sidecar_contains_protocol_fields(tmp_path):
     assert metadata["support_batch_count"] == 0
     assert metadata["effective_support_passes"] == pytest.approx(0.0)
     assert metadata["source_anchor_hyperparameter_source"] == "source_side_episodic_validation_preregistered"
+    assert metadata["policy_source"] == "source_side_episode_calibration"
+    assert metadata["safe_policy_json"] == "/tmp/safe_policy.json"
+    assert metadata["safe_policy_json_sha256"] == "policysha"
+    assert metadata["safe_policy_hash"] == "embedded_policy_hash"
+    assert metadata["source_episode_regions"] == ["US-R2", "US-R3"]
+    assert metadata["rho_policy"] == "fixed_1.0"
+    assert metadata["adapt_mix_rho"] == pytest.approx(1.0)
     assert metadata["support_loss_before"] == pytest.approx(0.4)
     assert metadata["support_loss_after"] == pytest.approx(0.3)
     assert metadata["support_final_loss"] is None
@@ -1825,6 +2930,12 @@ def test_few_shot_run_metadata_sidecar_contains_protocol_fields(tmp_path):
     assert metadata["target_parameter_l2_drift_post_anchor"]["total"] == pytest.approx(0.0)
     assert metadata["target_parameter_l2_drift"]["total"] == 0.0
     assert metadata["target_context_prompt_state"]["schema_version"] == "target_context_prompt_state_v1"
+    assert metadata["frozen_source_groups"] == ["source_backbone", "prompt_encoder", "adapter_basis_bank"]
+    assert metadata["trainable_target_groups"] == [
+        "target_prompt",
+        "adapter_coefficient_residuals",
+        "monthly_residual_gain",
+    ]
     assert metadata["adapt_scope"] == "none"
     assert metadata["adapt_solver"] == "ridge_coeff"
     assert metadata["freeze_monthly_gain"] is True
@@ -1839,9 +2950,12 @@ def test_few_shot_run_metadata_sidecar_contains_protocol_fields(tmp_path):
     assert metadata["audit_identity_tolerance"] == pytest.approx(1e-8)
     assert metadata["source_checkpoint"] == "/tmp/source.pt"
     assert metadata["source_checkpoint_sha256"] == "sourcesha"
+    assert metadata["staged_source_checkpoint_sha256"] == "sourcesha"
+    assert metadata["source_stage_checkpoint_provenance"] == "phase4_hyperda_staged"
     assert metadata["target_support_count"] == 0
     assert metadata["target_labels_loaded_for_adaptation"] is False
     assert metadata["target_labels_used_for_adaptation"] is False
+    assert metadata["target_eval_usage"] == "final_eval_only_no_selection"
 
 
 def test_support_schedule_diagnostics_compute_batches_passes_and_subset():

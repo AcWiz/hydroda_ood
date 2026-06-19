@@ -28,6 +28,12 @@ fi
 cd "$(dirname "$0")/.."
 
 if [[ -z "${SOURCE_CHECKPOINT}" ]]; then
+    SOURCE_CHECKPOINT="$(find "artifacts/runs/phase4_hyperda_staged/${TARGET_REGION}" \
+        -path "*s${SEED}*/checkpoints/checkpoint_best_source_val_transfer_safe_score.pt" \
+        -type f 2>/dev/null | sort | tail -1)"
+fi
+
+if [[ -z "${SOURCE_CHECKPOINT}" ]]; then
     SOURCE_CHECKPOINT="$(find artifacts/runs/phase4_prompt_conditioned \
         -path "*hyperda_basis_adapter_${TARGET_REGION}_*_s${SEED}_*/checkpoints/checkpoint_best_source_val_transfer_safe_score.pt" \
         -type f 2>/dev/null | sort | tail -1)"
@@ -37,6 +43,8 @@ if [[ -z "${SOURCE_CHECKPOINT}" || ! -f "${SOURCE_CHECKPOINT}" ]]; then
     echo "ERROR: source HyperDA checkpoint not found." >&2
     echo "Provide it explicitly:" >&2
     echo "  bash run/phase5_hyperda_zero_few_shot.sh <source_checkpoint> ${TARGET_REGION} ${K} ${SEED} ${CUDA_VISIBLE_DEVICES}" >&2
+    echo "Or train the staged source prior first:" >&2
+    echo "  bash run/phase4_hyperda_staged.sh auto ${TARGET_REGION} ${SEED} ${CUDA_VISIBLE_DEVICES}" >&2
     exit 2
 fi
 
@@ -77,39 +85,34 @@ TARGET_LATENT_DIM="${TARGET_LATENT_DIM:-32}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 SPLITS_JSON="${SPLITS_JSON:-artifacts/splits/US_loro_zero_few_shot_splits.json}"
-ADAPT_SCOPE="${ADAPT_SCOPE:-all}"
-ADAPT_SOLVER="${ADAPT_SOLVER:-adamw}"
-FREEZE_MONTHLY_GAIN="${FREEZE_MONTHLY_GAIN:-0}"
-RIDGE_LAMBDA="${RIDGE_LAMBDA:-1.0}"
-RIDGE_CLIP_COEFF_NORM="${RIDGE_CLIP_COEFF_NORM:-1.0}"
-RIDGE_TRUST_REGION_RADIUS="${RIDGE_TRUST_REGION_RADIUS:-1.0}"
-RIDGE_MAX_FEATURE_PIXELS="${RIDGE_MAX_FEATURE_PIXELS:-20000}"
-RIDGE_STANDARDIZE_FEATURES="${RIDGE_STANDARDIZE_FEATURES:-0}"
-TRUST_REGION_MODE="${TRUST_REGION_MODE:-none}"
-TRUST_TOTAL_RADIUS="${TRUST_TOTAL_RADIUS:-0.0}"
-TRUST_PROMPT_RADIUS="${TRUST_PROMPT_RADIUS:-0.0}"
-TRUST_GAIN_RADIUS="${TRUST_GAIN_RADIUS:-0.0}"
-TRUST_COEFF_RADIUS="${TRUST_COEFF_RADIUS:-0.0}"
-TRUST_SPATIAL_RADIUS="${TRUST_SPATIAL_RADIUS:-0.0}"
+ADAPT_SCOPE="${ADAPT_SCOPE:-safe_operator}"
+STAGE3_POSTERIOR_POLICY="${STAGE3_POSTERIOR_POLICY:-safe_operator_ablation}"
+SUPPORT_GATE="${SUPPORT_GATE:-policy_default}"
+SUPPORT_GATE_MIN_DELTA="${SUPPORT_GATE_MIN_DELTA:-0.0}"
+SUPPORT_GATE_ROOTZONE_TOLERANCE="${SUPPORT_GATE_ROOTZONE_TOLERANCE:-0.0}"
 SUPPORT_LOSS_REDUCTION="${SUPPORT_LOSS_REDUCTION:-global_pixel}"
+FREEZE_MONTHLY_GAIN="${FREEZE_MONTHLY_GAIN:-0}"
+SAFE_POLICY_JSON="${SAFE_POLICY_JSON:-}"
+REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT="${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT:-0}"
 AUDIT_IDENTITY="${AUDIT_IDENTITY:-0}"
 AUDIT_IDENTITY_TOLERANCE="${AUDIT_IDENTITY_TOLERANCE:-1e-8}"
+TARGET_CONTEXT_MAX_SAMPLES="${TARGET_CONTEXT_MAX_SAMPLES:-0}"
 AUDIT_ARGS=()
-FREEZE_MONTHLY_GAIN_ARGS=()
-RIDGE_STANDARDIZE_ARGS=()
 if [[ "${AUDIT_IDENTITY}" == "1" || "${AUDIT_IDENTITY,,}" == "true" ]]; then
     AUDIT_ARGS=(--audit_identity)
 fi
-if [[ "${FREEZE_MONTHLY_GAIN}" == "1" || "${FREEZE_MONTHLY_GAIN,,}" == "true" ]]; then
-    FREEZE_MONTHLY_GAIN_ARGS=(--freeze_monthly_gain)
+POLICY_ARGS=()
+if [[ -n "${SAFE_POLICY_JSON}" ]]; then
+    POLICY_ARGS+=(--safe_policy_json "${SAFE_POLICY_JSON}")
 fi
-if [[ "${RIDGE_STANDARDIZE_FEATURES}" == "1" || "${RIDGE_STANDARDIZE_FEATURES,,}" == "true" ]]; then
-    RIDGE_STANDARDIZE_ARGS=(--ridge_standardize_features)
+if [[ "${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT}" == "1" || "${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT,,}" == "true" ]]; then
+    POLICY_ARGS+=(--require_safe_policy_json_for_kshot)
 fi
 
 echo "============================================"
 echo "Phase 5 HyperDA Zero/Few-Shot Generalization"
 echo "  source_checkpoint=${SOURCE_CHECKPOINT}"
+echo "  source_stage_checkpoint_provenance=phase4_hyperda_staged"
 echo "  target_region=${TARGET_REGION}"
 echo "  K=${K} adaptation_setting=${ADAPTATION_SETTING}"
 echo "  seed=${SEED}"
@@ -121,9 +124,12 @@ echo "  split_artifact=artifacts/splits/US_loro_zero_few_shot_splits.json"
 echo "  active_splits_json=${SPLITS_JSON}"
 echo "  model_selection_source=source_val_preregistered"
 echo "  adapt_recipe=${ADAPT_RECIPE} anchor_alpha=${ANCHOR_ALPHA}"
-echo "  adapt_scope=${ADAPT_SCOPE} adapt_solver=${ADAPT_SOLVER} freeze_monthly_gain=${FREEZE_MONTHLY_GAIN} audit_identity=${AUDIT_IDENTITY}"
-echo "  ridge_lambda=${RIDGE_LAMBDA} ridge_clip_coeff_norm=${RIDGE_CLIP_COEFF_NORM} ridge_trust_region_radius=${RIDGE_TRUST_REGION_RADIUS} ridge_max_feature_pixels=${RIDGE_MAX_FEATURE_PIXELS} ridge_standardize_features=${RIDGE_STANDARDIZE_FEATURES}"
-echo "  trust_region_mode=${TRUST_REGION_MODE} trust_total=${TRUST_TOTAL_RADIUS} trust_prompt=${TRUST_PROMPT_RADIUS} trust_gain=${TRUST_GAIN_RADIUS} trust_coeff=${TRUST_COEFF_RADIUS} trust_spatial=${TRUST_SPATIAL_RADIUS}"
+echo "  adapt_scope=${ADAPT_SCOPE} (SAFE Prompt+Coeff+Gain unless conservative Stage 3 overrides) adapt_solver=adamw audit_identity=${AUDIT_IDENTITY}"
+echo "  stage3_posterior_policy=${STAGE3_POSTERIOR_POLICY} support_gate=${SUPPORT_GATE} min_delta=${SUPPORT_GATE_MIN_DELTA} rootzone_tolerance=${SUPPORT_GATE_ROOTZONE_TOLERANCE}"
+echo "  freeze_monthly_gain=${FREEZE_MONTHLY_GAIN}"
+echo "  safe_policy_json=${SAFE_POLICY_JSON:-<none>} require_safe_policy_json_for_kshot=${REQUIRE_SAFE_POLICY_JSON_FOR_KSHOT}"
+echo "  policy_source=source_side_episode_calibration when SAFE_POLICY_JSON is provided"
+echo "  target_context_max_samples=${TARGET_CONTEXT_MAX_SAMPLES} (0 = full target_context)"
 echo "  support_loss_reduction=${SUPPORT_LOSS_REDUCTION}"
 echo "  schedule_label=${SCHEDULE_LABEL}"
 echo "  adaptation_steps=${ADAPTATION_STEPS} adapt_batch_size=${ADAPT_BATCH_SIZE} lr=${LR} weight_decay=${WEIGHT_DECAY} grad_clip=${GRAD_CLIP}"
@@ -145,21 +151,16 @@ PYTHONPATH=. python scripts/train/train_hyperda_few_shot_adapt.py \
     --adapt_recipe "${ADAPT_RECIPE}" \
     --anchor_alpha "${ANCHOR_ALPHA}" \
     --adapt_scope "${ADAPT_SCOPE}" \
-    --adapt_solver "${ADAPT_SOLVER}" \
-    "${FREEZE_MONTHLY_GAIN_ARGS[@]}" \
-    --ridge_lambda "${RIDGE_LAMBDA}" \
-    --ridge_clip_coeff_norm "${RIDGE_CLIP_COEFF_NORM}" \
-    --ridge_trust_region_radius "${RIDGE_TRUST_REGION_RADIUS}" \
-    --ridge_max_feature_pixels "${RIDGE_MAX_FEATURE_PIXELS}" \
-    "${RIDGE_STANDARDIZE_ARGS[@]}" \
-    --trust_region_mode "${TRUST_REGION_MODE}" \
-    --trust_total_radius "${TRUST_TOTAL_RADIUS}" \
-    --trust_prompt_radius "${TRUST_PROMPT_RADIUS}" \
-    --trust_gain_radius "${TRUST_GAIN_RADIUS}" \
-    --trust_coeff_radius "${TRUST_COEFF_RADIUS}" \
-    --trust_spatial_radius "${TRUST_SPATIAL_RADIUS}" \
+    --stage3_posterior_policy "${STAGE3_POSTERIOR_POLICY}" \
+    --support_gate "${SUPPORT_GATE}" \
+    --support_gate_min_delta "${SUPPORT_GATE_MIN_DELTA}" \
+    --support_gate_rootzone_tolerance "${SUPPORT_GATE_ROOTZONE_TOLERANCE}" \
+    --adapt_solver adamw \
     --support_loss_reduction "${SUPPORT_LOSS_REDUCTION}" \
     --audit_identity_tolerance "${AUDIT_IDENTITY_TOLERANCE}" \
+    --target_context_max_samples "${TARGET_CONTEXT_MAX_SAMPLES}" \
+    $(if [[ "${FREEZE_MONTHLY_GAIN}" == "1" || "${FREEZE_MONTHLY_GAIN,,}" == "true" ]]; then echo "--freeze_monthly_gain"; fi) \
+    "${POLICY_ARGS[@]}" \
     --batch_size "${ADAPT_BATCH_SIZE}" \
     --lr "${LR}" \
     --weight_decay "${WEIGHT_DECAY}" \

@@ -336,6 +336,9 @@ def evaluate_split(
     mix_delta_element_count = 0
     mix_delta_from_zero_max_abs = 0.0
     mix_delta_from_adapted_max_abs = 0.0
+    stage3_k0_context_shrinkage_rhos: List[float] = []
+    stage3_k0_context_shrinkage_surface_rhos: List[float] = []
+    stage3_k0_context_shrinkage_rootzone_rhos: List[float] = []
 
     # Global accumulators for correct skill aggregation (aggregate-then-sqrt,
     # not per-sample mean-of-ratios that produces spuriously negative skills).
@@ -365,6 +368,15 @@ def evaluate_split(
             if first_sample is None:
                 first_sample = sample
             adapted_pred = predictor.predict(sample)
+            shrinkage_rho = getattr(predictor, "stage3_k0_context_shrinkage_last_rho", None)
+            if shrinkage_rho is not None:
+                stage3_k0_context_shrinkage_rhos.append(float(shrinkage_rho))
+            shrinkage_rhos = getattr(predictor, "stage3_k0_context_shrinkage_last_rhos", None)
+            if isinstance(shrinkage_rhos, dict):
+                if shrinkage_rhos.get("surface") is not None:
+                    stage3_k0_context_shrinkage_surface_rhos.append(float(shrinkage_rhos["surface"]))
+                if shrinkage_rhos.get("rootzone") is not None:
+                    stage3_k0_context_shrinkage_rootzone_rhos.append(float(shrinkage_rhos["rootzone"]))
             zero_pred = None
             pred = adapted_pred
             if zero_shot_predictor is not None or float(adapt_mix_rho) != 1.0:
@@ -647,6 +659,55 @@ def evaluate_split(
                 float(mix_delta_from_adapted_abs_sum / mix_delta_element_count) if mix_delta_element_count else 0.0
             ),
             "mix_max_abs_change_from_adapted": float(mix_delta_from_adapted_max_abs),
+            "stage3_k0_context_shrinkage": {
+                "enabled": bool(stage3_k0_context_shrinkage_rhos),
+                "rho_count": len(stage3_k0_context_shrinkage_rhos),
+                "rho_mean": (
+                    float(np.mean(stage3_k0_context_shrinkage_rhos))
+                    if stage3_k0_context_shrinkage_rhos
+                    else 0.0
+                ),
+                "rho_min": (
+                    float(np.min(stage3_k0_context_shrinkage_rhos))
+                    if stage3_k0_context_shrinkage_rhos
+                    else 0.0
+                ),
+                "rho_max": (
+                    float(np.max(stage3_k0_context_shrinkage_rhos))
+                    if stage3_k0_context_shrinkage_rhos
+                    else 0.0
+                ),
+                "rho_surface_mean": (
+                    float(np.mean(stage3_k0_context_shrinkage_surface_rhos))
+                    if stage3_k0_context_shrinkage_surface_rhos
+                    else 0.0
+                ),
+                "rho_surface_min": (
+                    float(np.min(stage3_k0_context_shrinkage_surface_rhos))
+                    if stage3_k0_context_shrinkage_surface_rhos
+                    else 0.0
+                ),
+                "rho_surface_max": (
+                    float(np.max(stage3_k0_context_shrinkage_surface_rhos))
+                    if stage3_k0_context_shrinkage_surface_rhos
+                    else 0.0
+                ),
+                "rho_rootzone_mean": (
+                    float(np.mean(stage3_k0_context_shrinkage_rootzone_rhos))
+                    if stage3_k0_context_shrinkage_rootzone_rhos
+                    else 0.0
+                ),
+                "rho_rootzone_min": (
+                    float(np.min(stage3_k0_context_shrinkage_rootzone_rhos))
+                    if stage3_k0_context_shrinkage_rootzone_rhos
+                    else 0.0
+                ),
+                "rho_rootzone_max": (
+                    float(np.max(stage3_k0_context_shrinkage_rootzone_rhos))
+                    if stage3_k0_context_shrinkage_rootzone_rhos
+                    else 0.0
+                ),
+            },
         }
         return rows, hashes
 

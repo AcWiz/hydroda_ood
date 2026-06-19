@@ -359,21 +359,5 @@ def test_select_cli_accepts_named_dual_expert_checkpoint_flags():
     ]
 
 
-def test_hydroda_der_run_script_declares_two_step_no_leakage_protocol():
-    text = Path("run/phase5_hydroda_der.sh").read_text()
-
-    assert "target_val=2022 router selection only" in text
-    assert "target_eval=2023-2025 final evaluation only" in text
-    assert "scripts/eval/evaluate_der_router.py select" in text
-    assert "scripts/eval/evaluate_der_router.py eval" in text
-    assert "--surface_checkpoint" in text
-    assert "--rootzone_checkpoint" in text
-    assert "--router_config" in text
-    assert "target_eval_used_for_selection=false" in text
-
-
-def test_hydroda_der_run_script_autodetects_hydro_msr_rootzone_checkpoint():
-    text = Path("run/phase5_hydroda_der.sh").read_text()
-
-    assert "phase5_hydro_msr_${TARGET_REGION}_s${SEED}" in text
-    assert "checkpoint_best_target_val_rootzone_wrmse.pt" in text
+def test_hydroda_der_run_wrapper_is_not_active_entrypoint():
+    assert not Path("run/phase5_hydroda_der.sh").exists()

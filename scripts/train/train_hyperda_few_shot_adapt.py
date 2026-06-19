@@ -12,7 +12,9 @@ No-leakage declaration:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,8 @@ from hydroda.baselines.prompt_conditioned import (
     compose_target_context_prompt_from_state,
     normalize_target_context_prompt_state,
     target_context_prompt_metadata,
+    ROBUST_DA_CONTEXT_ENCODER,
+    ROBUST_DA_RAW_CONTEXT_ENCODER,
 )
 from hydroda.models.hyper_conditional_unet import HyperAdapterConditionalResUNet
 from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
@@ -63,10 +67,38 @@ FREEZE_MANIFEST = "artifacts/protocol/US_region_split_freeze_manifest.json"
 PROTOCOL = ProtocolConfig()
 PROTOCOL_FREEZE_ID = PROTOCOL.protocol_freeze_id
 PHASE = "phase5_hyperda_zero_few_shot"
-ADAPT_SCOPES = ("none", "prompt_only", "coeff_only", "gain_only", "coeff_gain", "all")
+SAFE_TRAINABLE_TARGET_GROUPS = [
+    "target_prompt",
+    "adapter_coefficient_residuals",
+    "monthly_residual_gain",
+]
+FROZEN_SOURCE_GROUPS = [
+    "source_backbone",
+    "source_head",
+    "prompt_encoder",
+    "film",
+    "basis_adapter_hypernetwork",
+    "adapter_basis_bank",
+]
+ADAPT_SCOPES = (
+    "none",
+    "safe_operator",
+    "prompt_coeff_gain",
+    "prompt_only",
+    "coeff_only",
+    "gain_only",
+    "coeff_gain",
+    "all",
+)
 ADAPT_SOLVERS = ("adamw", "ridge_coeff")
 TRUST_REGION_MODES = ("none", "global", "groupwise")
 SUPPORT_LOSS_REDUCTIONS = ("global_pixel", "cycle_balanced")
+STAGE3_POSTERIOR_POLICIES = (
+    "safe_operator_ablation",
+    "conservative_coeff_posterior",
+    "source_calibrated_mix",
+)
+SUPPORT_GATES = ("policy_default", "auto", "off")
 COEFF_RESIDUAL_PARAMETER_NAMES = (
     "target_adapter_coefficient_residual_b.logit_delta",
     "target_adapter_coefficient_residual_d2.logit_delta",
@@ -83,7 +115,7 @@ def _build_source_prompt_encoder(source_config: Dict[str, Any]) -> RegionPromptE
     }
     if context_encoder == "current_mean_std":
         return RegionPromptEncoder(**kwargs)
-    if context_encoder == "robust_input_side_da_diagnostics":
+    if context_encoder in {ROBUST_DA_CONTEXT_ENCODER, ROBUST_DA_RAW_CONTEXT_ENCODER}:
         return RobustInputSideDAPromptEncoder(**kwargs)
     raise ValueError(f"Unsupported source checkpoint context_encoder: {context_encoder}")
 
@@ -135,6 +167,264 @@ def default_anchor_alpha_grid_for_K(K: int) -> List[float]:
     return [0.0]
 
 
+def _json_sha256_payload(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_target_adapter_state_key(name: str) -> bool:
+    return name.startswith("target_") or name.startswith("residual_gain.")
+
+
+def hash_tensor_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
+    """Deterministically hash a tensor state dict by key, shape, dtype, and bytes."""
+    digest = hashlib.sha256()
+    for name in sorted(state_dict):
+        tensor = state_dict[name].detach().cpu().contiguous()
+        digest.update(str(name).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(tuple(tensor.shape)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(tensor.dtype).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(tensor.numpy().tobytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def hash_source_prior_state(model: nn.Module) -> str:
+    """Hash frozen HyperDA source-prior tensors, excluding target posterior variables."""
+    return hash_tensor_state_dict(
+        {
+            name: tensor.detach().cpu()
+            for name, tensor in model.state_dict().items()
+            if not _is_target_adapter_state_key(name)
+        }
+    )
+
+
+def _support_manifest_hash(
+    *,
+    target_region: str,
+    K: int,
+    seed: int,
+    target_support_dates: Iterable[str],
+    target_support_dates_hash: str,
+    split_manifest_sha256: str,
+) -> str:
+    """Hash the support contract recorded by a few-shot run."""
+    payload = {
+        "schema_version": "hyperda_support_manifest_v1",
+        "target_region": str(target_region),
+        "K": int(K),
+        "seed": int(seed),
+        "target_support_dates": [str(date) for date in target_support_dates],
+        "target_support_dates_hash": str(target_support_dates_hash or ""),
+        "split_manifest_sha256": str(split_manifest_sha256 or ""),
+    }
+    return _json_sha256_payload(payload)
+
+
+def _support_nesting_status(K: int, target_support_dates: Iterable[str]) -> str:
+    if int(K) == 0:
+        return "K0_no_support"
+    return f"K{int(K)}_support_manifest_recorded"
+
+
+def load_safe_policy_json(policy_path: str) -> Dict[str, Any]:
+    """Load a source-side SAFE policy and reject target-side calibration sources."""
+    path = Path(policy_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"--safe_policy_json not found: {path}")
+    with open(path, encoding="utf-8") as f:
+        policy = json.load(f)
+    if not isinstance(policy, dict):
+        raise ValueError("--safe_policy_json must contain a JSON object")
+    policy_source = str(policy.get("policy_source", "")).strip()
+    if policy_source != "source_side_episode_calibration":
+        raise ValueError(
+            "--safe_policy_json must declare policy_source='source_side_episode_calibration'; "
+            f"got {policy_source!r}"
+        )
+    target_val_usage = str(policy.get("target_val_usage", "unused_in_main_protocol")).strip()
+    target_eval_usage = str(policy.get("target_eval_usage", "final_eval_only_no_selection")).strip()
+    if target_val_usage != "unused_in_main_protocol":
+        raise ValueError(
+            "--safe_policy_json must not use target_val; "
+            f"target_val_usage={target_val_usage!r}"
+        )
+    if target_eval_usage not in {"final_eval_only_no_selection", "final_eval_only_no_training_no_selection"}:
+        raise ValueError(
+            "--safe_policy_json must not use target_eval for selection; "
+            f"target_eval_usage={target_eval_usage!r}"
+        )
+    if any(token in json.dumps(policy, sort_keys=True).lower() for token in ("target_val_grid_search", "target_eval_grid_search")):
+        raise ValueError("--safe_policy_json appears to reference target-side grid search")
+    return policy
+
+
+def _policy_for_setting(policy: Dict[str, Any], adaptation_setting: str, K: int) -> Dict[str, Any]:
+    policies = policy.get("policies", {})
+    if not isinstance(policies, dict):
+        raise ValueError("--safe_policy_json field 'policies' must be an object")
+    candidates = [
+        str(adaptation_setting),
+        f"K{int(K)}",
+        f"k{int(K)}",
+        "zero_shot_context" if int(K) == 0 else "",
+    ]
+    for key in candidates:
+        if key and key in policies:
+            selected = policies[key]
+            if not isinstance(selected, dict):
+                raise ValueError(f"policy entry {key!r} must be an object")
+            return dict(selected)
+    if int(K) == 0:
+        return {}
+    raise ValueError(
+        f"--safe_policy_json does not define a policy for adaptation_setting={adaptation_setting!r} K={K}"
+    )
+
+
+def apply_safe_policy_to_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Apply source-side calibrated K-shot policy values after defaults are resolved."""
+    args.safe_policy = {}
+    args.safe_policy_selected_keys = []
+    args.safe_policy_json_sha256 = ""
+    args.safe_policy_hash = ""
+    args.policy_source = "preregistered_default"
+    args.target_eval_usage = "final_eval_only_no_selection"
+    args.source_episode_regions = []
+    args.source_policy_candidate_id = ""
+    args.source_policy_guard_config_hash = ""
+    args.rho_policy = "not_applicable_k0" if int(args.K) == 0 else "diagnostic_no_source_safe_policy_json"
+    args.adapt_mix_rho = 1.0 if int(args.K) == 0 else 0.0
+    if not args.safe_policy_json:
+        if bool(args.require_safe_policy_json_for_kshot) and int(args.K) > 0:
+            parser.error("--require_safe_policy_json_for_kshot requires --safe_policy_json for K>0")
+        return
+
+    try:
+        policy = load_safe_policy_json(args.safe_policy_json)
+        selected = _policy_for_setting(policy, args.adaptation_setting, args.K)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(str(exc))
+
+    allowed_keys = {
+        "adapt_scope",
+        "adapt_solver",
+        "lr",
+        "adaptation_steps",
+        "max_steps",
+        "steps",
+        "anchor_alpha",
+        "rho_policy",
+        "adapt_mix_rho",
+        "support_loss_reduction",
+        "freeze_monthly_gain",
+        "weight_decay",
+        "grad_clip",
+        "lambda_prior",
+        "lambda_latent",
+        "lambda_gain",
+        "lambda_gain_smooth",
+        "lambda_analysis",
+        "schedule_label",
+        "trust_region_mode",
+        "trust_total_radius",
+        "trust_prompt_radius",
+        "trust_gain_radius",
+        "trust_coeff_radius",
+        "trust_spatial_radius",
+        "source_calibrated_candidate_id",
+        "source_calibrated_guard_config_hash",
+        "source_policy_candidate_id",
+        "source_policy_guard_config_hash",
+        "trust_radius",
+    }
+    unknown = sorted(set(selected) - allowed_keys)
+    if unknown:
+        parser.error(f"--safe_policy_json contains unsupported policy keys: {unknown}")
+    if int(args.K) > 0:
+        required = {"adapt_scope", "lr", "anchor_alpha", "adapt_mix_rho"}
+        if not any(key in selected for key in ("adaptation_steps", "max_steps", "steps")):
+            required.add("adaptation_steps")
+        missing = sorted(key for key in required if key not in selected)
+        if missing:
+            parser.error(f"--safe_policy_json policy for K={args.K} is missing required keys: {missing}")
+    if "adapt_scope" in selected:
+        if str(selected["adapt_scope"]) not in ADAPT_SCOPES:
+            parser.error(f"SAFE policy adapt_scope must be one of {list(ADAPT_SCOPES)}")
+        args.adapt_scope = str(selected["adapt_scope"])
+    if "adapt_solver" in selected:
+        if str(selected["adapt_solver"]) not in ADAPT_SOLVERS:
+            parser.error(f"SAFE policy adapt_solver must be one of {list(ADAPT_SOLVERS)}")
+        args.adapt_solver = str(selected["adapt_solver"])
+    if "lr" in selected:
+        args.lr = float(selected["lr"])
+    if "adaptation_steps" in selected:
+        args.adaptation_steps = int(selected["adaptation_steps"])
+    elif "max_steps" in selected:
+        args.adaptation_steps = int(selected["max_steps"])
+    elif "steps" in selected:
+        args.adaptation_steps = int(selected["steps"])
+    if "anchor_alpha" in selected:
+        args.anchor_alpha = float(selected["anchor_alpha"])
+    if "support_loss_reduction" in selected:
+        if str(selected["support_loss_reduction"]) not in SUPPORT_LOSS_REDUCTIONS:
+            parser.error(
+                f"SAFE policy support_loss_reduction must be one of {list(SUPPORT_LOSS_REDUCTIONS)}"
+            )
+        args.support_loss_reduction = str(selected["support_loss_reduction"])
+    if "freeze_monthly_gain" in selected:
+        args.freeze_monthly_gain = bool(selected["freeze_monthly_gain"])
+    for key in (
+        "weight_decay",
+        "grad_clip",
+        "lambda_prior",
+        "lambda_latent",
+        "lambda_gain",
+        "lambda_gain_smooth",
+        "lambda_analysis",
+        "trust_total_radius",
+        "trust_prompt_radius",
+        "trust_gain_radius",
+        "trust_coeff_radius",
+        "trust_spatial_radius",
+    ):
+        if key in selected:
+            setattr(args, key, float(selected[key]))
+    if "trust_radius" in selected:
+        args.trust_total_radius = float(selected["trust_radius"])
+    if "trust_region_mode" in selected:
+        if str(selected["trust_region_mode"]) not in TRUST_REGION_MODES:
+            parser.error(f"SAFE policy trust_region_mode must be one of {list(TRUST_REGION_MODES)}")
+        args.trust_region_mode = str(selected["trust_region_mode"])
+    if "schedule_label" in selected:
+        args.schedule_label = str(selected["schedule_label"])
+
+    args.safe_policy = policy
+    args.safe_policy_json_sha256 = compute_sha256(args.safe_policy_json)
+    args.safe_policy_hash = str(policy.get("policy_hash", ""))
+    args.policy_source = "source_side_episode_calibration"
+    args.source_anchor_hyperparameter_source = "source_side_episode_calibration"
+    args.target_eval_usage = str(policy.get("target_eval_usage", "final_eval_only_no_selection"))
+    args.source_episode_regions = [
+        str(region)
+        for region in policy.get("source_episode_regions", [])
+        if str(region)
+    ]
+    args.source_policy_candidate_id = str(
+        selected.get("source_policy_candidate_id", selected.get("source_calibrated_candidate_id", ""))
+    )
+    args.source_policy_guard_config_hash = str(
+        selected.get("source_policy_guard_config_hash", selected.get("source_calibrated_guard_config_hash", ""))
+    )
+    args.rho_policy = str(selected.get("rho_policy", f"fixed_{selected.get('adapt_mix_rho', '1.0')}"))
+    args.adapt_mix_rho = float(selected.get("adapt_mix_rho", 1.0))
+    args.safe_policy_selected_keys = sorted(selected)
+
+
 def build_dataset_plan(K: int) -> List[str]:
     PROTOCOL.assert_supported_K(K)
     if int(K) == 0:
@@ -147,14 +437,33 @@ def method_id_for_adaptation_setting(adaptation_setting: str, K: int) -> str:
     if adaptation_setting == "zero_shot_context" or int(K) == 0:
         return "hyperda_zero_shot_context"
     if adaptation_setting == "few_shot_k4" or int(K) == 4:
-        return "hyperda_few_shot_k4"
+        return "hyperda_safe_few_shot_k4"
     if adaptation_setting == "few_shot_k12" or int(K) == 12:
-        return "hyperda_few_shot_k12"
+        return "hyperda_safe_few_shot_k12"
     raise ValueError(f"unsupported HyperDA adaptation setting: {adaptation_setting!r}, K={K}")
+
+
+def method_id_for_run(adaptation_setting: str, K: int, *, paper_facing_run: bool) -> str:
+    """Return a method id that cannot accidentally promote diagnostic K-shot runs."""
+    if adaptation_setting == "zero_shot_context" or int(K) == 0:
+        return "hyperda_zero_shot_context"
+    if bool(paper_facing_run):
+        return method_id_for_adaptation_setting(adaptation_setting, K)
+    if adaptation_setting == "few_shot_k4" or int(K) == 4:
+        return "hyperda_diagnostic_few_shot_k4"
+    if adaptation_setting == "few_shot_k12" or int(K) == 12:
+        return "hyperda_diagnostic_few_shot_k12"
+    raise ValueError(f"unsupported HyperDA adaptation setting: {adaptation_setting!r}, K={K}")
+
+
+def _arg_was_provided(flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv[1:])
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train HyperDA zero/few-shot target variables")
+    adapt_scope_provided = _arg_was_provided("--adapt_scope")
+    freeze_monthly_gain_provided = _arg_was_provided("--freeze_monthly_gain")
     parser.add_argument("--source_checkpoint", type=str, required=True)
     parser.add_argument("--target_region", type=str, required=True)
     parser.add_argument("--K", type=int, required=True, choices=list(PROTOCOL.main_K_values))
@@ -187,6 +496,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log_every_steps", type=int, default=50)
     parser.add_argument("--max_train_batches", type=int, default=0)
     parser.add_argument(
+        "--target_context_max_samples",
+        type=int,
+        default=0,
+        help=(
+            "Diagnostic/smoke cap for target_context prompt construction "
+            "(0 = full target_context, paper/default behavior)."
+        ),
+    )
+    parser.add_argument(
         "--schedule_label",
         type=str,
         default="",
@@ -212,11 +530,61 @@ def parse_args() -> argparse.Namespace:
         help="Metadata field naming the non-target source of alpha/lr/step choices.",
     )
     parser.add_argument(
+        "--safe_policy_json",
+        type=str,
+        default=None,
+        help=(
+            "Source-side calibrated SAFE policy JSON. Required for paper-facing K4/K12 "
+            "when --require_safe_policy_json_for_kshot is set."
+        ),
+    )
+    parser.add_argument(
+        "--require_safe_policy_json_for_kshot",
+        action="store_true",
+        help="Reject K>0 runs that do not provide --safe_policy_json.",
+    )
+    parser.add_argument(
         "--adapt_scope",
         type=str,
-        default="all",
+        default="safe_operator",
         choices=list(ADAPT_SCOPES),
-        help="Target-specific parameter subset updated during few-shot adaptation.",
+        help=(
+            "Target-specific parameter subset updated during few-shot adaptation. "
+            "safe_operator is the paper-facing Prompt+Coeff+Gain scope; all/diagnostic "
+            "scopes are legacy/internal."
+        ),
+    )
+    parser.add_argument(
+        "--stage3_posterior_policy",
+        type=str,
+        default="safe_operator_ablation",
+        choices=list(STAGE3_POSTERIOR_POLICIES),
+        help=(
+            "Stage-3 target posterior policy. conservative_coeff_posterior freezes "
+            "target_prompt and updates adapter coefficient residuals by default; "
+            "source-side SAFE policy may explicitly add monthly residual gain. "
+            "safe_operator_ablation preserves the older "
+            "Prompt+Coeff+Gain path."
+        ),
+    )
+    parser.add_argument(
+        "--support_gate",
+        type=str,
+        default="policy_default",
+        choices=list(SUPPORT_GATES),
+        help="Support-only accept/rollback gate for target posterior candidates.",
+    )
+    parser.add_argument(
+        "--support_gate_min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum support-objective decrease required by the support gate.",
+    )
+    parser.add_argument(
+        "--support_gate_rootzone_tolerance",
+        type=float,
+        default=0.0,
+        help="Allowed rootzone support-loss increase before the support gate rolls back.",
     )
     parser.add_argument(
         "--freeze_monthly_gain",
@@ -311,6 +679,16 @@ def parse_args() -> argparse.Namespace:
         args.lr = default_lr_for_K(args.K)
     if args.anchor_alpha is None:
         args.anchor_alpha = default_anchor_alpha_for_K(args.K)
+    apply_safe_policy_to_args(args, parser)
+    if (
+        args.stage3_posterior_policy in {"conservative_coeff_posterior", "source_calibrated_mix"}
+        and int(args.K) > 0
+        and not args.safe_policy_json
+    ):
+        if not adapt_scope_provided:
+            args.adapt_scope = "coeff_only"
+        if not freeze_monthly_gain_provided:
+            args.freeze_monthly_gain = True
     if not 0.0 <= float(args.anchor_alpha) <= 1.0:
         parser.error("--anchor_alpha must be in [0, 1]")
     if float(args.ridge_lambda) < 0.0:
@@ -321,6 +699,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--ridge_trust_region_radius must be non-negative")
     if int(args.ridge_max_feature_pixels) < 0:
         parser.error("--ridge_max_feature_pixels must be non-negative")
+    if int(args.target_context_max_samples) < 0:
+        parser.error("--target_context_max_samples must be non-negative")
+    if float(args.support_gate_min_delta) < 0.0:
+        parser.error("--support_gate_min_delta must be non-negative")
+    if float(args.support_gate_rootzone_tolerance) < 0.0:
+        parser.error("--support_gate_rootzone_tolerance must be non-negative")
     for radius_name in (
         "trust_total_radius",
         "trust_prompt_radius",
@@ -337,7 +721,62 @@ def parse_args() -> argparse.Namespace:
     if args.adapt_solver == "ridge_coeff" and int(args.K) == 0:
         parser.error("--adapt_solver ridge_coeff requires K>0 target_support labels")
     if args.adapt_solver == "ridge_coeff" and args.adapt_scope != "coeff_only":
-        parser.error("--adapt_solver ridge_coeff requires --adapt_scope coeff_only")
+        parser.error("--adapt_solver ridge_coeff is legacy/internal and requires --adapt_scope coeff_only")
+    if args.support_gate == "policy_default":
+        args.support_gate = (
+            "auto"
+            if args.stage3_posterior_policy in {"conservative_coeff_posterior", "source_calibrated_mix"}
+            else "off"
+        )
+    if args.stage3_posterior_policy in {"conservative_coeff_posterior", "source_calibrated_mix"}:
+        if int(args.K) == 0:
+            if args.adapt_scope != "none":
+                parser.error(
+                    f"--stage3_posterior_policy {args.stage3_posterior_policy} "
+                    "requires --adapt_scope none for K=0"
+                )
+            if int(args.adaptation_steps) != 0:
+                parser.error(
+                    f"--stage3_posterior_policy {args.stage3_posterior_policy} "
+                    "requires K=0 adaptation_steps=0"
+                )
+            if abs(float(args.anchor_alpha)) > 1e-12:
+                parser.error(
+                    f"--stage3_posterior_policy {args.stage3_posterior_policy} "
+                    "requires K=0 anchor_alpha=0"
+                )
+        else:
+            audit_identity_no_update = (
+                bool(args.audit_identity)
+                and args.adapt_scope == "none"
+                and int(args.adaptation_steps) == 0
+                and abs(float(args.anchor_alpha)) <= 1e-12
+            )
+            policy_no_update = (
+                bool(args.safe_policy_json)
+                and args.policy_source == "source_side_episode_calibration"
+                and "adapt_scope" in set(getattr(args, "safe_policy_selected_keys", []))
+                and args.adapt_scope == "none"
+                and int(args.adaptation_steps) == 0
+                and abs(float(args.anchor_alpha)) <= 1e-12
+            )
+            policy_enabled_gain = (
+                bool(args.safe_policy_json)
+                and args.policy_source == "source_side_episode_calibration"
+                and "adapt_scope" in set(getattr(args, "safe_policy_selected_keys", []))
+                and args.adapt_scope == "coeff_gain"
+            )
+            if (
+                args.adapt_scope != "coeff_only"
+                and not policy_enabled_gain
+                and not audit_identity_no_update
+                and not policy_no_update
+            ):
+                parser.error(
+                    f"--stage3_posterior_policy {args.stage3_posterior_policy} requires "
+                    "--adapt_scope coeff_only for K>0 unless source-side SAFE policy "
+                    "explicitly selects coeff_gain/no-update or --audit_identity requests a no-update path"
+                )
     if args.audit_identity:
         if args.adapt_solver != "adamw":
             parser.error("--audit_identity requires --adapt_solver adamw")
@@ -378,6 +817,30 @@ def load_source_checkpoint_for_few_shot(
         hyper_n_basis=int(source_config.get("hyper_n_basis", 8)),
         hyper_adapter_bottleneck=source_config.get("hyper_adapter_bottleneck"),
         hyper_adapter_scale=float(source_config.get("hyper_adapter_scale", 1.0)),
+        hyper_coeff_generator=source_config.get("hyper_coeff_generator", "per_adapter"),
+        hyper_rank_gate_top_k=int(source_config.get("hyper_rank_gate_top_k", 4)),
+        hyper_rank_gate_temperature_init=float(source_config.get("hyper_rank_gate_temperature_init", 1.0)),
+        hyper_adapter_param_style=source_config.get("hyper_adapter_param_style", "basis_1x1"),
+        hyper_reliability_gate=source_config.get("hyper_reliability_gate", "none"),
+        hyper_reliability_init=float(source_config.get("hyper_reliability_init", 0.95)),
+        hyper_source_saliency_prior=source_config.get("hyper_source_saliency_prior"),
+        hyper_source_saliency_prior_beta=float(source_config.get("hyper_source_saliency_prior_beta", 0.0)),
+        hyper_source_saliency_prior_path=source_config.get("hyper_source_saliency_prior_path", ""),
+        hyper_source_saliency_prior_application=source_config.get(
+            "hyper_source_saliency_prior_application",
+            "soft_regularization_metadata",
+        ),
+        hyper_prompt_manifold_reliability=bool(source_config.get("hyper_prompt_manifold_reliability", False)),
+        hyper_prompt_manifold_reliability_strength=float(
+            source_config.get("hyper_prompt_manifold_reliability_strength", 0.0)
+        ),
+        hyper_enable_film=bool(source_config.get("hyper_enable_film", True)),
+        hyper_enable_adapters=bool(source_config.get("hyper_enable_adapters", True)),
+        zero_shot_prior_form=source_config.get("zero_shot_prior_form", "direct_hyper"),
+        source_residual_rho=float(source_config.get("source_residual_rho", source_config.get("zero_shot_rho", 1.0))),
+        source_residual_gate=source_config.get("source_residual_gate", "prompt_reliability_scalar"),
+        source_residual_gate_init=float(source_config.get("source_residual_gate_init", 0.95)),
+        source_residual_reliability_dim=int(source_config.get("source_residual_reliability_dim", 5)),
         zero_raw_increment_init=bool(source_config.get("zero_raw_increment_init", False)),
         enable_target_adaptation=True,
         target_latent_dim=target_latent_dim,
@@ -438,7 +901,31 @@ def build_few_shot_target_context_prompt_state(
         target_region_embedding=_target_region_embedding(state, target_region, device),
         device=device,
         context_hash=context_hash,
+        context_encoder=state.source_config.get("context_encoder", "current_mean_std"),
     )
+
+
+def compose_target_context_reliability_features_from_state(
+    state: Dict[str, Any],
+    months: int | Iterable[int] | torch.Tensor,
+    device: torch.device | str,
+) -> torch.Tensor:
+    normalized = normalize_target_context_prompt_state(state)
+    schema = normalized.get("reliability_feature_schema", [])
+    if isinstance(months, torch.Tensor):
+        month_values = [int(v) for v in months.detach().cpu().view(-1).tolist()]
+    elif isinstance(months, int):
+        month_values = [int(months)]
+    else:
+        month_values = [int(v) for v in months]
+    rows = [
+        normalized["reliability_features"].get(
+            str(max(1, min(12, int(month_value)))),
+            [0.0] * len(schema),
+        )
+        for month_value in month_values
+    ]
+    return torch.as_tensor(rows, dtype=torch.float32, device=device)
 
 
 def masked_huber_loss_components(
@@ -525,7 +1012,12 @@ def few_shot_batch_loss(
     months = batch["months"].to(device)
     x_norm = _normalize_x(x, state.normalization)
     z = compose_target_context_prompt_from_state(target_context_prompt_state, months, device=device)
-    pred = _model_forward(state.model, x_norm, z, months, x)
+    reliability_features = compose_target_context_reliability_features_from_state(
+        target_context_prompt_state,
+        months,
+        device=device,
+    )
+    pred = _model_forward(state.model, x_norm, z, months, x, reliability_features=reliability_features)
     target = _target_tensor(
         batch["increment_surface"].to(device),
         batch["increment_rootzone"].to(device),
@@ -716,7 +1208,11 @@ def standard_support_loss_from_loader(
     totals = {
         "objective": 0.0,
         "total_loss": 0.0,
+        "surface_loss": 0.0,
+        "rootzone_loss": 0.0,
         "analysis_loss": 0.0,
+        "analysis_surface_loss": 0.0,
+        "analysis_rootzone_loss": 0.0,
         "regularization_loss": 0.0,
     }
     count = 0
@@ -741,24 +1237,206 @@ def standard_support_loss_from_loader(
             batch_count = int(batch["x"].shape[0])
             count += batch_count
             for key in totals:
-                totals[key] += float(losses[key].detach().cpu()) * batch_count
+                if key in losses:
+                    totals[key] += float(losses[key].detach().cpu()) * batch_count
     finally:
         state.model.train(was_training)
     if count <= 0:
         return {
             "standard_support_loss_full_support": None,
+            "standard_support_surface_loss_full_support": None,
+            "standard_support_rootzone_loss_full_support": None,
             "standard_support_objective_full_support": None,
             "standard_support_increment_loss_full_support": None,
             "standard_support_analysis_loss_full_support": None,
+            "standard_support_analysis_surface_loss_full_support": None,
+            "standard_support_analysis_rootzone_loss_full_support": None,
             "standard_support_regularization_loss_full_support": None,
         }
     return {
         "standard_support_loss_full_support": float(totals["total_loss"] / count),
+        "standard_support_surface_loss_full_support": float(totals["surface_loss"] / count),
+        "standard_support_rootzone_loss_full_support": float(totals["rootzone_loss"] / count),
         "standard_support_objective_full_support": float(totals["objective"] / count),
         "standard_support_increment_loss_full_support": float(totals["total_loss"] / count),
         "standard_support_analysis_loss_full_support": float(totals["analysis_loss"] / count),
+        "standard_support_analysis_surface_loss_full_support": float(totals["analysis_surface_loss"] / count),
+        "standard_support_analysis_rootzone_loss_full_support": float(totals["analysis_rootzone_loss"] / count),
         "standard_support_regularization_loss_full_support": float(totals["regularization_loss"] / count),
     }
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def decide_support_gate(
+    *,
+    before: Dict[str, Optional[float]],
+    after: Dict[str, Optional[float]],
+    enabled: bool,
+    min_delta: float,
+    rootzone_tolerance: float,
+) -> Dict[str, Any]:
+    """Decide whether to keep a Stage-3 target posterior using target-support losses only."""
+    before_obj = _float_or_none(before.get("standard_support_objective_full_support"))
+    after_obj = _float_or_none(after.get("standard_support_objective_full_support"))
+    before_loss = _float_or_none(before.get("standard_support_loss_full_support"))
+    after_loss = _float_or_none(after.get("standard_support_loss_full_support"))
+    before_surface = _float_or_none(before.get("standard_support_surface_loss_full_support"))
+    after_surface = _float_or_none(after.get("standard_support_surface_loss_full_support"))
+    before_rootzone = _float_or_none(before.get("standard_support_rootzone_loss_full_support"))
+    after_rootzone = _float_or_none(after.get("standard_support_rootzone_loss_full_support"))
+
+    objective_delta = None if before_obj is None or after_obj is None else after_obj - before_obj
+    loss_delta = None if before_loss is None or after_loss is None else after_loss - before_loss
+    surface_delta = None if before_surface is None or after_surface is None else after_surface - before_surface
+    rootzone_delta = None if before_rootzone is None or after_rootzone is None else after_rootzone - before_rootzone
+
+    summary: Dict[str, Any] = {
+        "support_gate_enabled": bool(enabled),
+        "support_gate_label_source": "target_support_only",
+        "support_gate_min_delta": float(min_delta),
+        "support_gate_rootzone_tolerance": float(rootzone_tolerance),
+        "support_objective_before": before_obj,
+        "support_objective_after": after_obj,
+        "support_objective_delta": objective_delta,
+        "support_loss_before": before_loss,
+        "support_loss_after": after_loss,
+        "support_loss_delta": loss_delta,
+        "support_surface_loss_before": before_surface,
+        "support_surface_loss_after": after_surface,
+        "support_surface_loss_delta": surface_delta,
+        "support_rootzone_loss_before": before_rootzone,
+        "support_rootzone_loss_after": after_rootzone,
+        "support_rootzone_loss_delta": rootzone_delta,
+        "support_candidate_objective_after": after_obj,
+        "support_candidate_objective_delta": objective_delta,
+        "support_candidate_loss_after": after_loss,
+        "support_candidate_loss_delta": loss_delta,
+        "support_candidate_surface_loss_after": after_surface,
+        "support_candidate_surface_loss_delta": surface_delta,
+        "support_candidate_rootzone_loss_after": after_rootzone,
+        "support_candidate_rootzone_loss_delta": rootzone_delta,
+        "support_gate_reject_reason": [],
+    }
+    if not enabled:
+        summary["support_gate_status"] = "disabled"
+        summary["stage3_posterior_decision"] = "accepted"
+        return summary
+
+    reject_reasons: List[str] = []
+    if objective_delta is None:
+        reject_reasons.append("missing_support_objective")
+    elif objective_delta >= -float(min_delta):
+        reject_reasons.append("objective_not_improved")
+    if rootzone_delta is None:
+        reject_reasons.append("missing_rootzone_guard")
+    elif rootzone_delta > float(rootzone_tolerance):
+        reject_reasons.append("rootzone_regression")
+
+    if reject_reasons:
+        summary["support_gate_status"] = "support_only_rejected_to_k0_anchor"
+        summary["stage3_posterior_decision"] = "rejected_to_k0_anchor"
+        summary["support_gate_reject_reason"] = reject_reasons
+    else:
+        summary["support_gate_status"] = "accepted"
+        summary["stage3_posterior_decision"] = "accepted"
+    return summary
+
+
+def support_gate_summary_for_k0() -> Dict[str, Any]:
+    return {
+        "support_gate_enabled": False,
+        "support_gate_status": "skipped_k0_no_support",
+        "stage3_posterior_decision": "no_update",
+        "stage3_no_update_contract": "K0_fixed_no_update_source_prior_identity",
+        "support_gate_label_source": "none_k0_no_target_labels",
+        "support_gate_policy_role": "not_applicable_k0_no_support",
+        "support_gate_min_delta": 0.0,
+        "support_gate_rootzone_tolerance": 0.0,
+        "support_gate_reject_reason": [],
+        "support_objective_before": None,
+        "support_objective_after": None,
+        "support_objective_delta": None,
+        "support_loss_before": None,
+        "support_loss_after": None,
+        "support_loss_delta": None,
+        "support_surface_loss_before": None,
+        "support_surface_loss_after": None,
+        "support_surface_loss_delta": None,
+        "support_rootzone_loss_before": None,
+        "support_rootzone_loss_after": None,
+        "support_rootzone_loss_delta": None,
+    }
+
+
+def is_source_calibrated_kshot_no_update(args: argparse.Namespace) -> bool:
+    """Return True when source-side SAFE policy intentionally chooses no update."""
+    if int(getattr(args, "K", 0)) <= 0:
+        return False
+    if str(getattr(args, "policy_source", "")) != "source_side_episode_calibration":
+        return False
+    if str(getattr(args, "adapt_scope", "")) != "none":
+        return False
+    if int(getattr(args, "adaptation_steps", 0) or 0) != 0:
+        return False
+    if abs(float(getattr(args, "anchor_alpha", 0.0) or 0.0)) > 1e-12:
+        return False
+    return abs(float(getattr(args, "adapt_mix_rho", 0.0) or 0.0)) <= 1e-12
+
+
+def support_gate_summary_for_source_calibrated_no_update(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "support_gate_enabled": False,
+        "support_gate_status": "source_calibrated_no_update",
+        "stage3_posterior_decision": "no_update",
+        "stage3_no_update_contract": "Kshot_source_side_policy_selected_no_update",
+        "support_gate_label_source": "source_side_episode_calibration",
+        "support_gate_policy_role": "source_side_policy_selected_no_update",
+        "support_gate_min_delta": float(getattr(args, "support_gate_min_delta", 0.0) or 0.0),
+        "support_gate_rootzone_tolerance": float(getattr(args, "support_gate_rootzone_tolerance", 0.0) or 0.0),
+        "support_gate_reject_reason": [],
+        "source_policy_candidate_id": str(getattr(args, "source_policy_candidate_id", "")),
+        "support_objective_before": None,
+        "support_objective_after": None,
+        "support_objective_delta": None,
+        "support_loss_before": None,
+        "support_loss_after": None,
+        "support_loss_delta": None,
+        "support_surface_loss_before": None,
+        "support_surface_loss_after": None,
+        "support_surface_loss_delta": None,
+        "support_rootzone_loss_before": None,
+        "support_rootzone_loss_after": None,
+        "support_rootzone_loss_delta": None,
+    }
+
+
+def paper_facing_status_for_stage3(
+    *,
+    K: int,
+    policy_source: str,
+    stage3_posterior_decision: str,
+) -> Dict[str, Any]:
+    if int(K) == 0:
+        return {"paper_facing_run": True, "diagnostic_run_reason": ""}
+    if str(policy_source) != "source_side_episode_calibration":
+        return {
+            "paper_facing_run": False,
+            "diagnostic_run_reason": "missing_source_side_safe_policy_json",
+        }
+    if str(stage3_posterior_decision) == "rejected_to_k0_anchor":
+        return {
+            "paper_facing_run": False,
+            "diagnostic_run_reason": "source_policy_or_gate_rejected_to_k0_anchor",
+        }
+    return {"paper_facing_run": True, "diagnostic_run_reason": ""}
 
 
 def coefficient_residual_vector(model: nn.Module) -> torch.Tensor:
@@ -991,7 +1669,12 @@ def _ridge_forward_prediction(
     months = batch["months"].to(device)
     x_norm = _normalize_x(x, state.normalization)
     z = compose_target_context_prompt_from_state(target_context_prompt_state, months, device=device)
-    return _model_forward(state.model, x_norm, z, months, x)
+    reliability_features = compose_target_context_reliability_features_from_state(
+        target_context_prompt_state,
+        months,
+        device=device,
+    )
+    return _model_forward(state.model, x_norm, z, months, x, reliability_features=reliability_features)
 
 
 def run_ridge_coeff_adaptation(
@@ -1353,6 +2036,8 @@ def apply_adapt_scope(model: nn.Module, adapt_scope: str, freeze_monthly_gain: b
         raise ValueError(f"unsupported adapt_scope={adapt_scope!r}; expected one of {list(ADAPT_SCOPES)}")
     allowed_by_scope = {
         "none": set(),
+        "safe_operator": {"target_prompt", "adapter_coeff_bottleneck", "adapter_coeff_dec2", "adapter_coeff_dec1", "monthly_gain"},
+        "prompt_coeff_gain": {"target_prompt", "adapter_coeff_bottleneck", "adapter_coeff_dec2", "adapter_coeff_dec1", "monthly_gain"},
         "prompt_only": {"target_prompt"},
         "coeff_only": {"adapter_coeff_bottleneck", "adapter_coeff_dec2", "adapter_coeff_dec1"},
         "gain_only": {"monthly_gain"},
@@ -1403,6 +2088,28 @@ def group_target_parameter_counts(model: nn.Module) -> Dict[str, int]:
     return groups
 
 
+def trainable_target_groups_for_names(parameter_names: Iterable[str]) -> List[str]:
+    """Map trainable parameter names to paper-facing target posterior groups."""
+    groups: List[str] = []
+    seen: set[str] = set()
+    for name in parameter_names:
+        group = _scope_group_for_parameter(str(name))
+        if group == "target_prompt":
+            label = "target_prompt"
+        elif group.startswith("adapter_coeff_"):
+            label = "adapter_coefficient_residuals"
+        elif group == "monthly_gain":
+            label = "monthly_residual_gain"
+        elif group == "spatial_refine":
+            label = "target_spatial_refine"
+        else:
+            label = "other_target_specific"
+        if label not in seen:
+            seen.add(label)
+            groups.append(label)
+    return groups
+
+
 def target_parameter_l2_drift(
     anchor_state: Dict[str, torch.Tensor],
     adapted_state: Dict[str, torch.Tensor],
@@ -1428,6 +2135,219 @@ def target_parameter_l2_drift(
     drift = {group: float(value ** 0.5) for group, value in sorted(group_sq.items())}
     drift["total"] = float(total_sq ** 0.5)
     return drift
+
+
+def build_stage3_prior_snapshot_metadata(
+    *,
+    source_config: Dict[str, Any],
+    prompt_state: Dict[str, Any],
+    source_checkpoint_sha256: str,
+    target_region: str,
+    K: int,
+) -> Dict[str, Any]:
+    """Return an audit record for the frozen HyperDA prior used in Stage 3."""
+    prompt_metadata = target_context_prompt_metadata(prompt_state)
+    monthly_counts = {
+        str(month): int(prompt_metadata.get("monthly_counts", {}).get(str(month), 0))
+        for month in range(1, 13)
+    }
+    return {
+        "schema_version": "hyperda_stage3_prior_snapshot_v1",
+        "prior_operator": "frozen_source_hyperda",
+        "source_hyperda_trainable_in_stage3": False,
+        "source_hyperda_parameter_updates": 0,
+        "source_checkpoint_sha256": str(source_checkpoint_sha256 or ""),
+        "source_stage_checkpoint_provenance": source_config.get(
+            "source_stage_checkpoint_provenance",
+            "phase4_hyperda_staged",
+        ),
+        "source_model_type": source_config.get("model_type", ""),
+        "source_regions": list(source_config.get("source_regions", []) or []),
+        "target_region": str(target_region),
+        "K": int(K),
+        "target_context_prompt_schema": prompt_metadata.get("schema_version", ""),
+        "target_context_prompt_source": prompt_metadata.get("prompt_source", ""),
+        "target_context_label_usage": prompt_metadata.get("label_usage", ""),
+        "target_context_hash": prompt_metadata.get("context_hash", ""),
+        "target_context_date_hash": prompt_metadata.get("context_date_hash", ""),
+        "target_context_n_samples": int(prompt_metadata.get("n_samples", 0) or 0),
+        "target_context_date_start": prompt_metadata.get("date_start", ""),
+        "target_context_date_end": prompt_metadata.get("date_end", ""),
+        "monthly_prompt_counts": monthly_counts,
+        "target_val_usage": "unused_in_main_protocol",
+        "target_eval_usage": "final_eval_only_no_selection",
+    }
+
+
+def build_stage3_posterior_state_metadata(
+    *,
+    anchor_state: Dict[str, torch.Tensor],
+    final_state: Dict[str, torch.Tensor],
+    K: int,
+    adapt_scope: str,
+    anchor_alpha: float,
+    adaptation_steps: int,
+    target_labels_loaded: bool,
+    target_labels_used: bool,
+    source_prior_hash_before: str = "",
+    source_prior_hash_after: str = "",
+    stage3_posterior_policy: str = "safe_operator_ablation",
+    stage3_posterior_decision: str = "accepted",
+    support_gate_status: str = "disabled",
+    paper_selection_basis: str = "",
+    stage3_acceptance_basis: str = "",
+    source_policy_candidate_id: str = "",
+) -> Dict[str, Any]:
+    """Return an audit record for target-only posterior variables in Stage 3."""
+    drift = target_parameter_l2_drift(anchor_state, final_state)
+    target_updates = int(
+        sum(
+            1
+            for name, anchor_tensor in anchor_state.items()
+            if not torch.allclose(anchor_tensor.detach().cpu(), final_state[name].detach().cpu())
+        )
+    )
+    no_update_contract = int(K) == 0
+    source_prior_unchanged = (
+        bool(source_prior_hash_before)
+        and bool(source_prior_hash_after)
+        and str(source_prior_hash_before) == str(source_prior_hash_after)
+    )
+    resolved_paper_selection_basis = str(paper_selection_basis) if paper_selection_basis else (
+        "source_side_safe_policy_only" if int(K) > 0 else "zero_shot_no_target_labels"
+    )
+    resolved_acceptance_basis = str(stage3_acceptance_basis or resolved_paper_selection_basis)
+    anchor_hash = hash_tensor_state_dict(anchor_state)
+    final_hash = hash_tensor_state_dict(final_state)
+    return {
+        "schema_version": "hyperda_stage3_target_posterior_v1",
+        "posterior_form": "target_context_prompt_plus_safe_target_operator_posterior",
+        "stage3_posterior_policy": str(stage3_posterior_policy),
+        "stage3_posterior_decision": str(stage3_posterior_decision),
+        "support_gate_status": str(support_gate_status),
+        "support_only_gate_status": str(support_gate_status),
+        "stage3_no_update_contract": (
+            "K0_fixed_no_update_source_prior_identity"
+            if no_update_contract
+            else "Kshot_source_policy_constrained_posterior_update"
+        ),
+        "paper_selection_basis": resolved_paper_selection_basis,
+        "stage3_acceptance_basis": resolved_acceptance_basis,
+        "source_policy_candidate_id": str(source_policy_candidate_id or ""),
+        "support_gate_policy_role": (
+            "target_support_only_diagnostic_not_paper_selection"
+            if int(K) > 0
+            else "not_applicable_k0_no_support"
+        ),
+        "posterior_variables": [
+            "target_prompt",
+            "adapter_coefficient_residuals",
+            "monthly_residual_gain",
+        ],
+        "optional_posterior_variables": ["target_spatial_refine"],
+        "paper_main_posterior_variables": [
+            "target_prompt",
+            "adapter_coefficient_residuals",
+            "monthly_residual_gain",
+        ],
+        "source_hyperda_parameter_updates": 0,
+        "source_backbone_parameter_updates": 0,
+        "hypernetwork_parameter_updates": 0,
+        "adapter_basis_bank_parameter_updates": 0,
+        "target_specific_parameter_updates": target_updates,
+        "adapt_scope": str(adapt_scope),
+        "K": int(K),
+        "adaptation_steps": int(adaptation_steps),
+        "anchor_alpha": float(anchor_alpha),
+        "safe_anchor_formula": "theta_SAFE = theta_prior + alpha_K * (theta_adapt - theta_prior)",
+        "anchor_state_key_count": len(anchor_state),
+        "final_state_key_count": len(final_state),
+        "drift_from_prior": drift,
+        "target_adapter_anchor_hash": anchor_hash,
+        "target_adapter_state_hash": final_hash,
+        "k0_anchor_state_hash": anchor_hash,
+        "source_prior_hash_before": str(source_prior_hash_before or ""),
+        "source_prior_hash_after": str(source_prior_hash_after or ""),
+        "source_prior_unchanged": bool(source_prior_unchanged),
+        "k0_target_drift_zero": bool(no_update_contract and float(drift.get("total", 0.0)) == 0.0),
+        "target_labels_loaded_for_adaptation": bool(target_labels_loaded),
+        "target_labels_used_for_adaptation": bool(target_labels_used),
+        "target_val_usage": "unused_in_main_protocol",
+        "target_eval_usage": "final_eval_only_no_selection",
+    }
+
+
+def build_stage3_target_posterior_state(
+    *,
+    anchor_state: Dict[str, torch.Tensor],
+    final_state: Dict[str, torch.Tensor],
+    K: int,
+    adapt_scope: str,
+    anchor_alpha: float,
+    adaptation_steps: int,
+    target_labels_loaded: bool,
+    target_labels_used: bool,
+    source_prior_hash_before: str,
+    source_prior_hash_after: str,
+    stage3_posterior_policy: str = "safe_operator_ablation",
+    stage3_posterior_decision: str = "accepted",
+    support_gate_status: str = "disabled",
+    paper_selection_basis: str = "",
+    stage3_acceptance_basis: str = "",
+    source_policy_candidate_id: str = "",
+) -> Dict[str, Any]:
+    """Build the replayable target-only Stage 3 posterior state object."""
+    if not anchor_state:
+        raise ValueError("Stage 3 posterior requires a non-empty target adapter anchor state")
+    if not final_state:
+        raise ValueError("Stage 3 posterior requires a non-empty target adapter final state")
+    if set(anchor_state) != set(final_state):
+        missing = sorted(set(anchor_state) - set(final_state))
+        extra = sorted(set(final_state) - set(anchor_state))
+        raise ValueError(f"target posterior state keys differ; missing={missing[:5]} extra={extra[:5]}")
+    bad_anchor = [name for name in anchor_state if not _is_target_adapter_state_key(name)]
+    bad_final = [name for name in final_state if not _is_target_adapter_state_key(name)]
+    if bad_anchor or bad_final:
+        raise ValueError(
+            "Stage 3 posterior state must contain target-only keys; "
+            f"bad_anchor={bad_anchor[:5]} bad_final={bad_final[:5]}"
+        )
+    metadata = build_stage3_posterior_state_metadata(
+        anchor_state=anchor_state,
+        final_state=final_state,
+        K=K,
+        adapt_scope=adapt_scope,
+        anchor_alpha=anchor_alpha,
+        adaptation_steps=adaptation_steps,
+        target_labels_loaded=target_labels_loaded,
+        target_labels_used=target_labels_used,
+        source_prior_hash_before=source_prior_hash_before,
+        source_prior_hash_after=source_prior_hash_after,
+        stage3_posterior_policy=stage3_posterior_policy,
+        stage3_posterior_decision=stage3_posterior_decision,
+        support_gate_status=support_gate_status,
+        paper_selection_basis=paper_selection_basis,
+        stage3_acceptance_basis=stage3_acceptance_basis,
+        source_policy_candidate_id=source_policy_candidate_id,
+    )
+    return {
+        "schema_version": "hyperda_stage3_target_posterior_state_v1",
+        "target_adapter_state_dict": {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in sorted(final_state.items())
+        },
+        "target_adapter_anchor_state_dict": {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in sorted(anchor_state.items())
+        },
+        "target_adapter_state_hash": metadata["target_adapter_state_hash"],
+        "target_adapter_anchor_hash": metadata["target_adapter_anchor_hash"],
+        "source_prior_hash_before": str(source_prior_hash_before or ""),
+        "source_prior_hash_after": str(source_prior_hash_after or ""),
+        "source_prior_unchanged": bool(metadata["source_prior_unchanged"]),
+        "drift_from_prior": dict(metadata["drift_from_prior"]),
+        "metadata": metadata,
+    }
 
 
 def apply_source_anchor_interpolation(
@@ -1681,12 +2601,140 @@ def save_few_shot_checkpoint(
 ) -> Dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     trainable_names = state.model.target_trainable_parameter_names()
+    actual_trainable_target_groups = trainable_target_groups_for_names(trainable_names)
     prompt_state = normalize_target_context_prompt_state(target_context_prompt_state)
     prompt_metadata = target_context_prompt_metadata(prompt_state)
     full_config = dict(config)
-    method_id = method_id_for_adaptation_setting(
+    anchor_state = {
+        name: tensor.detach().cpu()
+        for name, tensor in full_config.get("target_adapter_anchor_state", {}).items()
+    }
+    final_state = extract_target_adapter_state(state.model)
+    anchor_state_source = "config_target_adapter_anchor_state"
+    if not anchor_state:
+        anchor_state = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in final_state.items()
+        }
+        anchor_state_source = "final_state_fallback_missing_anchor"
+    source_prior_hash_before = str(
+        full_config.get("stage3_source_prior_hash_before")
+        or full_config.get("source_prior_hash_before")
+        or hash_source_prior_state(state.model)
+    )
+    source_prior_hash_after = str(
+        full_config.get("stage3_source_prior_hash_after")
+        or full_config.get("source_prior_hash_after")
+        or hash_source_prior_state(state.model)
+    )
+    source_checkpoint_sha256 = str(full_config.get("source_checkpoint_sha256", "") or "")
+    config_context_hash = str(full_config.get("target_context_dates_hash", "") or "")
+    prompt_context_hash = str(prompt_metadata.get("context_hash") or prompt_metadata.get("context_date_hash") or "")
+    if config_context_hash and prompt_context_hash and config_context_hash != prompt_context_hash:
+        raise ValueError(
+            "target_context_dates_hash mismatch between split manifest and "
+            f"target_context_prompt_state: {config_context_hash!r} != {prompt_context_hash!r}"
+        )
+    paper_facing_run = bool(
+        full_config.get(
+            "paper_facing_run",
+            int(full_config.get("K", 0) or 0) == 0
+            or full_config.get("policy_source") == "source_side_episode_calibration",
+        )
+    )
+    if int(full_config.get("K", 0) or 0) > 0 and not paper_facing_run:
+        full_config.setdefault("diagnostic_run_reason", "missing_source_side_safe_policy_json")
+    stage3_acceptance_basis = str(
+        full_config.get(
+            "stage3_acceptance_basis",
+            full_config.get(
+                "paper_selection_basis",
+                "zero_shot_no_target_labels"
+                if int(full_config.get("K", 0) or 0) == 0
+                else (
+                    "source_side_safe_policy_only"
+                    if paper_facing_run
+                    else "diagnostic_no_source_safe_policy_json"
+                ),
+            ),
+        )
+    )
+    if "stage3_prior_snapshot" not in full_config:
+        full_config["stage3_prior_snapshot"] = build_stage3_prior_snapshot_metadata(
+            source_config=state.source_config,
+            prompt_state=prompt_state,
+            source_checkpoint_sha256=source_checkpoint_sha256,
+            target_region=str(full_config.get("target_region", "")),
+            K=int(full_config.get("K", 0)),
+        )
+    if "stage3_posterior_state" not in full_config:
+        full_config["stage3_posterior_state"] = build_stage3_posterior_state_metadata(
+            anchor_state=anchor_state,
+            final_state=final_state,
+            K=int(full_config.get("K", 0)),
+            adapt_scope=str(full_config.get("adapt_scope", "safe_operator")),
+            anchor_alpha=float(full_config.get("anchor_alpha", default_anchor_alpha_for_K(int(full_config.get("K", 0))))),
+            adaptation_steps=int(full_config.get("adaptation_steps", 0) or 0),
+            target_labels_loaded=bool(full_config.get("target_labels_loaded_for_adaptation", False)),
+            target_labels_used=bool(full_config.get("target_labels_used_for_adaptation", False)),
+            source_prior_hash_before=source_prior_hash_before,
+            source_prior_hash_after=source_prior_hash_after,
+            stage3_posterior_policy=str(full_config.get("stage3_posterior_policy", "safe_operator_ablation")),
+            stage3_posterior_decision=str(full_config.get("stage3_posterior_decision", "accepted")),
+            support_gate_status=str(full_config.get("support_gate_status", "disabled")),
+            paper_selection_basis=str(full_config.get("paper_selection_basis", "")),
+            stage3_acceptance_basis=stage3_acceptance_basis,
+            source_policy_candidate_id=str(full_config.get("source_policy_candidate_id", "")),
+        )
+    stage3_posterior_state_dict = build_stage3_target_posterior_state(
+        anchor_state=anchor_state,
+        final_state=final_state,
+        K=int(full_config.get("K", 0)),
+        adapt_scope=str(full_config.get("adapt_scope", "safe_operator")),
+        anchor_alpha=float(full_config.get("anchor_alpha", default_anchor_alpha_for_K(int(full_config.get("K", 0))))),
+        adaptation_steps=int(full_config.get("adaptation_steps", 0) or 0),
+        target_labels_loaded=bool(full_config.get("target_labels_loaded_for_adaptation", False)),
+        target_labels_used=bool(full_config.get("target_labels_used_for_adaptation", False)),
+        source_prior_hash_before=source_prior_hash_before,
+        source_prior_hash_after=source_prior_hash_after,
+        stage3_posterior_policy=str(full_config.get("stage3_posterior_policy", "safe_operator_ablation")),
+        stage3_posterior_decision=str(full_config.get("stage3_posterior_decision", "accepted")),
+        support_gate_status=str(full_config.get("support_gate_status", "disabled")),
+        paper_selection_basis=str(full_config.get("paper_selection_basis", "")),
+        stage3_acceptance_basis=stage3_acceptance_basis,
+        source_policy_candidate_id=str(full_config.get("source_policy_candidate_id", "")),
+    )
+    full_config["stage3_posterior_state"] = dict(stage3_posterior_state_dict["metadata"])
+    full_config["stage3_posterior_state"]["anchor_state_source"] = anchor_state_source
+    full_config["stage3_posterior_state"].update(
+        {
+            key: full_config.get(key)
+            for key in (
+                "support_gate_enabled",
+                "support_gate_label_source",
+                "support_gate_min_delta",
+                "support_gate_rootzone_tolerance",
+                "support_gate_reject_reason",
+                "support_objective_before",
+                "support_objective_after",
+                "support_objective_delta",
+                "support_surface_loss_before",
+                "support_surface_loss_after",
+                "support_surface_loss_delta",
+                "support_rootzone_loss_before",
+                "support_rootzone_loss_after",
+                "support_rootzone_loss_delta",
+            )
+            if key in full_config
+        }
+    )
+    full_config["stage3_source_prior_hash_before"] = source_prior_hash_before
+    full_config["stage3_source_prior_hash_after"] = source_prior_hash_after
+    full_config["stage3_source_prior_unchanged"] = bool(stage3_posterior_state_dict["source_prior_unchanged"])
+    method_id = method_id_for_run(
         str(full_config.get("adaptation_setting", "")),
         int(full_config.get("K", 0)),
+        paper_facing_run=paper_facing_run,
     )
     support_loss_before_alias = full_config.get("support_loss_before")
     if support_loss_before_alias is None:
@@ -1716,11 +2764,13 @@ def save_few_shot_checkpoint(
             "target_val_period": "unused_in_main_protocol",
             "target_eval_period": "2023-2025",
             "frozen_modules": ["source_backbone", "prompt_encoder", "hypernetwork", "adapter_basis_bank"],
-            "trainable_modules": [
-                "target_prompt",
-                "adapter_coefficient_residuals",
-                "monthly_residual_gain",
-            ],
+            "frozen_source_groups": list(FROZEN_SOURCE_GROUPS),
+            "trainable_modules": list(
+                full_config.get("trainable_target_groups", actual_trainable_target_groups)
+            ),
+            "trainable_target_groups": list(
+                full_config.get("trainable_target_groups", actual_trainable_target_groups)
+            ),
             "trainable_parameter_names": trainable_names,
             "trainable_parameter_count": int(sum(p.numel() for p in state.model.parameters() if p.requires_grad)),
             "requires_grad_parameter_count": int(
@@ -1748,7 +2798,40 @@ def save_few_shot_checkpoint(
             "target_parameter_count_by_group": dict(
                 full_config.get("target_parameter_count_by_group", group_target_parameter_counts(state.model))
             ),
-            "adapt_scope": full_config.get("adapt_scope", "all"),
+            "adapt_scope": full_config.get("adapt_scope", "safe_operator"),
+            "stage3_posterior_policy": full_config.get("stage3_posterior_policy", "safe_operator_ablation"),
+            "stage3_posterior_decision": full_config.get("stage3_posterior_decision", "accepted"),
+            "stage3_no_update_contract": full_config.get("stage3_no_update_contract", ""),
+            "paper_selection_basis": full_config.get("paper_selection_basis", ""),
+            "stage3_acceptance_basis": stage3_acceptance_basis,
+            "k0_anchor_state_hash": stage3_posterior_state_dict["target_adapter_anchor_hash"],
+            "paper_facing_run": paper_facing_run,
+            "diagnostic_run_reason": full_config.get("diagnostic_run_reason", ""),
+            "support_gate_enabled": bool(full_config.get("support_gate_enabled", False)),
+            "support_gate_status": full_config.get("support_gate_status", "disabled"),
+            "support_only_gate_status": full_config.get(
+                "support_only_gate_status",
+                full_config.get("support_gate_status", "disabled"),
+            ),
+            "support_gate_label_source": full_config.get("support_gate_label_source", ""),
+            "support_gate_policy_role": full_config.get(
+                "support_gate_policy_role",
+                "target_support_only_diagnostic_not_paper_selection"
+                if int(full_config.get("K", 0) or 0) > 0
+                else "not_applicable_k0_no_support",
+            ),
+            "support_gate_min_delta": full_config.get("support_gate_min_delta", 0.0),
+            "support_gate_rootzone_tolerance": full_config.get("support_gate_rootzone_tolerance", 0.0),
+            "support_gate_reject_reason": list(full_config.get("support_gate_reject_reason", []) or []),
+            "support_objective_before": full_config.get("support_objective_before"),
+            "support_objective_after": full_config.get("support_objective_after"),
+            "support_objective_delta": full_config.get("support_objective_delta"),
+            "support_surface_loss_before": full_config.get("support_surface_loss_before"),
+            "support_surface_loss_after": full_config.get("support_surface_loss_after"),
+            "support_surface_loss_delta": full_config.get("support_surface_loss_delta"),
+            "support_rootzone_loss_before": full_config.get("support_rootzone_loss_before"),
+            "support_rootzone_loss_after": full_config.get("support_rootzone_loss_after"),
+            "support_rootzone_loss_delta": full_config.get("support_rootzone_loss_delta"),
             "freeze_monthly_gain": bool(full_config.get("freeze_monthly_gain", False)),
             "adapt_solver": full_config.get("adapt_solver", "adamw"),
             "trust_region_mode": full_config.get("trust_region_mode", "none"),
@@ -1800,6 +2883,21 @@ def save_few_shot_checkpoint(
             "audit_identity": bool(full_config.get("audit_identity", False)),
             "audit_identity_tolerance": float(full_config.get("audit_identity_tolerance", 1e-8)),
             "source_checkpoint_sha256": full_config.get("source_checkpoint_sha256", ""),
+            "staged_source_checkpoint_sha256": full_config.get(
+                "staged_source_checkpoint_sha256",
+                full_config.get("source_checkpoint_sha256", ""),
+            ),
+            "source_stage_checkpoint_provenance": full_config.get(
+                "source_stage_checkpoint_provenance",
+                "phase4_hyperda_staged",
+            ),
+            "stage3_source_prior_hash_before": source_prior_hash_before,
+            "stage3_source_prior_hash_after": source_prior_hash_after,
+            "stage3_source_prior_unchanged": bool(stage3_posterior_state_dict["source_prior_unchanged"]),
+            "k0_target_drift_zero": bool(
+                int(full_config.get("K", 0) or 0) == 0
+                and float((full_config.get("target_parameter_l2_drift", {}) or {}).get("total", 0.0) or 0.0) == 0.0
+            ),
             "target_support_count": int(full_config.get("target_support_count", 0) or 0),
             "target_labels_loaded_for_adaptation": bool(full_config.get("target_labels_loaded_for_adaptation", False)),
             "target_labels_used_for_adaptation": bool(full_config.get("target_labels_used_for_adaptation", False)),
@@ -1818,6 +2916,19 @@ def save_few_shot_checkpoint(
             "support_batch_count": int(full_config.get("support_batch_count", 0) or 0),
             "effective_support_passes": float(full_config.get("effective_support_passes", 0.0) or 0.0),
             "adapt_recipe": full_config.get("adapt_recipe", "source_anchor"),
+            "policy_source": full_config.get("policy_source", "preregistered_default"),
+            "safe_policy_json": full_config.get("safe_policy_json", ""),
+            "safe_policy_json_sha256": full_config.get("safe_policy_json_sha256", ""),
+            "safe_policy": dict(full_config.get("safe_policy", {}) or {}),
+            "safe_policy_hash": full_config.get(
+                "safe_policy_hash",
+                (full_config.get("safe_policy", {}) or {}).get("policy_hash", ""),
+            ),
+            "source_policy_candidate_id": full_config.get("source_policy_candidate_id", ""),
+            "source_policy_guard_config_hash": full_config.get("source_policy_guard_config_hash", ""),
+            "source_episode_regions": list(full_config.get("source_episode_regions", []) or []),
+            "rho_policy": full_config.get("rho_policy", "fixed_1.0"),
+            "adapt_mix_rho": float(full_config.get("adapt_mix_rho", 1.0 if int(full_config.get("K", 0) or 0) == 0 else 0.0)),
             "anchor_alpha": float(full_config.get("anchor_alpha", default_anchor_alpha_for_K(int(full_config.get("K", 0))))),
             "schedule_label": full_config.get("schedule_label", ""),
             "requested_lr": full_config.get("requested_lr", full_config.get("lr", None)),
@@ -1843,16 +2954,27 @@ def save_few_shot_checkpoint(
             "model_selection_source": "source_val_preregistered",
             "target_val_usage": "unused_in_main_protocol",
             "checkpoint_selection": "fixed_preregistered_final_step",
-            "target_eval_usage": "final_eval_only_no_training_no_selection",
+            "target_eval_usage": full_config.get("target_eval_usage", "final_eval_only_no_selection"),
+            "support_manifest_hash": full_config.get("support_manifest_hash", ""),
+            "support_nesting_hash": full_config.get("support_nesting_hash", ""),
+            "support_nesting_status": full_config.get("support_nesting_status", ""),
             "standard_support_loss_before_full_support": full_config.get("standard_support_loss_before_full_support"),
             "standard_support_loss_after_full_support": full_config.get("standard_support_loss_after_full_support"),
             "standard_support_loss_delta_full_support": full_config.get("standard_support_loss_delta_full_support"),
+            "standard_support_surface_loss_before_full_support": full_config.get("standard_support_surface_loss_before_full_support"),
+            "standard_support_surface_loss_after_full_support": full_config.get("standard_support_surface_loss_after_full_support"),
+            "standard_support_rootzone_loss_before_full_support": full_config.get("standard_support_rootzone_loss_before_full_support"),
+            "standard_support_rootzone_loss_after_full_support": full_config.get("standard_support_rootzone_loss_after_full_support"),
             "standard_support_objective_before_full_support": full_config.get("standard_support_objective_before_full_support"),
             "standard_support_objective_after_full_support": full_config.get("standard_support_objective_after_full_support"),
             "standard_support_increment_loss_before_full_support": full_config.get("standard_support_increment_loss_before_full_support"),
             "standard_support_increment_loss_after_full_support": full_config.get("standard_support_increment_loss_after_full_support"),
             "standard_support_analysis_loss_before_full_support": full_config.get("standard_support_analysis_loss_before_full_support"),
             "standard_support_analysis_loss_after_full_support": full_config.get("standard_support_analysis_loss_after_full_support"),
+            "standard_support_analysis_surface_loss_before_full_support": full_config.get("standard_support_analysis_surface_loss_before_full_support"),
+            "standard_support_analysis_surface_loss_after_full_support": full_config.get("standard_support_analysis_surface_loss_after_full_support"),
+            "standard_support_analysis_rootzone_loss_before_full_support": full_config.get("standard_support_analysis_rootzone_loss_before_full_support"),
+            "standard_support_analysis_rootzone_loss_after_full_support": full_config.get("standard_support_analysis_rootzone_loss_after_full_support"),
             "standard_support_regularization_loss_before_full_support": full_config.get("standard_support_regularization_loss_before_full_support"),
             "standard_support_regularization_loss_after_full_support": full_config.get("standard_support_regularization_loss_after_full_support"),
             "ridge_design_loss_before_sampled_pixels": full_config.get("ridge_design_loss_before_sampled_pixels"),
@@ -1868,6 +2990,8 @@ def save_few_shot_checkpoint(
             ),
             "target_context_prompt_state": prompt_state,
             "target_context_prompt_state_summary": prompt_metadata,
+            "stage3_prior_snapshot": dict(full_config.get("stage3_prior_snapshot", {})),
+            "stage3_posterior_state": dict(full_config.get("stage3_posterior_state", {})),
             "prompt_policy": prompt_metadata["prompt_source"],
             "prompt_label_usage": prompt_metadata["label_usage"],
             "eval_input_usage": prompt_metadata["eval_input_usage"],
@@ -1887,8 +3011,9 @@ def save_few_shot_checkpoint(
         "target_context_prompt_state": prompt_state,
         "target_adapter_anchor_state": {
             name: tensor.detach().cpu()
-            for name, tensor in full_config.get("target_adapter_anchor_state", {}).items()
+            for name, tensor in anchor_state.items()
         },
+        "stage3_posterior_state_dict": stage3_posterior_state_dict,
         "optimizer_state_dict": optimizer_state_dict,
         "source_checkpoint_config": state.source_config,
         "train_history": train_history,
@@ -1931,13 +3056,63 @@ def write_run_metadata_sidecar(output_dir: Path, checkpoint_path: Path, config: 
         "split_manifest_sha256": config.get("split_manifest_sha256", ""),
         "source_checkpoint": config.get("source_checkpoint", ""),
         "source_checkpoint_sha256": config.get("source_checkpoint_sha256", ""),
+        "staged_source_checkpoint_sha256": config.get(
+            "staged_source_checkpoint_sha256",
+            config.get("source_checkpoint_sha256", ""),
+        ),
+        "source_stage_checkpoint_provenance": config.get(
+            "source_stage_checkpoint_provenance",
+            "phase4_hyperda_staged",
+        ),
         "target_context_dates_hash": config.get("target_context_dates_hash", ""),
         "target_support_dates_hash": config.get("target_support_dates_hash", ""),
         "target_support_dates": list(config.get("target_support_dates", [])),
+        "support_manifest_hash": config.get("support_manifest_hash", ""),
+        "support_nesting_hash": config.get("support_nesting_hash", ""),
+        "support_nesting_status": config.get("support_nesting_status", ""),
         "target_support_count": config.get("target_support_count", 0),
         "target_eval_dates_hash": config.get("target_eval_dates_hash", ""),
         "target_context_prompt_state": prompt_state_summary,
-        "adapt_scope": config.get("adapt_scope", "all"),
+        "stage3_prior_snapshot": dict(config.get("stage3_prior_snapshot", {}) or {}),
+        "stage3_posterior_state": dict(config.get("stage3_posterior_state", {}) or {}),
+        "stage3_source_prior_hash_before": config.get("stage3_source_prior_hash_before", ""),
+        "stage3_source_prior_hash_after": config.get("stage3_source_prior_hash_after", ""),
+        "stage3_source_prior_unchanged": bool(config.get("stage3_source_prior_unchanged", False)),
+        "k0_target_drift_zero": bool(config.get("k0_target_drift_zero", False)),
+        "adapt_scope": config.get("adapt_scope", "safe_operator"),
+        "stage3_posterior_policy": config.get("stage3_posterior_policy", "safe_operator_ablation"),
+        "stage3_posterior_decision": config.get("stage3_posterior_decision", "accepted"),
+        "stage3_no_update_contract": config.get("stage3_no_update_contract", ""),
+        "paper_selection_basis": config.get("paper_selection_basis", ""),
+        "stage3_acceptance_basis": config.get("stage3_acceptance_basis", config.get("paper_selection_basis", "")),
+        "k0_anchor_state_hash": config.get("k0_anchor_state_hash", ""),
+        "paper_facing_run": bool(config.get("paper_facing_run", False)),
+        "diagnostic_run_reason": config.get("diagnostic_run_reason", ""),
+        "support_gate_enabled": bool(config.get("support_gate_enabled", False)),
+        "support_gate_status": config.get("support_gate_status", "disabled"),
+        "support_only_gate_status": config.get(
+            "support_only_gate_status",
+            config.get("support_gate_status", "disabled"),
+        ),
+        "support_gate_label_source": config.get("support_gate_label_source", ""),
+        "support_gate_policy_role": config.get(
+            "support_gate_policy_role",
+            "target_support_only_diagnostic_not_paper_selection"
+            if int(config.get("K", 0) or 0) > 0
+            else "not_applicable_k0_no_support",
+        ),
+        "support_gate_min_delta": config.get("support_gate_min_delta", 0.0),
+        "support_gate_rootzone_tolerance": config.get("support_gate_rootzone_tolerance", 0.0),
+        "support_gate_reject_reason": list(config.get("support_gate_reject_reason", []) or []),
+        "support_objective_before": config.get("support_objective_before", None),
+        "support_objective_after": config.get("support_objective_after", None),
+        "support_objective_delta": config.get("support_objective_delta", None),
+        "support_surface_loss_before": config.get("support_surface_loss_before", None),
+        "support_surface_loss_after": config.get("support_surface_loss_after", None),
+        "support_surface_loss_delta": config.get("support_surface_loss_delta", None),
+        "support_rootzone_loss_before": config.get("support_rootzone_loss_before", None),
+        "support_rootzone_loss_after": config.get("support_rootzone_loss_after", None),
+        "support_rootzone_loss_delta": config.get("support_rootzone_loss_delta", None),
         "freeze_monthly_gain": bool(config.get("freeze_monthly_gain", False)),
         "adapt_solver": config.get("adapt_solver", "adamw"),
         "trust_region_mode": config.get("trust_region_mode", "none"),
@@ -2012,6 +3187,19 @@ def write_run_metadata_sidecar(output_dir: Path, checkpoint_path: Path, config: 
         "support_batch_count": config.get("support_batch_count", 0),
         "effective_support_passes": config.get("effective_support_passes", 0.0),
         "adapt_recipe": config.get("adapt_recipe", ""),
+        "policy_source": config.get("policy_source", "preregistered_default"),
+        "safe_policy_json": config.get("safe_policy_json", ""),
+        "safe_policy_json_sha256": config.get("safe_policy_json_sha256", ""),
+        "safe_policy": dict(config.get("safe_policy", {}) or {}),
+        "safe_policy_hash": config.get(
+            "safe_policy_hash",
+            (config.get("safe_policy", {}) or {}).get("policy_hash", ""),
+        ),
+        "source_policy_candidate_id": config.get("source_policy_candidate_id", ""),
+        "source_policy_guard_config_hash": config.get("source_policy_guard_config_hash", ""),
+        "source_episode_regions": list(config.get("source_episode_regions", []) or []),
+        "rho_policy": config.get("rho_policy", "fixed_1.0"),
+        "adapt_mix_rho": config.get("adapt_mix_rho", 1.0),
         "anchor_alpha": config.get("anchor_alpha", None),
         "anchor_alpha_grid_preregistered": list(config.get("anchor_alpha_grid_preregistered", [])),
         "source_anchor_hyperparameter_source": config.get("source_anchor_hyperparameter_source", ""),
@@ -2022,12 +3210,20 @@ def write_run_metadata_sidecar(output_dir: Path, checkpoint_path: Path, config: 
         "standard_support_loss_before_full_support": config.get("standard_support_loss_before_full_support", None),
         "standard_support_loss_after_full_support": config.get("standard_support_loss_after_full_support", None),
         "standard_support_loss_delta_full_support": config.get("standard_support_loss_delta_full_support", None),
+        "standard_support_surface_loss_before_full_support": config.get("standard_support_surface_loss_before_full_support", None),
+        "standard_support_surface_loss_after_full_support": config.get("standard_support_surface_loss_after_full_support", None),
+        "standard_support_rootzone_loss_before_full_support": config.get("standard_support_rootzone_loss_before_full_support", None),
+        "standard_support_rootzone_loss_after_full_support": config.get("standard_support_rootzone_loss_after_full_support", None),
         "standard_support_objective_before_full_support": config.get("standard_support_objective_before_full_support", None),
         "standard_support_objective_after_full_support": config.get("standard_support_objective_after_full_support", None),
         "standard_support_increment_loss_before_full_support": config.get("standard_support_increment_loss_before_full_support", None),
         "standard_support_increment_loss_after_full_support": config.get("standard_support_increment_loss_after_full_support", None),
         "standard_support_analysis_loss_before_full_support": config.get("standard_support_analysis_loss_before_full_support", None),
         "standard_support_analysis_loss_after_full_support": config.get("standard_support_analysis_loss_after_full_support", None),
+        "standard_support_analysis_surface_loss_before_full_support": config.get("standard_support_analysis_surface_loss_before_full_support", None),
+        "standard_support_analysis_surface_loss_after_full_support": config.get("standard_support_analysis_surface_loss_after_full_support", None),
+        "standard_support_analysis_rootzone_loss_before_full_support": config.get("standard_support_analysis_rootzone_loss_before_full_support", None),
+        "standard_support_analysis_rootzone_loss_after_full_support": config.get("standard_support_analysis_rootzone_loss_after_full_support", None),
         "standard_support_regularization_loss_before_full_support": config.get("standard_support_regularization_loss_before_full_support", None),
         "standard_support_regularization_loss_after_full_support": config.get("standard_support_regularization_loss_after_full_support", None),
         "ridge_design_loss_before_sampled_pixels": config.get("ridge_design_loss_before_sampled_pixels", None),
@@ -2048,7 +3244,9 @@ def write_run_metadata_sidecar(output_dir: Path, checkpoint_path: Path, config: 
         "eval_input_usage": config.get("eval_input_usage", ""),
         "eval_month_usage": config.get("eval_month_usage", ""),
         "frozen_modules": list(config.get("frozen_modules", [])),
+        "frozen_source_groups": list(config.get("frozen_source_groups", [])),
         "trainable_modules": list(config.get("trainable_modules", [])),
+        "trainable_target_groups": list(config.get("trainable_target_groups", [])),
         "git_hash": config.get("git_hash", ""),
         "timestamp": config.get("timestamp", ""),
     }
@@ -2085,6 +3283,7 @@ def main() -> None:
     apply_target_adaptation_stage(state.model, epoch=0, stage1_epochs=0)
     apply_adapt_scope(state.model, args.adapt_scope, freeze_monthly_gain=args.freeze_monthly_gain)
     anchor_adapter_state = extract_target_adapter_state(state.model)
+    source_prior_hash_before = hash_source_prior_state(state.model)
 
     target_context_dataset = HydroDADataset(
         da_nc_path=args.da_nc,
@@ -2113,9 +3312,12 @@ def main() -> None:
         )
 
     split_hashes = _split_hashes(target_context_dataset)
+    target_context_sample_count = len(target_context_dataset)
+    if int(args.target_context_max_samples) > 0:
+        target_context_sample_count = min(target_context_sample_count, int(args.target_context_max_samples))
     target_context_samples = (
         target_context_dataset.get_input_side_sample(i)
-        for i in range(len(target_context_dataset))
+        for i in range(target_context_sample_count)
     )
     target_context_prompt_state = build_few_shot_target_context_prompt_state(
         state=state,
@@ -2141,7 +3343,9 @@ def main() -> None:
         trainable_params = [p for p in state.model.parameters() if p.requires_grad]
         optimizer = None
         loss_fn: Optional[nn.Module] = None
-        if args.K > 0 and args.adapt_solver == "adamw" and support_dataset is not None:
+        loss_loader = None
+        if args.K > 0 and support_dataset is not None:
+            loss_loader = _loader(support_dataset, args.batch_size, args.num_workers, shuffle=False)
             if args.use_lat_weighted_loss:
                 loss_fn = WeightedMaskedHuberLoss(
                     delta=1.0,
@@ -2162,11 +3366,11 @@ def main() -> None:
             )
         if args.K > 0 and args.adapt_solver == "ridge_coeff":
             assert support_dataset is not None
-            loader = _loader(support_dataset, args.batch_size, args.num_workers, shuffle=False)
+            assert loss_loader is not None
             started = time.time()
             ridge_diagnostics = run_ridge_coeff_adaptation(
                 state=state,
-                loader=loader,
+                loader=loss_loader,
                 device=device,
                 target_context_prompt_state=target_context_prompt_state,
                 normalize_increment=state.normalization.get("inc_mean") is not None,
@@ -2192,7 +3396,7 @@ def main() -> None:
             assert support_dataset is not None
             assert loss_fn is not None
             loader = _loader(support_dataset, args.batch_size, args.num_workers, shuffle=True)
-            loss_loader = _loader(support_dataset, args.batch_size, args.num_workers, shuffle=False)
+            assert loss_loader is not None
             standard_support_loss_before = standard_support_loss_from_loader(
                 state=state,
                 loader=loss_loader,
@@ -2248,7 +3452,6 @@ def main() -> None:
                 trust_coeff_radius=args.trust_coeff_radius,
                 trust_spatial_radius=args.trust_spatial_radius,
             )
-            loss_loader = _loader(support_dataset, args.batch_size, args.num_workers, shuffle=False)
             standard_support_loss_after = standard_support_loss_from_loader(
                 state=state,
                 loader=loss_loader,
@@ -2308,8 +3511,135 @@ def main() -> None:
         else:
             apply_source_anchor_interpolation(state.model, anchor_adapter_state, alpha=0.0)
 
+        if args.K > 0 and loss_loader is not None and loss_fn is not None:
+            standard_support_loss_after = standard_support_loss_from_loader(
+                state=state,
+                loader=loss_loader,
+                device=device,
+                target_context_prompt_state=target_context_prompt_state,
+                loss_fn=loss_fn,
+                normalize_increment=state.normalization.get("inc_mean") is not None,
+                lambda_prior=args.lambda_prior,
+                lambda_latent=args.lambda_latent,
+                lambda_gain=args.lambda_gain,
+                lambda_gain_smooth=args.lambda_gain_smooth,
+                lambda_analysis=args.lambda_analysis,
+                support_loss_reduction=args.support_loss_reduction,
+            )
+            if not standard_support_loss_before:
+                apply_target_adapter_state(state.model, anchor_adapter_state)
+                standard_support_loss_before = standard_support_loss_from_loader(
+                    state=state,
+                    loader=loss_loader,
+                    device=device,
+                    target_context_prompt_state=target_context_prompt_state,
+                    loss_fn=loss_fn,
+                    normalize_increment=state.normalization.get("inc_mean") is not None,
+                    lambda_prior=args.lambda_prior,
+                    lambda_latent=args.lambda_latent,
+                    lambda_gain=args.lambda_gain,
+                    lambda_gain_smooth=args.lambda_gain_smooth,
+                    lambda_analysis=args.lambda_analysis,
+                    support_loss_reduction=args.support_loss_reduction,
+                )
+                apply_target_adapter_state(state.model, pre_anchor_adapter_state)
+                if args.adapt_recipe in {"source_anchor", "conservative", "episode_prior"}:
+                    apply_source_anchor_interpolation(state.model, anchor_adapter_state, alpha=args.anchor_alpha)
+            if is_source_calibrated_kshot_no_update(args):
+                support_gate_summary = support_gate_summary_for_source_calibrated_no_update(args)
+                print(
+                    "Source-side SAFE policy selected no K-shot update; saving the frozen-prior anchor.",
+                    flush=True,
+                )
+            else:
+                support_gate_summary = decide_support_gate(
+                    before=standard_support_loss_before,
+                    after=standard_support_loss_after,
+                    enabled=args.support_gate == "auto",
+                    min_delta=float(args.support_gate_min_delta),
+                    rootzone_tolerance=float(args.support_gate_rootzone_tolerance),
+                )
+            if support_gate_summary["stage3_posterior_decision"] == "rejected_to_k0_anchor":
+                apply_target_adapter_state(state.model, anchor_adapter_state)
+                standard_support_loss_after = dict(standard_support_loss_before)
+                support_gate_summary.update(
+                    {
+                        "support_objective_after": support_gate_summary.get("support_objective_before"),
+                        "support_objective_delta": 0.0
+                        if support_gate_summary.get("support_objective_before") is not None
+                        else None,
+                        "support_loss_after": support_gate_summary.get("support_loss_before"),
+                        "support_loss_delta": 0.0
+                        if support_gate_summary.get("support_loss_before") is not None
+                        else None,
+                        "support_surface_loss_after": support_gate_summary.get("support_surface_loss_before"),
+                        "support_surface_loss_delta": 0.0
+                        if support_gate_summary.get("support_surface_loss_before") is not None
+                        else None,
+                        "support_rootzone_loss_after": support_gate_summary.get("support_rootzone_loss_before"),
+                        "support_rootzone_loss_delta": 0.0
+                        if support_gate_summary.get("support_rootzone_loss_before") is not None
+                        else None,
+                    }
+                )
+                print(
+                    "Support gate rejected Stage-3 posterior; rolled back to frozen-prior anchor: "
+                    f"reasons={support_gate_summary.get('support_gate_reject_reason')}",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Support gate decision: "
+                    f"{support_gate_summary['stage3_posterior_decision']} "
+                    f"objective_delta={support_gate_summary.get('support_candidate_objective_delta')}",
+                    flush=True,
+                )
+        elif args.K == 0:
+            support_gate_summary = support_gate_summary_for_k0()
+        else:
+            support_gate_summary = {
+                "support_gate_enabled": False,
+                "support_gate_status": "skipped_no_support_objective",
+                "stage3_posterior_decision": "accepted",
+                "support_gate_label_source": "target_support_only",
+                "support_gate_min_delta": float(args.support_gate_min_delta),
+                "support_gate_rootzone_tolerance": float(args.support_gate_rootzone_tolerance),
+                "support_gate_reject_reason": [],
+            }
+
+        if args.K > 0 and args.policy_source != "source_side_episode_calibration":
+            apply_target_adapter_state(state.model, anchor_adapter_state)
+            support_gate_summary.update(
+                {
+                    "support_gate_enabled": bool(support_gate_summary.get("support_gate_enabled", False)),
+                    "support_gate_status": "missing_source_policy_rejected_to_k0_anchor",
+                    "support_only_gate_status": str(
+                        support_gate_summary.get("support_gate_status", "skipped_no_source_policy")
+                    ),
+                    "stage3_posterior_decision": "rejected_to_k0_anchor",
+                    "support_gate_reject_reason": list(
+                        support_gate_summary.get("support_gate_reject_reason", []) or []
+                    )
+                    + ["missing_source_side_safe_policy_json"],
+                }
+            )
+            print(
+                "No source-side SAFE policy was provided for K-shot Stage 3; "
+                "saving the K0 anchor state as a diagnostic run.",
+                flush=True,
+            )
+
         final_adapter_state = extract_target_adapter_state(state.model)
         drift = target_parameter_l2_drift(anchor_adapter_state, final_adapter_state)
+        source_prior_hash_after = hash_source_prior_state(state.model)
+        if args.K == 0:
+            if source_prior_hash_before != source_prior_hash_after:
+                raise RuntimeError("K=0 no-update protocol violation: source prior hash changed")
+            if float(drift.get("total", 0.0)) != 0.0:
+                raise RuntimeError(
+                    "K=0 no-update protocol violation: target posterior drift is "
+                    f"{drift.get('total')}, expected exactly 0.0"
+                )
         if args.freeze_monthly_gain and float(drift.get("monthly_gain", 0.0)) != 0.0:
             raise RuntimeError(
                 "FREEZE_MONTHLY_GAIN protocol violation: monthly_gain drift is "
@@ -2327,12 +3657,20 @@ def main() -> None:
             "standard_support_loss_before_full_support": standard_loss_before,
             "standard_support_loss_after_full_support": standard_loss_after,
             "standard_support_loss_delta_full_support": standard_loss_delta,
+            "standard_support_surface_loss_before_full_support": standard_support_loss_before.get("standard_support_surface_loss_full_support"),
+            "standard_support_surface_loss_after_full_support": standard_support_loss_after.get("standard_support_surface_loss_full_support"),
+            "standard_support_rootzone_loss_before_full_support": standard_support_loss_before.get("standard_support_rootzone_loss_full_support"),
+            "standard_support_rootzone_loss_after_full_support": standard_support_loss_after.get("standard_support_rootzone_loss_full_support"),
             "standard_support_objective_before_full_support": standard_support_loss_before.get("standard_support_objective_full_support"),
             "standard_support_objective_after_full_support": standard_support_loss_after.get("standard_support_objective_full_support"),
             "standard_support_increment_loss_before_full_support": standard_support_loss_before.get("standard_support_increment_loss_full_support"),
             "standard_support_increment_loss_after_full_support": standard_support_loss_after.get("standard_support_increment_loss_full_support"),
             "standard_support_analysis_loss_before_full_support": standard_support_loss_before.get("standard_support_analysis_loss_full_support"),
             "standard_support_analysis_loss_after_full_support": standard_support_loss_after.get("standard_support_analysis_loss_full_support"),
+            "standard_support_analysis_surface_loss_before_full_support": standard_support_loss_before.get("standard_support_analysis_surface_loss_full_support"),
+            "standard_support_analysis_surface_loss_after_full_support": standard_support_loss_after.get("standard_support_analysis_surface_loss_full_support"),
+            "standard_support_analysis_rootzone_loss_before_full_support": standard_support_loss_before.get("standard_support_analysis_rootzone_loss_full_support"),
+            "standard_support_analysis_rootzone_loss_after_full_support": standard_support_loss_after.get("standard_support_analysis_rootzone_loss_full_support"),
             "standard_support_regularization_loss_before_full_support": standard_support_loss_before.get("standard_support_regularization_loss_full_support"),
             "standard_support_regularization_loss_after_full_support": standard_support_loss_after.get("standard_support_regularization_loss_full_support"),
         }
@@ -2351,7 +3689,9 @@ def main() -> None:
         if not target_support_dates:
             target_support_dates = _date_str_records(target_context_dataset, "target_support_dates")
         target_support_count = len(target_support_dates)
-        target_labels_used = bool(train_history) or bool(ridge_diagnostics)
+        target_labels_used = bool(train_history) or bool(ridge_diagnostics) or bool(
+            args.K > 0 and support_gate_summary.get("support_gate_enabled", False)
+        )
         optimizer_steps_run = len(train_history)
         if ridge_diagnostics:
             optimizer_steps_run = 0
@@ -2372,10 +3712,85 @@ def main() -> None:
                 "support_loss_delta": standard_loss_delta,
             }
         trust_projection_diagnostics = summarize_trust_projection_history(train_history)
+        support_manifest_hash = _support_manifest_hash(
+            target_region=args.target_region,
+            K=args.K,
+            seed=args.seed,
+            target_support_dates=target_support_dates,
+            target_support_dates_hash=split_hashes.get("target_support_dates_hash", ""),
+            split_manifest_sha256=split_manifest_sha256,
+        )
+        support_nesting_hash = _json_sha256_payload(
+            {
+                "target_region": args.target_region,
+                "K": args.K,
+                "seed": args.seed,
+                "support_manifest_hash": support_manifest_hash,
+                "target_support_dates": target_support_dates,
+            }
+        )
+        stage3_prior_snapshot = build_stage3_prior_snapshot_metadata(
+            source_config=state.source_config,
+            prompt_state=target_context_prompt_state,
+            source_checkpoint_sha256=source_checkpoint_sha256,
+            target_region=args.target_region,
+            K=args.K,
+        )
+        paper_facing_status = paper_facing_status_for_stage3(
+            K=args.K,
+            policy_source=args.policy_source,
+            stage3_posterior_decision=str(support_gate_summary.get("stage3_posterior_decision", "accepted")),
+        )
+        paper_facing_run = bool(paper_facing_status["paper_facing_run"])
+        paper_selection_basis = (
+            "source_side_safe_policy_only"
+            if args.K > 0 and args.policy_source == "source_side_episode_calibration"
+            else (
+                "diagnostic_no_source_safe_policy_json"
+                if args.K > 0
+                else "zero_shot_no_target_labels"
+            )
+        )
+        if str(support_gate_summary.get("stage3_posterior_decision", "")) == "rejected_to_k0_anchor":
+            stage3_acceptance_basis = (
+                "source_policy_or_gate_rejected_to_k0_anchor"
+                if paper_facing_run
+                else "diagnostic_no_source_safe_policy_json_rejected_to_k0_anchor"
+            )
+        else:
+            stage3_acceptance_basis = paper_selection_basis
+        stage3_posterior_state = build_stage3_posterior_state_metadata(
+            anchor_state=anchor_adapter_state,
+            final_state=final_adapter_state,
+            K=args.K,
+            adapt_scope=args.adapt_scope,
+            anchor_alpha=float(args.anchor_alpha),
+            adaptation_steps=int(args.adaptation_steps),
+            target_labels_loaded=bool(support_dataset is not None),
+            target_labels_used=target_labels_used,
+            source_prior_hash_before=source_prior_hash_before,
+            source_prior_hash_after=source_prior_hash_after,
+            stage3_posterior_policy=args.stage3_posterior_policy,
+            stage3_posterior_decision=str(support_gate_summary.get("stage3_posterior_decision", "accepted")),
+            support_gate_status=str(support_gate_summary.get("support_gate_status", "disabled")),
+            paper_selection_basis=paper_selection_basis,
+            stage3_acceptance_basis=stage3_acceptance_basis,
+            source_policy_candidate_id=args.source_policy_candidate_id,
+        )
         config = {
             "K": args.K,
             "adaptation_setting": args.adaptation_setting,
             "adapt_scope": args.adapt_scope,
+            "stage3_posterior_policy": args.stage3_posterior_policy,
+            "stage3_no_update_contract": (
+                "K0_fixed_no_update_source_prior_identity"
+                if args.K == 0
+                else "Kshot_source_policy_constrained_posterior_update"
+            ),
+            "paper_selection_basis": paper_selection_basis,
+            "stage3_acceptance_basis": stage3_acceptance_basis,
+            "paper_facing_run": paper_facing_run,
+            "diagnostic_run_reason": str(paper_facing_status["diagnostic_run_reason"]),
             "freeze_monthly_gain": bool(args.freeze_monthly_gain),
             "adapt_solver": args.adapt_solver,
             "trust_region_mode": args.trust_region_mode,
@@ -2396,13 +3811,30 @@ def main() -> None:
             "audit_identity": bool(args.audit_identity),
             "audit_identity_tolerance": float(args.audit_identity_tolerance),
             "adapt_recipe": args.adapt_recipe,
+            "policy_source": args.policy_source,
+            "safe_policy_json": args.safe_policy_json or "",
+            "safe_policy_json_sha256": args.safe_policy_json_sha256,
+            "safe_policy_hash": args.safe_policy_hash,
+            "safe_policy": args.safe_policy,
+            "source_policy_candidate_id": args.source_policy_candidate_id,
+            "source_policy_guard_config_hash": args.source_policy_guard_config_hash,
+            "source_episode_regions": args.source_episode_regions,
+            "rho_policy": args.rho_policy,
+            "adapt_mix_rho": float(args.adapt_mix_rho),
             "anchor_alpha": float(args.anchor_alpha),
             "anchor_alpha_grid_preregistered": default_anchor_alpha_grid_for_K(args.K),
             "source_anchor_hyperparameter_source": args.source_anchor_hyperparameter_source,
+            "target_eval_usage": args.target_eval_usage,
             "target_region": args.target_region,
             "seed": args.seed,
             "source_checkpoint": args.source_checkpoint,
             "source_checkpoint_sha256": source_checkpoint_sha256,
+            "staged_source_checkpoint_sha256": source_checkpoint_sha256,
+            "source_stage_checkpoint_provenance": "phase4_hyperda_staged",
+            "stage3_source_prior_hash_before": source_prior_hash_before,
+            "stage3_source_prior_hash_after": source_prior_hash_after,
+            "stage3_source_prior_unchanged": source_prior_hash_before == source_prior_hash_after,
+            "k0_target_drift_zero": bool(args.K == 0 and float(drift.get("total", 0.0)) == 0.0),
             "split_manifest_path": args.splits_json,
             "split_manifest_sha256": split_manifest_sha256,
             "adaptation_steps": args.adaptation_steps,
@@ -2430,6 +3862,15 @@ def main() -> None:
             "rootzone_weight": args.rootzone_weight,
             "use_lat_weighted_loss": bool(args.use_lat_weighted_loss),
             **loss_summary,
+            **support_gate_summary,
+            "support_gate_policy_role": support_gate_summary.get(
+                "support_gate_policy_role",
+                (
+                    "target_support_only_diagnostic_not_paper_selection"
+                    if args.K > 0
+                    else "not_applicable_k0_no_support"
+                ),
+            ),
             **standard_loss_summary,
             "ridge_design_loss_before_sampled_pixels": ridge_design_loss_before,
             "ridge_design_loss_after_sampled_pixels": ridge_design_loss_after,
@@ -2437,18 +3878,25 @@ def main() -> None:
             "target_parameter_l2_drift_pre_anchor": pre_anchor_drift,
             "target_parameter_l2_drift_post_anchor": drift,
             "target_parameter_l2_drift": drift,
+            "stage3_prior_snapshot": stage3_prior_snapshot,
+            "stage3_posterior_state": stage3_posterior_state,
             "target_parameter_count_by_group": group_target_parameter_counts(state.model),
             "requires_grad_parameter_count": requires_grad_parameter_count,
             "requires_grad_param_count": requires_grad_parameter_count,
             "optimizer_parameter_count": optimizer_parameter_count,
             "optimizer_param_count": optimizer_parameter_count,
             "target_support_dates": target_support_dates,
+            "support_manifest_hash": support_manifest_hash,
+            "support_nesting_hash": support_nesting_hash,
+            "support_nesting_status": _support_nesting_status(args.K, target_support_dates),
             "target_support_count": target_support_count,
             "target_labels_loaded_for_adaptation": bool(support_dataset is not None),
             "target_labels_used_for_adaptation": target_labels_used,
             "target_latent_dim": args.target_latent_dim,
             "enable_target_spatial_refine": args.enable_target_spatial_refine,
             "target_adapter_anchor_state": anchor_adapter_state,
+            "target_context_max_samples": int(args.target_context_max_samples),
+            "target_context_samples_used": int(target_context_sample_count),
             **split_hashes,
         }
         final_path = checkpoints_dir / "checkpoint_final_preregistered.pt"

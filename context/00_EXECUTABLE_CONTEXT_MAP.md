@@ -89,7 +89,7 @@ specs/hydroda_dataset_contract.yaml
 
 ---
 
-### Phase 2: Region masks + target-train splits
+### Phase 2: Region masks + zero/few-shot splits
 
 读取：
 
@@ -125,7 +125,8 @@ reports/regions/US_region_artifact_contract.md     # contract 文档
 Gate：
 
 ```text
-Temporal target-train splits: 可在 Phase 1 dataset 完成后先实现。
+Temporal zero/few-shot splits: 可在 Phase 1 dataset 完成后先实现。
+Legacy target-train/K-date split artifacts are reproduction-only aliases.
 Scientific US-R1..US-R6 masks: UNLOCKED (US_latlon.nc recovered 2026-05-06)
 Grid-only masks: ALLOWED for development only
 ```
@@ -165,20 +166,34 @@ checklists/no_leakage_checklist.md
 
 ---
 
-### Phase 5: HyRAO and sparse adaptation
+### Phase 5: HyperDA-SAFE zero/few-shot target generalization
 
 读取：
 
 ```text
-tasks/phase5_hyrao_sparse_adaptation.md
+tasks/phase5_hyperda_safe_zero_few_shot.md
 context/01_RESEARCH_CONTRACT.md
 context/06_BASELINES_AND_MODEL_ROADMAP.md
 context/10_REVIEWER_RISK_CONTROL.md
 specs/experiment_schema.yaml
+specs/hyperda_v4.yaml
+specs/protocol_v4.yaml
 checklists/no_leakage_checklist.md
 ```
 
-目标：region descriptor、region latent、adapter、sparse block adaptation。
+目标：执行 V4.4 zero/few-shot + HyperDA-SAFE 主协议，使用 source-trained
+HyperDA prior、target_context monthly prompt prototypes 和 K in {0,4,12}
+target_support 标签预算。K=4/K=12 paper-facing runs 必须使用 source-side
+SAFE policy metadata；`target_val` 不用于主协议 selection/gain calibration。
+
+Legacy note:
+
+```text
+tasks/phase5_hyrao_sparse_adaptation.md
+```
+
+仅保留为旧命令兼容入口。HyRAO / sparse adaptation 不是 active 方法名或
+paper-main protocol surface。
 
 ---
 

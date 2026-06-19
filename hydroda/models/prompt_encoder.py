@@ -129,50 +129,171 @@ class RegionPromptEncoder(nn.Module):
 
 
 class RobustInputSideDAPromptEncoder(RegionPromptEncoder):
-    """Prompt encoder using robust input-side diagnostics only.
+    """Prompt encoder using DA-aware robust input-side diagnostics only.
 
     This encoder preserves ``RegionPromptEncoder.forward(x, region_ids, month)``
     and replaces the input summary branch with finite-value diagnostics derived
-    from ``x``. It deliberately ignores channel 11 when constructing input
-    diagnostics so ``base_valid_mask`` cannot become an observation, loss, or
-    region-mask proxy.
+    from ``x``. Channel 11 is included only as a bounded diagnostic coverage
+    feature; it is never used to mask, select, weight, or drop other channels.
     """
 
+    diagnostic_schema = [
+        "sm_surface_forecast_median",
+        "sm_surface_forecast_iqr",
+        "sm_rootzone_forecast_median",
+        "sm_rootzone_forecast_iqr",
+        "soil_temp_layer1_forecast_median",
+        "soil_temp_layer1_forecast_iqr",
+        "surface_temp_forecast_median",
+        "surface_temp_forecast_iqr",
+        "mwrtm_vegopacity_median",
+        "mwrtm_vegopacity_iqr",
+        "tb_h_innovation_median",
+        "tb_h_innovation_iqr",
+        "tb_v_innovation_median",
+        "tb_v_innovation_iqr",
+        "tb_obs_hv_contrast_median",
+        "tb_obs_hv_contrast_iqr",
+        "tb_assim_hv_contrast_median",
+        "tb_assim_hv_contrast_iqr",
+        "tb_h_obs_error_confidence",
+        "tb_v_obs_error_confidence",
+        "tb_h_innovation_normalized_abs_median",
+        "tb_v_innovation_normalized_abs_median",
+        "finite_input_coverage",
+        "base_valid_mask_fraction_diagnostic_only",
+    ]
+
+    def __init__(
+        self,
+        num_regions: int = 6,
+        input_channels: int = 12,
+        hidden_dim: int = 64,
+    ) -> None:
+        if int(input_channels) != 12:
+            raise ValueError(
+                "RobustInputSideDAPromptEncoder requires the audited 12-channel "
+                "HydroDA input contract"
+            )
+        super().__init__(
+            num_regions=num_regions,
+            input_channels=input_channels,
+            hidden_dim=hidden_dim,
+        )
+
+    @staticmethod
+    def _finite_values(values: torch.Tensor) -> torch.Tensor:
+        return values[torch.isfinite(values)].float()
+
+    @classmethod
+    def _median_iqr(cls, values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        finite = cls._finite_values(values)
+        if finite.numel() == 0:
+            zero = values.new_tensor(0.0)
+            return zero, zero
+        quantiles = torch.quantile(finite, finite.new_tensor([0.25, 0.5, 0.75]))
+        median = quantiles[1].to(dtype=values.dtype, device=values.device)
+        iqr = (quantiles[2] - quantiles[0]).to(dtype=values.dtype, device=values.device)
+        return median, iqr
+
+    @classmethod
+    def _median(cls, values: torch.Tensor) -> torch.Tensor:
+        finite = cls._finite_values(values)
+        if finite.numel() == 0:
+            return values.new_tensor(0.0)
+        return torch.quantile(finite, finite.new_tensor(0.5)).to(
+            dtype=values.dtype,
+            device=values.device,
+        )
+
+    @classmethod
+    def _confidence_from_error_std(cls, values: torch.Tensor) -> torch.Tensor:
+        finite = cls._finite_values(values.abs())
+        if finite.numel() == 0:
+            return values.new_tensor(0.0)
+        median_abs_err = torch.quantile(finite, finite.new_tensor(0.5)).to(
+            dtype=values.dtype,
+            device=values.device,
+        )
+        return 1.0 / (1.0 + median_abs_err.clamp_min(0.0))
+
+    @staticmethod
+    def _finite_coverage(values: torch.Tensor) -> torch.Tensor:
+        if values.numel() == 0:
+            return values.new_tensor(0.0)
+        return torch.isfinite(values).float().mean().to(dtype=values.dtype, device=values.device)
+
+    @classmethod
+    def _base_valid_fraction(cls, values: torch.Tensor) -> torch.Tensor:
+        finite = cls._finite_values(values)
+        if finite.numel() == 0:
+            return values.new_tensor(0.0)
+        return (finite > 0.5).float().mean().to(dtype=values.dtype, device=values.device)
+
     def _compute_input_stats(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute robust per-channel diagnostics from finite input values.
+        """Compute DA-aware robust diagnostics from finite input-side fields.
 
         The returned shape remains ``[B, input_channels * 2]`` for checkpoint
-        compatibility with the existing projection layer. For each channel the
-        two diagnostics are finite-value median and interquartile range. Channel
-        11 is set to neutral diagnostics and is not used as mask semantics.
+        compatibility with the existing projection layer. Diagnostics are based
+        only on the current input tensor and the audited HydroDA channel order:
+        forecasts, temperatures, vegetation opacity, H/V brightness-temperature
+        observations, observation error std, assimilated TB proxies, finite
+        coverage, and bounded channel-11 coverage.
         """
         batch_size, channels = x.shape[0], x.shape[1]
-        diagnostics = []
+        if channels != 12:
+            raise ValueError(
+                "RobustInputSideDAPromptEncoder expects 12 input channels, "
+                f"got {channels}"
+            )
         x_flat = x.reshape(batch_size, channels, -1)
-        neutral = x.new_zeros(batch_size)
+        rows = []
 
-        for channel_idx in range(channels):
-            if channel_idx == 11:
-                diagnostics.append(neutral)
-                diagnostics.append(neutral)
-                continue
+        for sample_idx in range(batch_size):
+            sample = x_flat[sample_idx]
+            features = []
 
-            channel = x_flat[:, channel_idx, :]
-            finite = torch.isfinite(channel)
-            medians = []
-            iqrs = []
-            for sample_idx in range(batch_size):
-                values = channel[sample_idx][finite[sample_idx]]
-                if values.numel() == 0:
-                    medians.append(channel.new_tensor(0.0))
-                    iqrs.append(channel.new_tensor(0.0))
-                    continue
-                values = values.float()
-                quantiles = torch.quantile(values, values.new_tensor([0.25, 0.5, 0.75]))
-                medians.append(quantiles[1].to(channel.dtype))
-                iqrs.append((quantiles[2] - quantiles[0]).to(channel.dtype))
+            for channel_idx in (0, 1, 2, 3, 4):
+                median, iqr = self._median_iqr(sample[channel_idx])
+                features.extend([median, iqr])
 
-            diagnostics.append(torch.stack(medians))
-            diagnostics.append(torch.stack(iqrs))
+            tb_h_innovation = sample[5] - sample[9]
+            tb_v_innovation = sample[6] - sample[10]
+            tb_obs_hv_contrast = sample[6] - sample[5]
+            tb_assim_hv_contrast = sample[10] - sample[9]
 
-        return torch.stack(diagnostics, dim=1)
+            for diagnostic in (
+                tb_h_innovation,
+                tb_v_innovation,
+                tb_obs_hv_contrast,
+                tb_assim_hv_contrast,
+            ):
+                median, iqr = self._median_iqr(diagnostic)
+                features.extend([median, iqr])
+
+            h_error_conf = self._confidence_from_error_std(sample[7])
+            v_error_conf = self._confidence_from_error_std(sample[8])
+            h_norm_abs_innov = self._median(tb_h_innovation.abs() / (1.0 + sample[7].abs().clamp_min(0.0)))
+            v_norm_abs_innov = self._median(tb_v_innovation.abs() / (1.0 + sample[8].abs().clamp_min(0.0)))
+            finite_coverage = self._finite_coverage(sample)
+            base_valid_fraction = self._base_valid_fraction(sample[11])
+
+            features.extend(
+                [
+                    h_error_conf,
+                    v_error_conf,
+                    h_norm_abs_innov,
+                    v_norm_abs_innov,
+                    finite_coverage,
+                    base_valid_fraction,
+                ]
+            )
+            rows.append(torch.stack(features))
+
+        diagnostics = torch.stack(rows, dim=0)
+        if diagnostics.shape[1] != len(self.diagnostic_schema):
+            raise RuntimeError(
+                "DA diagnostic feature count mismatch: "
+                f"got {diagnostics.shape[1]}, expected {len(self.diagnostic_schema)}"
+            )
+        return torch.nan_to_num(diagnostics, nan=0.0, posinf=0.0, neginf=0.0)

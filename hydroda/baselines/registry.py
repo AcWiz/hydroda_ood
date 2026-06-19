@@ -13,8 +13,8 @@ PAPER_MAIN_BASELINES = {
         "prompt_conditioned_shared_backbone",
         "source_regime_specialist_bank",
         "hyperda_zero_shot_context",
-        "hyperda_few_shot_k4",
-        "hyperda_few_shot_k12",
+        "hyperda_safe_few_shot_k4",
+        "hyperda_safe_few_shot_k12",
     ],
 }
 
@@ -44,6 +44,8 @@ INTERNAL_SANITY_ONLY = {
     "knn_parameter_interpolation",
     "linear_prompt_to_parameter",
     "hyperda_basis_adapter_shared",
+    "hyperda_few_shot_k4",
+    "hyperda_few_shot_k12",
     # Deprecated names retained in old artifacts/scripts.
     "hyperda_basis_adapter",
     "target_support_mean_increment",
