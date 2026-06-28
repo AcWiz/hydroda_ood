@@ -2,8 +2,9 @@
 
 ## 1. Baseline-first 原则
 
-在 Forecast-only、source-only、prompt-conditioned shared 和 HyperDA K=0/4/12
-没有在同一 V4.4 zero/few-shot split 上跑通前，不要声称 HyperDA 有主表优势。
+在 Forecast-only、source-only、prompt-conditioned shared、HyperDA K=0 和
+HyperDA-TRUST K=0 没有在同一 V4.4 zero/few-shot split 上跑通前，不要声称
+HyperDA 有主表优势。
 mean increment、monthly mean、ridge 和 full-target/adapter/LoRA 结果保留为
 internal sanity 或 appendix ablation。
 
@@ -67,9 +68,8 @@ forecast_only
 source_pooled_global_backbone  # paper-facing role: Source-only backbone
 prompt_conditioned_shared_backbone
 source_regime_specialist_bank  # final cross-continent same-regime specialist bank
-HyperDA_K0_zero_shot_context
-HyperDA_K4_lightweight_target_adaptation
-HyperDA_K12_lightweight_target_adaptation
+HyperDA_Operator_Generator_K0_zero_shot_context
+HyperDA_TRUST_K0_source_manifold_trust_routing
 ```
 
 `source_pooled_global_backbone` trains only source domains on 2015-2021 and
@@ -103,7 +103,7 @@ Sformer 只能接入我们的 dataset/split/metric，不能沿用合作方 split
 
 ---
 
-## 4. Phase 5 HyperDA zero/few-shot target generalization
+## 4. Phase 5 HyperDA zero-shot target generalization
 
 HyperDA 定义：
 
@@ -125,20 +125,21 @@ time coverage statistics
 optional static covariates
 ```
 
-主协议：
+主协议当前主结果：
 
 ```text
 K=0: target-context monthly prompt prototypes from input-side context only, no target labels.
-K=4/12: fixed K labeled target_support cycles, fixed preregistered steps,
-        no target_val early stopping or selection.
+HyperDA-TRUST K=0: source-only trust bank routes target coefficients toward
+                  nearest source-neighborhood consensus, no target labels.
 ```
 
-短期 few-shot adaptation 默认使用 source-anchor recipe：先在 support 上优化轻量
-target-specific variables，再保存固定
+SAFE K=4/12 保留为 diagnostic / frozen future extension。若运行，默认使用
+source-anchor recipe：先在 support 上优化轻量 target-specific variables，再保存固定
 `theta_init + alpha * (theta_adapt - theta_init)` 候选，不用 target_val 或
 target_eval 选择 alpha。当前保守默认值为 K4 `steps=100, lr=1e-3, alpha=0.75`，
 K12 `steps=80, lr=3e-4, alpha=0.25`；这些超参只允许来自 source-side episodic
-validation / preregistration，并必须写入 metadata。
+validation / preregistration，并必须写入 metadata。当前 K-shot 结果若为
+`rejected_to_k0_anchor`，只能解释为 K0-equivalent fallback。
 
 Legacy/internal reproduction：
 

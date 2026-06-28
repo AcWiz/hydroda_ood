@@ -18,6 +18,29 @@ ABLATION_ORDER = (
     "M2_1_rank_gated_dora_stable",
     "M2_2_source_saliency_prior",
     "M2_3_source_safe_residual_hyperda",
+    "M2_5a_da_aware_prompt_only",
+    "M2_5b_da_aware_conservative_router",
+    "M2_6_source_manifold_guarded_prior",
+    "M3_0_hyperda_trust_light",
+    "M3_1_hyperda_trust_medium",
+    "M3_1a_trust_medium_dualalpha",
+    "M3_1b_trust_mid_high",
+    "M3_1c_trust_medium_local",
+    "M3_1d_trust_medium_broad",
+    "M3_2_hyperda_trust_raw_reliability",
+    "M3_2_phys_trust_raw_da_query",
+    "M3_5_phys_agreement_guarded_trust",
+    "M3_5b_phys_agreement_floor_guard",
+    "M3_8_phys_formula_operator_trust",
+    "M3_8b_phys_formula_light_guarded_trust",
+    "M3_8c_phys_formula_light_operator_only_trust",
+    "M3_9_phys_formula_enhanced_trust",
+    "M3_12_phys_gain_basis_hypertrust",
+    "M3_13_phys_gain_guarded_hypertrust",
+    "M3_14_source_trained_phys_formula_gain_hypertrust",
+    "M3_15_m31_anchored_source_safe_phys_coeff_delta",
+    "M3_16_source_only_phys_m3trust_lite",
+    "M3_3_hyperda_trust_selection_only",
     "M3_film_only",
     "M4_adapter_only",
 )
@@ -48,6 +71,9 @@ FIELDNAMES = [
     "hyper_residual_magnitude_penalty",
     "hyper_coeff_entropy_floor",
     "hyper_coeff_entropy_penalty",
+    "hyper_phys_gain_basis_residual",
+    "phys_gain_source_bank_hash",
+    "phys_gain_basis_residual_abs_mean",
     "target_labels_used_for_adaptation",
     "target_eval_input_stats_used_for_update",
     "hyper_enable_film",
@@ -133,6 +159,8 @@ def _row_from_summary(
         raise ValueError(f"summary.json is not an object: {summary_path}")
     run_dir = _run_dir_for_summary(summary_path)
     checkpoint = _best_checkpoint_for_run(run_dir)
+    phys_gain_summary = payload.get("phys_gain_basis_summary") or {}
+    phys_gain_bank = payload.get("phys_gain_source_bank_summary") or {}
     return {
         "rank_by_best_selection_value": "",
         "ablation_id": ablation_id,
@@ -166,6 +194,13 @@ def _row_from_summary(
         "hyper_residual_magnitude_penalty": _format_value(payload.get("hyper_residual_magnitude_penalty")),
         "hyper_coeff_entropy_floor": _format_value(payload.get("hyper_coeff_entropy_floor")),
         "hyper_coeff_entropy_penalty": _format_value(payload.get("hyper_coeff_entropy_penalty")),
+        "hyper_phys_gain_basis_residual": _format_value(payload.get("hyper_phys_gain_basis_residual")),
+        "phys_gain_source_bank_hash": str(
+            phys_gain_bank.get("source_gain_bank_hash")
+            or phys_gain_summary.get("source_gain_bank_hash")
+            or ""
+        ),
+        "phys_gain_basis_residual_abs_mean": _format_value(phys_gain_summary.get("residual_abs_mean")),
         "target_labels_used_for_adaptation": _format_value(payload.get("target_labels_used_for_adaptation")),
         "target_eval_input_stats_used_for_update": _format_value(
             payload.get("target_eval_input_stats_used_for_update")

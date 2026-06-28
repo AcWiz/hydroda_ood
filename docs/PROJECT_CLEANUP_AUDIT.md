@@ -3,7 +3,7 @@
 Date: 2026-05-28
 
 This audit records the medium cleanup policy for HydroDA-OOD after the protocol
-migration to V4.4 zero/few-shot target generalization and HyperDA-SAFE.
+migration to V4.4 zero-shot target generalization and HyperDA-TRUST.
 
 ## Active Research Contract
 
@@ -20,12 +20,13 @@ target_val: unused in main protocol
 target_eval: 2023-2025
 ```
 
-The only active paper-facing protocol surface is V4.4 zero/few-shot plus
-HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement. Any document,
+The active paper-facing protocol surface is V4.4 zero-shot HyperDA-TRUST:
+HyperDA Operator Generator plus Source-Manifold Trust Routing. SAFE
+K=4/K=12 is a diagnostic / frozen future extension. Any document,
 script, test, or report that treats HyRAO, K-date selection,
 `target_full_train`, target_val-based target selection, phase6 residual ridge /
-BORA adapters, or phase7 APO as the main protocol is historical, legacy, or
-retired failed exploration.
+BORA adapters, phase7 APO, or accepted SAFE K-shot gains as the main protocol is
+historical, legacy, diagnostic, or retired failed exploration.
 
 ## File Classes
 

@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from hydroda.baselines.forecast import ForecastBaseline
 from hydroda.evaluation.harness import (
@@ -134,6 +135,109 @@ def test_evaluate_split_can_return_prediction_hashes():
     )
     assert len(repeat_rows) == len(rows)
     assert repeat_hashes == hashes
+
+
+def test_evaluate_split_exposes_stage3_raw_post_gate_and_final_mix_hashes():
+    class ConstantPredictor:
+        def __init__(self, value):
+            self.value = float(value)
+
+        def predict(self, sample):
+            pred_s = np.ones((2, 2), dtype=np.float32) * self.value
+            pred_r = np.ones((2, 2), dtype=np.float32) * (self.value + 1.0)
+            return {
+                "pred_increment_surface": pred_s,
+                "pred_increment_rootzone": pred_r,
+                "pred_analysis_surface": sample["forecast_surface"] + pred_s,
+                "pred_analysis_rootzone": sample["forecast_rootzone"] + pred_r,
+            }
+
+    rows, hashes = evaluate_split(
+        TinyDataset(),
+        ConstantPredictor(3.0),
+        split_role="target_eval",
+        experiment_id="tiny",
+        protocol_freeze_id="test",
+        method="hyperda_safe_few_shot_k4",
+        return_hashes=True,
+        zero_shot_predictor=ConstantPredictor(1.0),
+        adapt_mix_rho=0.0,
+    )
+
+    assert rows
+    assert hashes["raw_adapted_prediction_content_hash"]
+    assert hashes["post_gate_prediction_content_hash"] == hashes["raw_adapted_prediction_content_hash"]
+    assert hashes["final_mixed_prediction_content_hash"] == hashes["zero_shot_prediction_content_hash"]
+    assert hashes["prediction_content_hash"] == hashes["final_mixed_prediction_content_hash"]
+    assert hashes["raw_to_k0_mean_abs_delta"] > 0.0
+    assert hashes["post_gate_to_k0_mean_abs_delta"] == pytest.approx(hashes["raw_to_k0_mean_abs_delta"])
+    assert hashes["final_mix_to_k0_mean_abs_delta"] == pytest.approx(0.0)
+
+
+def test_evaluate_split_can_hash_raw_adapted_distinct_from_post_gate_rollback():
+    class ConstantPredictor:
+        def __init__(self, value):
+            self.value = float(value)
+
+        def predict(self, sample):
+            pred_s = np.ones((2, 2), dtype=np.float32) * self.value
+            pred_r = np.ones((2, 2), dtype=np.float32) * self.value
+            return {
+                "pred_increment_surface": pred_s,
+                "pred_increment_rootzone": pred_r,
+                "pred_analysis_surface": sample["forecast_surface"] + pred_s,
+                "pred_analysis_rootzone": sample["forecast_rootzone"] + pred_r,
+            }
+
+    _, hashes = evaluate_split(
+        TinyDataset(),
+        ConstantPredictor(1.0),
+        split_role="target_eval",
+        experiment_id="tiny",
+        protocol_freeze_id="test",
+        method="hyperda_diagnostic_few_shot_k4",
+        return_hashes=True,
+        zero_shot_predictor=ConstantPredictor(1.0),
+        raw_adapted_predictor=ConstantPredictor(3.0),
+        adapt_mix_rho=0.0,
+    )
+
+    assert hashes["final_mixed_prediction_content_hash"] == hashes["zero_shot_prediction_content_hash"]
+    assert hashes["raw_adapted_prediction_content_hash"] != hashes["post_gate_prediction_content_hash"]
+    assert hashes["raw_to_k0_mean_abs_delta"] > 0.0
+    assert hashes["post_gate_to_k0_mean_abs_delta"] == pytest.approx(0.0)
+    assert hashes["final_mix_to_k0_mean_abs_delta"] == pytest.approx(0.0)
+
+
+def test_evaluate_split_reports_prediction_delta_vs_no_tta_comparator():
+    class ConstantPredictor:
+        def __init__(self, value):
+            self.value = float(value)
+
+        def predict(self, sample):
+            pred_s = np.ones((2, 2), dtype=np.float32) * self.value
+            pred_r = np.ones((2, 2), dtype=np.float32) * (self.value + 1.0)
+            return {
+                "pred_increment_surface": pred_s,
+                "pred_increment_rootzone": pred_r,
+                "pred_analysis_surface": sample["forecast_surface"] + pred_s,
+                "pred_analysis_rootzone": sample["forecast_rootzone"] + pred_r,
+            }
+
+    _, hashes = evaluate_split(
+        TinyDataset(),
+        ConstantPredictor(3.0),
+        split_role="target_eval",
+        experiment_id="tiny",
+        protocol_freeze_id="test",
+        method="hyperda_zero_shot_context",
+        return_hashes=True,
+        no_tta_predictor=ConstantPredictor(1.0),
+    )
+
+    assert hashes["no_tta_prediction_content_hash"]
+    assert hashes["prediction_delta_vs_no_tta"] == pytest.approx(2.0)
+    assert hashes["prediction_max_abs_delta_vs_no_tta"] == pytest.approx(2.0)
 
 
 def test_evaluate_split_can_persist_source_safe_prediction_records(tmp_path):

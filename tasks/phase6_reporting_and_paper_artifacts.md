@@ -1,10 +1,11 @@
-# Phase 6/7/8 — HyperDA zero/few-shot adaptation 与论文产物
+# Phase 6/7/8 — HyperDA-TRUST zero-shot 与论文产物
 
 ## 目标
 
-实现 HyperDA zero/few-shot generation/adaptation，并在 K=0/4/12 标签预算下公平比较。
-目标阶段只训练轻量 target-specific prompt / adapter coefficient residuals / monthly
-residual gain；2022 target_val 主协议不使用，2023-2025 target_eval 只用于最终评估。
+实现 HyperDA K=0 operator generation 与 HyperDA-TRUST K=0 trust routing，并与
+forecast/source-only/prompt-conditioned baseline 公平比较。SAFE K=4/K=12 保留为
+diagnostic / future extension；当前若为 `rejected_to_k0_anchor`，必须报告为
+K0-equivalent fallback，不是 accepted few-shot adaptation。2022 target_val 主协议不使用，2023-2025 target_eval 只用于最终评估。
 full-target 结果只作为 legacy/internal reproduction。随后生成 US-only
 development report 和最终 LOCO paper artifacts。
 
@@ -33,24 +34,25 @@ HyperDA-ZeroShot-Context:
   prompt = target-context monthly prompt prototypes from 2015-2021 input-side context
   labels = none
 
-HyperDA-FewShot-K4/K12:
-  initialize zeta_R = H_psi(P_R)
-  freeze theta0, H_psi, adapter basis bank
-  train target_prompt, adapter coefficient residuals, monthly residual gain
-  use fixed preregistered steps, no target_val early stopping
+HyperDA-TRUST-K0:
+  source-only trust bank + nearest-source coefficient consensus
+  route target-prompt operator coefficients without target labels
+
+SAFE-FewShot-K4/K12 diagnostic:
+  report only with stage3_posterior_decision
+  rejected_to_k0_anchor means K0-equivalent fallback
 ```
 
 ## 主比较
 
-zero/few-shot main：
+zero-shot main：
 
 ```text
 Forecast-only
 Source-only backbone
 Prompt-conditioned shared backbone
-HyperDA K=0
-HyperDA K=4
-HyperDA K=12
+HyperDA Operator Generator K=0
+HyperDA-TRUST K=0
 ```
 
 ## 报告要求
@@ -71,9 +73,9 @@ seed mean ± std / CI
 ## 验收标准
 
 ```text
-1. HyperDA K=0 不使用 target labels；K=4/12 只使用 K 个 target_support cycles。
+1. HyperDA K=0 / HyperDA-TRUST K=0 不使用 target labels；K=4/12 SAFE 只作为 diagnostic / future extension。
 2. 2023-2025 target_eval labels 只用于最终评估。
-3. HyperDA-Adapt / Refine 不更新 θ0、Hψ 或 adapter basis bank。
+3. SAFE diagnostic rows expose `stage3_posterior_decision`; `rejected_to_k0_anchor` 不写成 few-shot gain。
 4. adapter / LoRA ablation 使用相同 target_support dates、steps、seed、normalization。
 5. 所有表格能从 metrics_long.csv 自动生成。
 ```

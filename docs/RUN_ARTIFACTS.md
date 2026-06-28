@@ -55,7 +55,7 @@ Components:
 
 ## Artifact Checklist
 
-For each completed V4.4 zero/few-shot or HyperDA-SAFE run, verify:
+For each completed V4.4 zero-shot HyperDA-TRUST run or SAFE diagnostic run, verify:
 - [ ] `config.yaml` — all parameters recorded
 - [ ] `git_info.json` — git hash recorded (reproducibility)
 - [ ] `protocol.json` — protocol_freeze_id matches experiment
@@ -66,8 +66,9 @@ For each completed V4.4 zero/few-shot or HyperDA-SAFE run, verify:
 - [ ] `reports/summary.json` or `overview.json` — compact provenance and metrics present
 - [ ] `reports/summary.json` — leakage_guard_status = "pass"
 - [ ] `protocol.json` / metadata — `target_val_usage = unused_in_main_protocol`
-- [ ] HyperDA-SAFE K=4/K=12 — `safe_policy.json` provenance and policy hash present
-- [ ] HyperDA-SAFE K=4/K=12 — target_eval was final-only and not used for selection
+- [ ] SAFE K=4/K=12 diagnostics — `safe_policy.json` provenance and policy hash present
+- [ ] SAFE K=4/K=12 diagnostics — `stage3_posterior_decision` is reported; `rejected_to_k0_anchor` rows are treated as K0-equivalent fallback
+- [ ] SAFE K=4/K=12 diagnostics — target_eval was final-only and not used for selection
 
 `metrics_long.csv` is a local regenerable payload when compact summaries,
 metadata, config, and protocol files are present. It may be removed during
@@ -111,7 +112,7 @@ Each checkpoint (best.pt, last.pt) contains:
 - `epoch`, `loss`, `best_loss` or source-val selection metric
 - `experiment_id`, `protocol_freeze_id`, `split_manifest_path`
 - `adaptation_setting`, `K`, `model_selection_source`
-- HyperDA-SAFE K-shot metadata such as `safe_policy_json_sha256`,
+- SAFE K-shot diagnostic metadata such as `safe_policy_json_sha256`,
   `policy_source`, `anchor_alpha`, and `adapt_mix_rho`
 - `git_hash`, `timestamp`
 - `model_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`

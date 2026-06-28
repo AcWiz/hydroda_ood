@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
+import pytest
 import torch
 
 from hydroda.models.conditional_unet import FiLMConditionalResUNet
@@ -1303,6 +1304,109 @@ def test_source_context_prototype_cache_key_changes_with_normalization_and_promp
     assert trainer_c.source_prototype_cache_hit is False
 
 
+def test_source_context_prototype_cache_key_changes_for_raw_trust_query_requirement(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    cache_dir = tmp_path / "cache"
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=16)
+
+    trainer_prompt = PromptConditionedTrainer(
+        model=FiLMConditionalResUNet(in_channels=12, out_channels=2, width=8, prompt_dim=16),
+        prompt_encoder=prompt_encoder,
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "run_prompt"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        source_prototype_cache_dir=str(cache_dir),
+        source_prototype_cache_mode="read_write",
+        source_trust_query_mode="prompt_embedding",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    raw_prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=16)
+    raw_prompt_encoder.load_state_dict(prompt_encoder.state_dict())
+    trainer_raw = PromptConditionedTrainer(
+        model=FiLMConditionalResUNet(in_channels=12, out_channels=2, width=8, prompt_dim=16),
+        prompt_encoder=raw_prompt_encoder,
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "run_raw"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        source_prototype_cache_dir=str(cache_dir),
+        source_prototype_cache_mode="read_write",
+        source_trust_query_mode="raw_input_side_da_diagnostics",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+
+    assert trainer_prompt.source_prototype_cache_path != trainer_raw.source_prototype_cache_path
+    assert trainer_prompt.source_prototype_cache_metadata["raw_trust_query_required"] is False
+    assert trainer_raw.source_prototype_cache_metadata["raw_trust_query_required"] is True
+
+
+def test_raw_trust_query_mode_rejects_stale_source_prototype_cache_without_raw_query(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    trainer = PromptConditionedTrainer(
+        model=HyperAdapterConditionalResUNet(
+            in_channels=12,
+            out_channels=2,
+            width=4,
+            prompt_dim=8,
+            hyper_n_basis=2,
+            hyper_adapter_bottleneck=4,
+            hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+            hyper_rank_gate_top_k=2,
+            hyper_source_trust_routing=True,
+            hyper_source_trust_strength=0.25,
+            hyper_source_trust_top_m=2,
+        ),
+        prompt_encoder=RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8),
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "run"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.25,
+        hyper_source_trust_top_m=2,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        source_prototype_cache_mode="off",
+        source_trust_query_mode="raw_input_side_da_diagnostics",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    stale_cache = dict(trainer._source_context_monthly_prototypes)
+    stale_cache.pop("monthly_raw_trust_query_input_emb")
+    trainer._source_context_monthly_prototypes = stale_cache
+
+    with pytest.raises(ValueError, match="raw_input_side_da_diagnostics.*monthly_raw_trust_query_input_emb"):
+        trainer._build_source_trust_bank_state()
+
+
 def test_source_context_prototype_summary_has_nonzero_counts_for_all_source_regions(tmp_path):
     train_dataset = TwoRegionRhoDataset(H=8, W=8)
     trainer = PromptConditionedTrainer(
@@ -1328,6 +1432,772 @@ def test_source_context_prototype_summary_has_nonzero_counts_for_all_source_regi
     summary = trainer._source_context_monthly_prototype_summary()
     assert summary["region_counts"] == [1, 1]
     assert all(count > 0 for count in summary["region_counts"])
+
+
+def test_phys_agreement_guard_trainer_uses_prompt_routing_and_raw_guard_query(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    trainer = PromptConditionedTrainer(
+        model=HyperAdapterConditionalResUNet(
+            in_channels=12,
+            out_channels=2,
+            width=4,
+            prompt_dim=8,
+            hyper_n_basis=2,
+            hyper_adapter_bottleneck=4,
+            hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+            hyper_rank_gate_top_k=2,
+            hyper_source_trust_routing=True,
+            hyper_source_trust_strength=0.5,
+            hyper_source_trust_top_m=2,
+            hyper_phys_agreement_guard=True,
+        ),
+        prompt_encoder=RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8),
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "run"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        source_prototype_cache_mode="off",
+        source_trust_query_mode="raw_input_side_da_diagnostics",
+        hyper_phys_agreement_guard=True,
+        hyper_phys_agreement_guard_strength=1.0,
+        hyper_phys_agreement_guard_min_multiplier=0.8,
+        hyper_phys_agreement_guard_risk_rule="and",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    x = torch.as_tensor(train_dataset[0]["x"]).unsqueeze(0)
+    x_norm = trainer._normalize(x)
+    region_ids = torch.tensor([0], dtype=torch.long)
+    months = torch.tensor([1], dtype=torch.long)
+
+    z, reliability_features, source_trust_query, z_phys = trainer._source_stage_prompt_and_reliability(
+        x_norm,
+        region_ids,
+        months,
+        x_raw=x,
+    )
+
+    assert source_trust_query is not None
+    assert z_phys is None
+    assert reliability_features is None
+    assert trainer._source_trust_bank_state["source_trust_query_mode"] == "raw_input_side_da_diagnostics"
+    assert "prompt_distance_quantiles" in trainer._source_trust_bank_state
+    assert "source_trust_query_distance_quantiles" in trainer._source_trust_bank_state
+    assert trainer._source_trust_bank_state["distance_quantiles"] == trainer._source_trust_bank_state[
+        "source_trust_query_distance_quantiles"
+    ]
+    assert trainer.model.last_phys_agreement_guard_query_source == "raw_input_side_da_diagnostics"
+    assert trainer.model.last_phys_agreement_guard_query is source_trust_query
+    assert not torch.allclose(z, source_trust_query)
+    summary = trainer._resolved_config_metadata()["phys_agreement_guard_summary"]
+    assert summary["enabled"] is True
+    assert summary["trust_routing_geometry"] == "prompt_embedding"
+    assert summary["phys_query_usage"] == "guard_only_not_neighbor_geometry"
+    assert summary["source"] == "x_x_raw_month_region_mask_only"
+    assert summary["target_eval_usage"] == "final_eval_only_no_selection"
+    assert summary["guard_strength"] == pytest.approx(1.0)
+    assert summary["min_multiplier"] == pytest.approx(0.8)
+    assert summary["risk_rule"] == "and"
+
+
+def test_phys_context_only_scope_trains_only_operator_residual_branch():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_variable_gate=True,
+        hyper_phys_context_modulation=True,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+
+    metadata = train_pc.apply_trainable_scope(
+        model=model,
+        prompt_encoder=prompt_encoder,
+        trainable_scope="phys_context_only",
+    )
+    trainable = metadata["trainable_parameter_names"]
+
+    assert trainable
+    assert all(name.startswith("model.phys_operator_residual.") for name in trainable)
+    assert not any(name.startswith("prompt_encoder.") for name in trainable)
+    assert not any(name.startswith("model.shared_coeff_generator.") for name in trainable)
+    assert not any(name.startswith("model.reliability_gate.") for name in trainable)
+    assert metadata["trainable_scope"] == "phys_context_only"
+
+
+def test_phys_formula_context_only_scope_trains_formula_encoder_and_operator_residual():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_variable_gate=True,
+        hyper_phys_context_modulation=True,
+        phys_context_source="raw_input_side_formula_v2",
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+
+    metadata = train_pc.apply_trainable_scope(
+        model=model,
+        prompt_encoder=prompt_encoder,
+        trainable_scope="phys_formula_context_only",
+    )
+    trainable = metadata["trainable_parameter_names"]
+
+    assert trainable
+    assert any(name.startswith("model.phys_operator_residual.") for name in trainable)
+    assert any(name.startswith("model.formula_phys_context_encoder.") for name in trainable)
+    assert all(
+        name.startswith("model.phys_operator_residual.")
+        or name.startswith("model.formula_phys_context_encoder.")
+        for name in trainable
+    )
+    assert not any(name.startswith("prompt_encoder.") for name in trainable)
+    assert not any(name.startswith("model.shared_coeff_generator.") for name in trainable)
+    assert metadata["trainable_scope"] == "phys_formula_context_only"
+
+
+def test_phys_token_trainer_builds_raw_token_without_raw_trust_neighbor_geometry(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    trainer = PromptConditionedTrainer(
+        model=HyperAdapterConditionalResUNet(
+            in_channels=12,
+            out_channels=2,
+            width=4,
+            prompt_dim=8,
+            hyper_n_basis=2,
+            hyper_adapter_bottleneck=4,
+            hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+            hyper_rank_gate_top_k=2,
+            hyper_source_trust_routing=True,
+            hyper_source_trust_strength=0.5,
+            hyper_source_trust_top_m=2,
+            hyper_phys_context_modulation=True,
+        ),
+        prompt_encoder=RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8),
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "run"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        source_prototype_cache_mode="off",
+        source_trust_query_mode="prompt_embedding",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.25,
+        hyper_phys_gate_init=0.90,
+        hyper_operator_droppath_p=0.10,
+        trainable_scope="phys_context_only",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    x = torch.as_tensor(train_dataset[0]["x"]).unsqueeze(0)
+    x_norm = trainer._normalize(x)
+    region_ids = torch.tensor([0], dtype=torch.long)
+    months = torch.tensor([1], dtype=torch.long)
+
+    z, reliability_features, source_trust_query, z_phys = trainer._source_stage_prompt_and_reliability(
+        x_norm,
+        region_ids,
+        months,
+        x_raw=x,
+    )
+
+    assert reliability_features is None
+    assert source_trust_query is None
+    assert z_phys is not None
+    assert z_phys.shape == z.shape
+    assert not torch.allclose(z, z_phys)
+    assert trainer._source_trust_bank_state["source_trust_query_mode"] == "prompt_embedding"
+    assert "source_trust_query_embeddings" not in trainer._source_trust_bank_state
+    summary = trainer._resolved_config_metadata()
+    assert summary["hyper_phys_context_modulation"] is True
+    assert summary["phys_context_source"] == "raw_input_side_da_diagnostics"
+    assert summary["trust_routing_geometry"] == "prompt_embedding"
+    assert summary["source_trust_query_used_as_neighbor_geometry"] is False
+    assert summary["phys_operator_summary"]["target_eval_usage"] == "final_eval_only_no_selection"
+
+
+def test_phys_formula_trainer_builds_formula_token_and_checkpoint_metadata(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.10,
+        hyper_phys_gate_init=0.50,
+        hyper_operator_droppath_p=0.10,
+        phys_context_source="raw_input_side_formula_v2",
+    )
+    trainer = PromptConditionedTrainer(
+        model=model,
+        prompt_encoder=RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8),
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "run"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        source_prototype_cache_mode="off",
+        source_trust_query_mode="prompt_embedding",
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.10,
+        hyper_phys_gate_init=0.50,
+        hyper_operator_droppath_p=0.10,
+        phys_context_source="raw_input_side_formula_v2",
+        hyper_phys_formula_operator=True,
+        hyper_phys_consistency_guard=True,
+        phys_consistency_guard_mode="surface_primary_enkf_rt_vertical_product",
+        phys_consistency_source="raw_input_side_formula_v2",
+        phys_consistency_min_surface=0.97,
+        phys_consistency_min_rootzone=0.98,
+        phys_consistency_strength_surface=0.05,
+        phys_consistency_strength_rootzone=0.02,
+        trainable_scope="phys_formula_context_only",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    x = torch.as_tensor(train_dataset[0]["x"]).unsqueeze(0)
+    x[:, 0] = 0.20
+    x[:, 1] = 0.80
+    x_norm = trainer._normalize(x)
+    region_ids = torch.tensor([0], dtype=torch.long)
+    months = torch.tensor([1], dtype=torch.long)
+    region_mask = torch.ones((1, 8, 8), dtype=torch.bool)
+
+    z, reliability_features, source_trust_query, z_phys = trainer._source_stage_prompt_and_reliability(
+        x_norm,
+        region_ids,
+        months,
+        x_raw=x,
+        region_mask=region_mask,
+    )
+    ckpt_path = tmp_path / "m3_8.pt"
+    trainer.save_checkpoint(ckpt_path, epoch=0, loss=1.0, tag="m3_8")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+    assert reliability_features is not None
+    assert reliability_features.shape == (1, 5)
+    assert source_trust_query is None
+    assert z_phys is not None
+    assert z_phys.shape == z.shape
+    assert trainer._last_phys_formula_feature_summary["enabled"] is True
+    assert trainer._last_phys_formula_feature_summary["feature_schema"][0] == "r_enkf"
+    summary = trainer._resolved_config_metadata()
+    assert summary["hyper_phys_formula_operator"] is True
+    assert summary["phys_formula_source"] == "raw_input_side_formula_v2"
+    assert summary["phys_formula_feature_summary"]["target_eval_usage"] == "final_eval_only_no_selection"
+    assert summary["phys_operator_summary"]["source"] == "x_raw_month_region_mask_formula_features_only"
+    assert summary["phys_consistency_guard_summary"]["guard_action"] == (
+        "surface_primary_product_shrink_or_identity_variable_trust_gate"
+    )
+    trainable = ckpt["config"]["trainable_parameter_names"]
+    assert ckpt["config"]["hyper_phys_formula_operator"] is True
+    assert ckpt["config"]["phys_formula_source"] == "raw_input_side_formula_v2"
+    assert ckpt["config"]["phys_consistency_source"] == "raw_input_side_formula_v2"
+    assert ckpt["config"]["phys_consistency_min_rootzone"] == pytest.approx(0.98)
+    assert ckpt["config"]["phys_formula_feature_summary"]["enabled"] is True
+    assert ckpt["phys_consistency_source_state"]["phys_formula_source"] == "raw_input_side_formula_v2"
+    assert any(name.startswith("model.phys_operator_residual.") for name in trainable)
+    assert any(name.startswith("model.formula_phys_context_encoder.") for name in trainable)
+    assert not any(name.startswith("prompt_encoder.") for name in trainable)
+
+
+def test_phys_formula_operator_summary_keeps_formula_source_after_forward(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    trainer = PromptConditionedTrainer(
+        model=HyperAdapterConditionalResUNet(
+            in_channels=12,
+            out_channels=2,
+            width=4,
+            prompt_dim=8,
+            hyper_n_basis=2,
+            hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+            hyper_rank_gate_top_k=2,
+            hyper_adapter_param_style="dora_like_gain_bounded",
+            hyper_source_trust_routing=True,
+            hyper_source_trust_strength=0.5,
+            hyper_source_trust_top_m=1,
+            hyper_source_trust_variable_gate=True,
+            hyper_phys_context_modulation=True,
+            phys_context_source="raw_input_side_formula_v2",
+            hyper_phys_delta_scale=0.10,
+            hyper_phys_gate_init=0.50,
+            hyper_operator_droppath_p=0.0,
+            zero_shot_prior_form="source_base_residual_reliability_gated",
+        ),
+        prompt_encoder=RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8),
+        train_dataset=train_dataset,
+        source_val_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=1,
+        hyper_source_trust_variable_gate=True,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.10,
+        hyper_phys_gate_init=0.50,
+        hyper_operator_droppath_p=0.0,
+        phys_context_source="raw_input_side_formula_v2",
+        hyper_phys_formula_operator=True,
+        hyper_phys_consistency_guard=True,
+        phys_consistency_guard_mode="surface_primary_enkf_rt_vertical_product",
+        phys_consistency_source="raw_input_side_formula_v2",
+        phys_consistency_min_surface=0.97,
+        phys_consistency_min_rootzone=0.98,
+        phys_consistency_strength_surface=0.05,
+        phys_consistency_strength_rootzone=0.02,
+        trainable_scope="phys_formula_context_only",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    batch = next(iter(trainer._build_dataloader()))
+    x = batch["x"]
+    target = torch.stack([batch["increment_surface"], batch["increment_rootzone"]], dim=1)
+
+    trainer._forward_and_loss(
+        trainer._normalize(x),
+        target,
+        batch["loss_mask"],
+        batch["region_ids"],
+        batch["months"],
+        x_raw=x,
+        region_mask=batch["region_mask"],
+    )
+    summary = trainer._resolved_config_metadata()["phys_operator_summary"]
+
+    assert summary["source"] == "x_raw_month_region_mask_formula_features_only"
+    assert summary["phys_context_source"] == "raw_input_side_formula_v2"
+    assert summary["phys_formula_source"] == "raw_input_side_formula_v2"
+
+
+def test_source_fit_fast_screen_caps_train_batches_and_records_metadata(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=5, H=8, W=8)
+    trainer = PromptConditionedTrainer(
+        model=FiLMConditionalResUNet(in_channels=12, out_channels=2, width=4, prompt_dim=8),
+        prompt_encoder=RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8),
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        train_batch_sampler="random",
+        source_fit_max_batches_per_epoch=2,
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+
+    history = trainer.train(verbose=False)
+
+    assert len(history) == 1
+    assert history[0]["source_fit_batches_seen"] == 2
+    assert history[0]["source_fit_full_batches_per_epoch"] == 5
+    assert history[0]["source_fit_effective_batches_per_epoch"] == 2
+    assert history[0]["source_fit_fast_screen_enabled"] is True
+    assert trainer._resolved_config_metadata()["source_fit_fast_screen_enabled"] is True
+    trainer.save_summary_json()
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["source_fit_max_batches_per_epoch"] == 2
+    assert summary["source_fit_full_batches_per_epoch"] == 5
+    assert summary["source_fit_effective_batches_per_epoch"] == 2
+    assert summary["source_fit_fast_screen_enabled"] is True
+    ckpt = torch.load(tmp_path / "last.pt", map_location="cpu", weights_only=False)
+    assert ckpt["config"]["source_fit_max_batches_per_epoch"] == 2
+    assert ckpt["config"]["source_fit_effective_batches_per_epoch"] == 2
+
+
+def test_phys_consistency_guard_trainer_passes_variable_trust_gate(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    trainer = PromptConditionedTrainer(
+        model=HyperAdapterConditionalResUNet(
+            in_channels=12,
+            out_channels=2,
+            width=4,
+            prompt_dim=8,
+            hyper_n_basis=2,
+            hyper_adapter_bottleneck=4,
+            hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+            hyper_rank_gate_top_k=2,
+            hyper_source_trust_routing=True,
+            hyper_source_trust_strength=0.5,
+            hyper_source_trust_top_m=2,
+            hyper_source_trust_variable_gate=True,
+            zero_shot_prior_form="source_base_residual_reliability_gated",
+        ),
+        prompt_encoder=RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8),
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "run"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        source_trust_query_mode="prompt_embedding",
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_consistency_guard=True,
+        phys_consistency_min_surface=0.95,
+        phys_consistency_min_rootzone=0.90,
+        phys_consistency_strength_surface=0.10,
+        phys_consistency_strength_rootzone=0.15,
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    captured = {}
+    original_forward = trainer.model.forward
+
+    def capture_forward(*args, **kwargs):
+        captured["variable_trust_gate"] = kwargs.get("variable_trust_gate")
+        return original_forward(*args, **kwargs)
+
+    trainer.model.forward = capture_forward
+    x_raw = torch.ones((1, 12, 8, 8), dtype=torch.float32)
+    x_raw[:, 0] = 0.20
+    x_raw[:, 1] = 0.80
+    x_raw[:, 4] = 0.0
+    x_raw[:, 5] = 100.0
+    x_raw[:, 6] = 110.0
+    x_raw[:, 7] = 0.0
+    x_raw[:, 8] = 0.0
+    x_raw[:, 9] = 100.0
+    x_raw[:, 10] = 110.0
+    x_norm = trainer._normalize(x_raw)
+    target = torch.zeros((1, 2, 8, 8), dtype=torch.float32)
+    loss_mask = torch.ones((1, 1, 8, 8), dtype=torch.float32)
+    region_ids = torch.tensor([0], dtype=torch.long)
+    months = torch.tensor([1], dtype=torch.long)
+    region_mask = torch.ones((1, 8, 8), dtype=torch.bool)
+
+    pred, losses = trainer._forward_and_loss(
+        x_norm,
+        target,
+        loss_mask,
+        region_ids,
+        months,
+        x_raw=x_raw,
+        region_mask=region_mask,
+    )
+
+    gate = captured["variable_trust_gate"]
+    assert gate is not None
+    assert gate.shape == (1, 2)
+    assert gate[0, 0].item() == pytest.approx(1.0)
+    assert gate[0, 1].item() == pytest.approx(0.90)
+    assert pred.shape == target.shape
+    assert torch.isfinite(losses["total_loss"])
+    assert trainer._resolved_config_metadata()["phys_consistency_guard_summary"]["enabled"] is True
+    assert trainer.model.last_variable_trust_gate_summary["rootzone"]["mean"] == pytest.approx(0.90)
+
+
+def test_phys_consistency_guard_checkpoint_preserves_config_and_source_state(tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    trainer = PromptConditionedTrainer(
+        model=HyperAdapterConditionalResUNet(
+            in_channels=12,
+            out_channels=2,
+            width=4,
+            prompt_dim=8,
+            hyper_n_basis=2,
+            hyper_adapter_bottleneck=4,
+            hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+            hyper_rank_gate_top_k=2,
+            hyper_source_trust_variable_gate=True,
+            zero_shot_prior_form="source_base_residual_reliability_gated",
+        ),
+        prompt_encoder=RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8),
+        train_dataset=train_dataset,
+        max_epochs=0,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "run"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_consistency_guard=True,
+        trainable_scope="none",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    ckpt_path = tmp_path / "m3_7.pt"
+
+    trainer.save_checkpoint(ckpt_path, epoch=0, loss=1.0, tag="m3_7")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+    assert ckpt["config"]["hyper_phys_consistency_guard"] is True
+    assert ckpt["config"]["phys_consistency_guard_mode"] == "enkf_rt_vertical"
+    assert ckpt["config"]["phys_consistency_source"] == "raw_input_side_formula"
+    assert ckpt["config"]["phys_consistency_min_surface"] == pytest.approx(0.95)
+    assert ckpt["config"]["phys_consistency_min_rootzone"] == pytest.approx(0.90)
+    assert ckpt["config"]["phys_consistency_strength_surface"] == pytest.approx(0.10)
+    assert ckpt["config"]["phys_consistency_strength_rootzone"] == pytest.approx(0.15)
+    assert ckpt["config"]["phys_consistency_guard_summary"]["source_state_summary"]["count"] == 2
+    assert ckpt["phys_consistency_source_state"]["label_usage"] == "none"
+    assert ckpt["phys_consistency_source_state"]["target_eval_usage"] == "final_eval_only_no_selection"
+
+
+def test_phys_context_warm_start_reuses_compatible_source_trust_bank(monkeypatch, tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_phys_context_modulation=True,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    base = PromptConditionedTrainer(
+        model=model,
+        prompt_encoder=prompt_encoder,
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "base"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        hyper_phys_context_modulation=True,
+        trainable_scope="phys_context_only",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    trust_bank = base._source_trust_bank_state
+    assert trust_bank is not None
+
+    def fail_rebuild(self):
+        raise AssertionError("compatible checkpoint trust bank should be reused")
+
+    monkeypatch.setattr(PromptConditionedTrainer, "_build_source_trust_bank_state", fail_rebuild)
+    reused = PromptConditionedTrainer(
+        model=model,
+        prompt_encoder=prompt_encoder,
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "reused"),
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        hyper_phys_context_modulation=True,
+        trainable_scope="phys_context_only",
+        initial_source_trust_bank_state=trust_bank,
+        initial_source_trust_bank_source="unit-test-m3-1-checkpoint.pt",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+
+    assert reused._source_trust_bank_state["trust_bank_hash"] == trust_bank["trust_bank_hash"]
+    assert reused.source_trust_bank_reuse_metadata["reused"] is True
+    assert reused._source_trust_bank_reuse_mismatch_reasons(reused._source_trust_bank_state) == []
+    reused._refresh_source_trust_bank_if_enabled()
+
+
+def test_source_trust_bank_cache_writes_then_reuses_without_checkpoint_state(monkeypatch, tmp_path):
+    train_dataset = ConstantPromptDataset(n_samples=2, H=8, W=8)
+    cache_dir = tmp_path / "trust_cache"
+    kwargs = dict(
+        train_dataset=train_dataset,
+        max_epochs=1,
+        batch_size=1,
+        num_workers=0,
+        device="cpu",
+        source_regions=["US-R1"],
+        global_to_source_lookup={0: 0},
+        use_lat_weighted_loss=False,
+        source_val_residual_gain=False,
+        source_episode_prompt_policy="context_monthly_prototype",
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        source_trust_bank_calibration="source_fit_source_val_only",
+        source_trust_bank_cache_dir=str(cache_dir),
+        source_trust_bank_cache_mode="read_write",
+        _resume_ch_mean=np.zeros(12, dtype=np.float32),
+        _resume_ch_std=np.ones(12, dtype=np.float32),
+    )
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    first = PromptConditionedTrainer(
+        model=model,
+        prompt_encoder=prompt_encoder,
+        checkpoint_dir=str(tmp_path / "first"),
+        **kwargs,
+    )
+    assert first.source_trust_bank_cache_hit is False
+    assert first.source_trust_bank_cache_path
+    assert Path(first.source_trust_bank_cache_path).exists()
+    cached_hash = first._source_trust_bank_state["trust_bank_hash"]
+
+    def fail_rebuild(self):
+        raise AssertionError("source trust bank should load from cache")
+
+    monkeypatch.setattr(PromptConditionedTrainer, "_source_trust_bank_prompt_rows", fail_rebuild)
+    second = PromptConditionedTrainer(
+        model=model,
+        prompt_encoder=prompt_encoder,
+        checkpoint_dir=str(tmp_path / "second"),
+        **kwargs,
+    )
+    assert second.source_trust_bank_cache_hit is True
+    assert second._source_trust_bank_state["trust_bank_hash"] == cached_hash
 
 
 def test_eval_every_epochs_skips_best_source_val_checkpoint_on_non_eval_epochs(monkeypatch, tmp_path):
@@ -1553,6 +2423,207 @@ def _make_prompt_sample(*, split_role: str, target_region_id: str, sample_region
     }
 
 
+def test_prompt_predictor_applies_phys_consistency_variable_gate(tmp_path):
+    from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    ckpt_path = tmp_path / "m3_7_predictor.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "phys_consistency_source_state": {
+                "monthly_vertical_decoupling_quantiles": {
+                    str(month): {"count": 2, "q50": 0.0, "q75": 0.1, "q90": 0.1, "q95": 0.1, "max": 0.1}
+                    for month in range(1, 13)
+                },
+                "global_vertical_decoupling_quantiles": {
+                    "count": 2,
+                    "q50": 0.0,
+                    "q75": 0.1,
+                    "q90": 0.1,
+                    "q95": 0.1,
+                    "max": 0.1,
+                },
+            },
+            "config": {
+                "model_type": "hyperda_basis_adapter",
+                "width": 4,
+                "prompt_dim": 8,
+                "num_regions": 1,
+                "hyper_n_basis": 2,
+                "hyper_adapter_bottleneck": 4,
+                "hyper_source_trust_variable_gate": True,
+                "zero_shot_prior_form": "source_base_residual_reliability_gated",
+                "source_region_global_indices": [0],
+                "hyper_phys_consistency_guard": True,
+                "phys_consistency_guard_mode": "enkf_rt_vertical",
+                "phys_consistency_source": "raw_input_side_formula",
+                "phys_consistency_min_surface": 0.95,
+                "phys_consistency_min_rootzone": 0.90,
+                "phys_consistency_strength_surface": 0.10,
+                "phys_consistency_strength_rootzone": 0.15,
+            },
+        },
+        ckpt_path,
+    )
+    predictor = PromptConditionedBackbonePredictor(
+        checkpoint_path=str(ckpt_path),
+        device="cpu",
+        target_region="US-R1",
+    )
+    sample = _make_prompt_sample(
+        split_role="source_test",
+        target_region_id="US-R1",
+        sample_region_id="US-R1",
+    )
+    sample["x"] = np.zeros((12, 4, 4), dtype=np.float32)
+    sample["x"][0] = 0.20
+    sample["x"][1] = 0.80
+    sample["x"][5] = 100.0
+    sample["x"][6] = 110.0
+    sample["x"][9] = 100.0
+    sample["x"][10] = 110.0
+    sample["forecast_surface"] = np.zeros((4, 4), dtype=np.float32)
+    sample["forecast_rootzone"] = np.zeros((4, 4), dtype=np.float32)
+    sample["region_mask"] = np.ones((4, 4), dtype=np.float32)
+    sample["month"] = 1
+
+    pred = predictor.predict(sample)
+
+    assert pred["pred_increment_surface"].shape == (4, 4)
+    summary = predictor._last_phys_consistency_guard_summary
+    assert summary["enabled"] is True
+    assert summary["rootzone_gate"]["mean"] == pytest.approx(0.90)
+    assert predictor.model.last_variable_trust_gate_summary["rootzone"]["mean"] == pytest.approx(0.90)
+
+
+def test_prompt_predictor_restores_formula_operator_and_product_gate(tmp_path):
+    from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
+
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.10,
+        hyper_phys_gate_init=0.50,
+        hyper_operator_droppath_p=0.10,
+        phys_context_source="raw_input_side_formula_v2",
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    source_state = {
+        "schema_version": "phys_formula_consistency_guard_v1",
+        "mode": "surface_primary_enkf_rt_vertical_product",
+        "source": "source_fit_input_side_raw_formula_v2",
+        "phys_consistency_source": "raw_input_side_formula_v2",
+        "phys_formula_source": "raw_input_side_formula_v2",
+        "label_usage": "none",
+        "target_val_usage": "unused_in_main_protocol",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "monthly_vertical_decoupling_quantiles": {
+            str(month): {"count": 2, "q50": 0.0, "q75": 0.1, "q90": 0.1, "q95": 0.1, "max": 0.1}
+            for month in range(1, 13)
+        },
+        "global_vertical_decoupling_quantiles": {
+            "count": 2,
+            "q50": 0.0,
+            "q75": 0.1,
+            "q90": 0.1,
+            "q95": 0.1,
+            "max": 0.1,
+        },
+    }
+    ckpt_path = tmp_path / "m3_8_predictor.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
+            "phys_consistency_source_state": source_state,
+            "config": {
+                "model_type": "hyperda_basis_adapter",
+                "width": 4,
+                "prompt_dim": 8,
+                "num_regions": 1,
+                "hyper_n_basis": 2,
+                "hyper_adapter_bottleneck": 4,
+                "hyper_source_trust_variable_gate": True,
+                "zero_shot_prior_form": "source_base_residual_reliability_gated",
+                "source_region_global_indices": [0],
+                "hyper_phys_context_modulation": True,
+                "phys_context_source": "raw_input_side_formula_v2",
+                "hyper_phys_formula_operator": True,
+                "phys_formula_mode": "enkf_rt_vertical_temp",
+                "phys_formula_source": "raw_input_side_formula_v2",
+                "hyper_phys_delta_scale": 0.10,
+                "hyper_phys_gate_init": 0.50,
+                "hyper_operator_droppath_p": 0.10,
+                "hyper_phys_consistency_guard": True,
+                "phys_consistency_guard_mode": "surface_primary_enkf_rt_vertical_product",
+                "phys_consistency_source": "raw_input_side_formula_v2",
+                "phys_consistency_min_surface": 0.97,
+                "phys_consistency_min_rootzone": 0.98,
+                "phys_consistency_strength_surface": 0.05,
+                "phys_consistency_strength_rootzone": 0.02,
+            },
+        },
+        ckpt_path,
+    )
+    predictor = PromptConditionedBackbonePredictor(
+        checkpoint_path=str(ckpt_path),
+        device="cpu",
+        target_region="US-R1",
+    )
+    sample = _make_prompt_sample(
+        split_role="source_test",
+        target_region_id="US-R1",
+        sample_region_id="US-R1",
+    )
+    sample["x"] = np.zeros((12, 4, 4), dtype=np.float32)
+    sample["x"][0] = 0.20
+    sample["x"][1] = 0.80
+    sample["x"][5] = 200.0
+    sample["x"][6] = 110.0
+    sample["x"][7] = 1.0
+    sample["x"][8] = 0.0
+    sample["x"][9] = 100.0
+    sample["x"][10] = 110.0
+    sample["x"][11] = 1.0
+    sample["forecast_surface"] = np.zeros((4, 4), dtype=np.float32)
+    sample["forecast_rootzone"] = np.zeros((4, 4), dtype=np.float32)
+    sample["region_mask"] = np.ones((4, 4), dtype=np.float32)
+    sample["month"] = 1
+
+    pred = predictor.predict(sample)
+
+    assert pred["pred_increment_surface"].shape == (4, 4)
+    assert predictor.hyper_phys_formula_operator is True
+    assert predictor.model.formula_phys_context_encoder is not None
+    formula_summary = predictor._last_phys_formula_feature_summary
+    guard_summary = predictor._last_phys_consistency_guard_summary
+    assert formula_summary["enabled"] is True
+    assert formula_summary["phys_formula_source"] == "raw_input_side_formula_v2"
+    assert formula_summary["target_eval_usage"] == "final_eval_only_no_selection"
+    assert guard_summary["mode"] == "surface_primary_enkf_rt_vertical_product"
+    assert guard_summary["rootzone_gate"]["mean"] == pytest.approx(0.98)
+    assert predictor.model.last_variable_trust_gate_summary["rootzone"]["mean"] == pytest.approx(0.98)
+
+
 def test_source_test_prompt_uses_sample_region_compact_prompt_id():
     """Source split inference should use the source sample's prompt, not target fallback."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1727,7 +2798,7 @@ def test_target_context_prompt_state_records_input_side_reliability_features_onl
         "has_monthly_prototype",
         "global_context_count",
         "finite_input_coverage",
-        "prompt_to_source_manifold_distance",
+        "source_manifold_distance_bounded",
     ]
     assert state["metadata"]["reliability_feature_source"] == "input_side_context_summary_only"
     assert state["metadata"]["reliability_feature_transform"] == "bounded_v2"
@@ -1741,6 +2812,567 @@ def test_target_context_prompt_state_records_input_side_reliability_features_onl
     assert features["3"][0] == 0.0
     assert features["3"][1] == 0.0
     assert 0.0 < features["3"][2] <= 1.0
+
+
+def test_context_tta_alignment_state_rejects_target_label_fields():
+    from hydroda.baselines.prompt_conditioned import build_target_context_prompt_state
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+
+    with pytest.raises(ValueError, match="forbidden target label"):
+        build_target_context_prompt_state(
+            samples=[
+                {
+                    "x": np.ones((12, 4, 4), dtype=np.float32),
+                    "month": 1,
+                    "date_str": "2019-01-01",
+                    "increment_surface": np.ones((4, 4), dtype=np.float32),
+                }
+            ],
+            prompt_encoder=prompt_encoder,
+            normalize_x=lambda x: x,
+            target_region_embedding=target_region_embedding,
+            device="cpu",
+            context_tta_mode="prompt_feature_alignment",
+        )
+
+
+def test_context_tta_alignment_hash_changes_with_target_context_inputs():
+    from hydroda.baselines.prompt_conditioned import build_target_context_prompt_state, target_context_prompt_metadata
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+
+    def build(fill_value: float):
+        return build_target_context_prompt_state(
+            samples=[
+                {
+                    "x": np.full((12, 4, 4), fill_value, dtype=np.float32),
+                    "month": 1,
+                    "date_str": "2019-01-01",
+                    "region_mask": np.ones((4, 4), dtype=np.float32),
+                }
+            ],
+            prompt_encoder=prompt_encoder,
+            normalize_x=lambda x: x,
+            target_region_embedding=target_region_embedding,
+            device="cpu",
+            context_hash="same-date-hash",
+            context_tta_mode="prompt_feature_alignment",
+        )
+
+    state_a = build(1.0)
+    state_b = build(2.0)
+    meta_a = target_context_prompt_metadata(state_a)
+
+    assert state_a["context_tta_state"]["mode"] == "prompt_feature_alignment"
+    assert state_a["context_tta_state"]["label_usage"] == "none"
+    assert state_a["context_tta_state_hash"]
+    assert state_a["context_tta_state_hash"] != state_b["context_tta_state_hash"]
+    assert meta_a["context_tta_mode"] == "prompt_feature_alignment"
+    assert meta_a["context_tta_state_hash"] == state_a["context_tta_state_hash"]
+    assert meta_a["context_tta_label_usage"] == "none"
+
+
+def test_prompt_feature_alignment_with_matching_source_stats_records_prompt_delta():
+    from hydroda.baselines.prompt_conditioned import (
+        build_target_context_prompt_state,
+        target_context_prompt_metadata,
+    )
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+    samples = [
+        {
+            "x": np.full((12, 4, 4), 1.0, dtype=np.float32),
+            "month": 1,
+            "date_str": "2019-01-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        },
+        {
+            "x": np.full((12, 4, 4), 2.0, dtype=np.float32),
+            "month": 2,
+            "date_str": "2019-02-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        },
+    ]
+    source_guard_state = {
+        "source": "source_fit_source_val_only",
+        "source_region_month_input_embeddings": torch.stack(
+            [
+                torch.full((16,), 10.0),
+                torch.full((16,), 11.0),
+            ]
+        ),
+        "distance_quantiles": {"q90": 1.0},
+    }
+
+    base = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        context_hash="same-date-hash",
+        context_tta_mode="none",
+    )
+    aligned = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        context_hash="same-date-hash",
+        context_tta_mode="prompt_feature_alignment",
+        source_prompt_manifold_guard_state=source_guard_state,
+    )
+    meta = target_context_prompt_metadata(aligned)
+
+    assert aligned["context_tta_effective"] is True
+    assert aligned["context_tta_source_stat_status"] == "source_fit_source_val_only"
+    assert aligned["prompt_l2_delta_mean"] > 0.0
+    assert aligned["context_tta_state"]["prompt_l2_delta_mean"] == pytest.approx(
+        aligned["prompt_l2_delta_mean"]
+    )
+    assert meta["context_tta_effective"] is True
+    assert meta["prompt_l2_delta_mean"] == pytest.approx(aligned["prompt_l2_delta_mean"])
+    assert not torch.allclose(
+        base["monthly_prototypes"]["1"],
+        aligned["monthly_prototypes"]["1"],
+    )
+
+
+def test_context_prompt_residual_shift_uses_target_context_inputs_and_changes_prompts():
+    from hydroda.baselines.prompt_conditioned import (
+        build_target_context_prompt_state,
+        target_context_prompt_state_without_context_tta,
+        target_context_prompt_metadata,
+    )
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+    samples = [
+        {
+            "x": np.full((12, 4, 4), 1.0, dtype=np.float32),
+            "month": 1,
+            "date_str": "2019-01-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        },
+        {
+            "x": np.full((12, 4, 4), 2.0, dtype=np.float32),
+            "month": 2,
+            "date_str": "2019-02-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        },
+    ]
+    base = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        context_hash="same-date-hash",
+        context_tta_mode="none",
+    )
+    shifted = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        context_hash="same-date-hash",
+        context_tta_mode="context_prompt_residual_shift",
+    )
+    meta = target_context_prompt_metadata(shifted)
+
+    assert shifted["context_tta_mode"] == "context_prompt_residual_shift"
+    assert shifted["context_tta_effective"] is True
+    assert shifted["context_tta_label_usage"] == "none"
+    assert shifted["metadata"]["target_val_usage"] == "unused_in_main_protocol"
+    assert shifted["metadata"]["target_eval_usage"] == "final_eval_only_no_selection"
+    assert shifted["prompt_l2_delta_mean"] > 0.0
+    assert meta["prompt_l2_delta_mean"] == pytest.approx(shifted["prompt_l2_delta_mean"])
+    assert not torch.allclose(
+        base["monthly_prototypes"]["1"],
+        shifted["monthly_prototypes"]["1"],
+    )
+    reconstructed_base = target_context_prompt_state_without_context_tta(shifted)
+    assert reconstructed_base["context_tta_mode"] == "none"
+    assert reconstructed_base["context_tta_effective"] is False
+    assert reconstructed_base["prompt_l2_delta_mean"] == 0.0
+    assert torch.allclose(
+        reconstructed_base["monthly_prototypes"]["1"],
+        base["monthly_prototypes"]["1"],
+        atol=1e-6,
+    )
+
+
+def test_context_prompt_residual_shift_scale_controls_prompt_delta():
+    from hydroda.baselines.prompt_conditioned import build_target_context_prompt_state
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+    samples = [
+        {
+            "x": np.full((12, 4, 4), 1.0, dtype=np.float32),
+            "month": 1,
+            "date_str": "2019-01-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        },
+        {
+            "x": np.full((12, 4, 4), 3.0, dtype=np.float32),
+            "month": 2,
+            "date_str": "2019-02-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        },
+    ]
+
+    weak = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        context_hash="same-date-hash",
+        context_tta_mode="context_prompt_residual_shift",
+        context_tta_residual_scale=0.02,
+    )
+    strong = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        context_hash="same-date-hash",
+        context_tta_mode="context_prompt_residual_shift",
+        context_tta_residual_scale=0.08,
+    )
+
+    assert strong["prompt_l2_delta_mean"] > weak["prompt_l2_delta_mean"]
+    assert strong["context_tta_state"]["residual_scale"] == pytest.approx(0.08)
+    assert weak["context_tta_state"]["label_usage"] == "none"
+
+
+def test_target_context_prompt_state_records_source_manifold_guard_distance():
+    from hydroda.baselines.prompt_conditioned import build_target_context_prompt_state
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+    source_guard_state = {
+        "schema_version": "source_prompt_manifold_guard_state_v1",
+        "source": "source_fit_source_val_only",
+        "calibration_source": "source_fit_source_val_only",
+        "distance_quantiles": {"q90": 1.0},
+        "distance_scale": 1.0,
+        "guard_strength": 0.5,
+        "source_region_month_input_embeddings": torch.zeros(1, 16),
+        "global_input_embedding": torch.zeros(16),
+    }
+    samples = [
+        {
+            "x": np.ones((12, 4, 4), dtype=np.float32),
+            "month": 1,
+            "date_str": "2019-01-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        }
+    ]
+
+    state = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        source_prompt_manifold_guard_state=source_guard_state,
+    )
+
+    assert state["metadata"]["source_manifold_guard_source"] == "source_fit_source_val_only"
+    assert state["metadata"]["source_manifold_guard_calibration_source"] == "source_fit_source_val_only"
+    assert state["source_manifold_distance_schema"]["distance_key"] == "source_manifold_distance_bounded"
+    assert "1" in state["target_context_source_manifold_distance_by_month"]
+    assert state["target_context_source_manifold_distance_by_month"]["1"]["has_monthly_prototype"] == 1
+    assert 0.0 <= state["reliability_features"]["1"][4] <= 1.0
+    assert 0.0 <= state["source_manifold_guard_multiplier_by_month"]["1"] <= 1.0
+
+
+def test_target_context_prompt_state_records_hyperda_trust_bank_metadata():
+    from hydroda.baselines.prompt_conditioned import build_target_context_prompt_state
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+    source_trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.zeros(2, 8),
+        "layer_consensus_logits": {
+            "bottleneck": torch.zeros(2, 3),
+            "dec2": torch.zeros(2, 3),
+            "dec1": torch.zeros(2, 3),
+        },
+        "distance_quantiles": {"q75": 1.0},
+        "trust_bank_hash": "trust-bank-unit-test",
+        "source_neighbor_top_m": 2,
+        "trust_strength": 0.5,
+    }
+    samples = [
+        {
+            "x": np.ones((12, 4, 4), dtype=np.float32),
+            "month": 1,
+            "date_str": "2019-01-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        }
+    ]
+
+    state = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        source_trust_bank_state=source_trust_bank,
+    )
+
+    assert state["metadata"]["hyperda_trust_bank_source"] == "source_fit_source_val_only"
+    assert state["metadata"]["hyperda_trust_bank_label_usage"] == "none"
+    assert state["metadata"]["hyperda_trust_bank_target_eval_usage"] == "final_eval_only_no_selection"
+    assert state["metadata"]["trust_bank_hash"] == "trust-bank-unit-test"
+    assert state["metadata"]["source_neighbor_top_m"] == 2
+    assert state["metadata"]["trust_strength"] == 0.5
+    assert state["hyperda_trust_summary_by_month"]["1"]["has_monthly_prototype"] == 1
+    assert state["hyperda_trust_summary_by_month"]["1"]["source_neighbor_top_m"] == 2
+    assert 0.0 <= state["hyperda_trust_summary_by_month"]["1"]["nearest_distance_bounded"] <= 1.0
+
+
+def test_target_context_prompt_state_records_raw_da_trust_query_without_replacing_main_prompt():
+    from hydroda.baselines.prompt_conditioned import (
+        build_target_context_prompt_state,
+        compose_target_context_prompt_from_state,
+        compose_target_context_source_trust_query_from_state,
+    )
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+    source_trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_trust_query_mode": "raw_input_side_da_diagnostics",
+        "source_prompt_embeddings": torch.zeros(2, 8),
+        "source_trust_query_embeddings": torch.zeros(2, 8),
+        "layer_consensus_logits": {
+            "bottleneck": torch.zeros(2, 3),
+            "dec2": torch.zeros(2, 3),
+            "dec1": torch.zeros(2, 3),
+        },
+        "distance_quantiles": {"q75": 1.0},
+        "source_neighbor_top_m": 2,
+        "trust_strength": 0.25,
+    }
+    samples = [
+        {
+            "x": np.arange(12 * 4 * 4, dtype=np.float32).reshape(12, 4, 4),
+            "month": 1,
+            "date_str": "2019-01-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        }
+    ]
+
+    state = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        context_encoder="current_mean_std",
+        source_trust_bank_state=source_trust_bank,
+    )
+
+    main_prompt = compose_target_context_prompt_from_state(state, 1)
+    trust_query = compose_target_context_source_trust_query_from_state(state, 1)
+
+    assert state["metadata"]["context_encoder"] == "current_mean_std"
+    assert state["metadata"]["source_trust_query_mode"] == "raw_input_side_da_diagnostics"
+    assert state["metadata"]["source_trust_query_input_domain"] == "raw_input_side"
+    assert trust_query is not None
+    assert main_prompt.shape == trust_query.shape
+    assert not torch.allclose(main_prompt, trust_query)
+
+
+def test_target_context_prompt_state_records_phys_token_without_raw_trust_geometry():
+    from hydroda.baselines.prompt_conditioned import (
+        build_target_context_prompt_state,
+        compose_target_context_phys_token_from_state,
+        compose_target_context_prompt_from_state,
+        compose_target_context_source_trust_query_from_state,
+        normalize_target_context_prompt_state,
+    )
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+    source_trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_trust_query_mode": "prompt_embedding",
+        "source_prompt_embeddings": torch.zeros(2, 8),
+        "layer_consensus_logits": {
+            "bottleneck": torch.zeros(2, 3),
+            "dec2": torch.zeros(2, 3),
+            "dec1": torch.zeros(2, 3),
+        },
+        "distance_quantiles": {"q75": 1.0},
+        "source_neighbor_top_m": 2,
+        "trust_strength": 0.5,
+    }
+    samples = [
+        {
+            "x": np.arange(12 * 4 * 4, dtype=np.float32).reshape(12, 4, 4),
+            "month": 1,
+            "date_str": "2019-01-01",
+            "region_mask": np.ones((4, 4), dtype=np.float32),
+        }
+    ]
+
+    state = build_target_context_prompt_state(
+        samples=samples,
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda x: x,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+        context_encoder="current_mean_std",
+        source_trust_bank_state=source_trust_bank,
+    )
+
+    normalized = normalize_target_context_prompt_state(state)
+    main_prompt = compose_target_context_prompt_from_state(state, 1)
+    trust_query = compose_target_context_source_trust_query_from_state(state, 1)
+    phys_token = compose_target_context_phys_token_from_state(state, 1)
+
+    assert state["metadata"]["source_trust_query_mode"] == "prompt_embedding"
+    assert trust_query is None
+    assert phys_token is not None
+    assert phys_token.shape == main_prompt.shape
+    assert not torch.allclose(main_prompt, phys_token)
+    assert normalized["monthly_phys_context_prototypes"]["1"] is not None
+    assert normalized["global_phys_context_prototype"] is not None
+
+
+def test_target_context_prompt_state_includes_phys_trust_d0_summary():
+    from hydroda.baselines.prompt_conditioned import (
+        build_target_context_prompt_state,
+        normalize_target_context_prompt_state,
+        target_context_prompt_metadata,
+    )
+
+    prompt_encoder = RegionPromptEncoder(num_regions=1, input_channels=12, hidden_dim=8)
+    target_region_embedding = prompt_encoder.region_embed(torch.tensor([0])).detach()
+    x = np.zeros((12, 2, 2), dtype=np.float32)
+    x[0] = 0.20
+    x[1] = 0.35
+    x[4] = 0.40
+    x[5] = 10.0
+    x[6] = 20.0
+    x[7] = 2.0
+    x[8] = 4.0
+    x[9] = 8.0
+    x[10] = 18.0
+    x[11] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+
+    state = build_target_context_prompt_state(
+        samples=[
+            {
+                "x": x,
+                "month": 1,
+                "date_str": "2018-01-15",
+                "region_mask": np.ones((2, 2), dtype=np.float32),
+            }
+        ],
+        prompt_encoder=prompt_encoder,
+        normalize_x=lambda tensor: tensor,
+        target_region_embedding=target_region_embedding,
+        device="cpu",
+    )
+
+    phys = state["phys_trust_d0_summary"]
+    jan = phys["monthly"]["1"]
+    assert phys["label_usage"] == "none"
+    assert phys["model_selection_usage"] == "forbidden_diagnostic_only"
+    assert jan["count"] == 1
+    assert jan["tb_h_normalized_innovation_abs_median"] == pytest.approx(2.0 / 3.0)
+    assert jan["tb_v_normalized_innovation_abs_median"] == pytest.approx(2.0 / 5.0)
+    assert jan["base_valid_mask_fraction_diagnostic_only"] == pytest.approx(0.5)
+    assert state["metadata"]["phys_trust_d0_schema_version"] == phys["schema_version"]
+    normalized = normalize_target_context_prompt_state(state)
+    assert normalized["phys_trust_d0_summary"]["schema_version"] == phys["schema_version"]
+    metadata = target_context_prompt_metadata(state)
+    assert metadata["phys_trust_d0_summary"]["schema_version"] == phys["schema_version"]
+
+
+def test_hyperda_trust_bank_refreshes_before_checkpoint_serialization(tmp_path):
+    train_dataset = FakePromptDataset(n_samples=3, H=8, W=8)
+    source_val_dataset = FakePromptDataset(n_samples=2, H=8, W=8)
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=4,
+        prompt_dim=8,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.25,
+        hyper_source_trust_top_m=2,
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=2, input_channels=12, hidden_dim=8)
+    trainer = PromptConditionedTrainer(
+        model=model,
+        prompt_encoder=prompt_encoder,
+        train_dataset=train_dataset,
+        source_val_dataset=source_val_dataset,
+        max_epochs=1,
+        batch_size=2,
+        num_workers=0,
+        device="cpu",
+        checkpoint_dir=tmp_path,
+        source_regions=["US-R1", "US-R2"],
+        global_to_source_lookup={0: 0, 1: 1},
+        model_type="hyperda_basis_adapter",
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=4,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.25,
+        hyper_source_trust_top_m=2,
+        source_trust_bank_calibration="source_fit_source_val_only",
+    )
+    stale_hash = trainer._source_trust_bank_state["model_coefficient_branch_hash"]
+
+    with torch.no_grad():
+        for name, param in trainer.model.named_parameters():
+            if "shared_coeff_generator" in name:
+                param.add_(0.125)
+                break
+        else:
+            raise AssertionError("expected shared coefficient generator parameter")
+
+    ckpt_path = tmp_path / "trust_refresh.pt"
+    trainer.save_checkpoint(ckpt_path, epoch=0, loss=1.0, tag="trust_refresh")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    refreshed = ckpt["source_trust_bank_state"]
+
+    assert refreshed["source"] == "source_fit_source_val_only"
+    assert refreshed["label_usage"] == "none"
+    assert refreshed["target_eval_usage"] == "final_eval_only_no_selection"
+    assert refreshed["model_coefficient_branch_hash"] != stale_hash
+    assert ckpt["config"]["source_trust_bank_summary"]["trust_bank_hash"] == refreshed["trust_bank_hash"]
+    assert ckpt["config"]["trust_bank_hash"] == refreshed["trust_bank_hash"]
 
 
 def test_checkpoint_prompt_state_is_used_for_target_eval_without_eval_input_stats(tmp_path):
@@ -1840,239 +3472,6 @@ def test_prompt_predictor_reports_gain_adjusted_increment_for_reconstruction(tmp
     )
 
 
-def test_stage3_k0_context_shrinkage_blends_hyperda_prediction_to_source_base(tmp_path):
-    from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
-
-    ckpt_path = tmp_path / "hyperda.pt"
-    model = HyperAdapterConditionalResUNet(
-        in_channels=12,
-        out_channels=2,
-        width=4,
-        prompt_dim=8,
-        hyper_n_basis=3,
-        hyper_adapter_bottleneck=2,
-        zero_raw_increment_init=True,
-    )
-    prompt_encoder = RegionPromptEncoder(num_regions=2, input_channels=12, hidden_dim=8)
-    prompt_state = {
-        "schema_version": "target_context_prompt_state_v1",
-        "prompt_source": "target_context_monthly_prompt_prototypes",
-        "label_usage": "none",
-        "context_hash": "ctxhash",
-        "monthly_counts": {str(i): (1 if i == 6 else 0) for i in range(1, 13)},
-        "reliability_feature_schema": [
-            "monthly_count",
-            "has_monthly_prototype",
-            "global_context_count",
-            "finite_input_coverage",
-            "prompt_to_source_manifold_distance",
-        ],
-        "reliability_features": {
-            str(i): ([1.0, 1.0, 1.0, 1.0, 0.0] if i == 6 else [0.0, 0.0, 1.0, 1.0, 1.0])
-            for i in range(1, 13)
-        },
-        "global_prototype": torch.zeros(8),
-        "monthly_prototypes": {str(i): None for i in range(1, 13)},
-        "metadata": {
-            "target_val_usage": "unused_in_main_protocol",
-            "target_eval_usage": "final_eval_only_no_selection",
-            "label_usage": "none",
-        },
-    }
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
-            "target_context_prompt_state": prompt_state,
-            "config": {
-                "model_type": "hyperda_basis_adapter",
-                "width": 4,
-                "prompt_dim": 8,
-                "hyper_n_basis": 3,
-                "hyper_adapter_bottleneck": 2,
-                "hyper_adapter_scale": 1.0,
-                "zero_raw_increment_init": True,
-                "num_regions": 2,
-                "source_region_global_indices": [1, 2],
-                "ch_mean": [0.0] * 12,
-                "ch_std": [1.0] * 12,
-                "inc_mean": [0.0, 0.0],
-                "inc_std": [1.0, 1.0],
-            },
-        },
-        ckpt_path,
-    )
-    predictor = PromptConditionedBackbonePredictor(
-        checkpoint_path=str(ckpt_path),
-        device="cpu",
-        target_region="US-R1",
-    )
-
-    def fixed_model_forward(_x, _z, **_kwargs):
-        return torch.stack(
-            [
-                torch.full((1, 4, 4), 4.0, dtype=torch.float32),
-                torch.full((1, 4, 4), 8.0, dtype=torch.float32),
-            ],
-            dim=1,
-        )
-
-    def fixed_source_base(_x):
-        return torch.stack(
-            [
-                torch.full((1, 4, 4), 1.0, dtype=torch.float32),
-                torch.full((1, 4, 4), 2.0, dtype=torch.float32),
-            ],
-            dim=1,
-        )
-
-    predictor.model.forward = fixed_model_forward
-    predictor.model.source_base_forward = fixed_source_base
-    predictor.enable_stage3_k0_context_shrinkage(source_calibrated_rho_cap=0.5)
-    sample = _make_prompt_sample(
-        split_role="target_eval",
-        target_region_id="US-R1",
-        sample_region_id="US-R2",
-    )
-    sample["x"] = np.zeros((12, 4, 4), dtype=np.float32)
-    sample["forecast_surface"] = np.full((4, 4), 10.0, dtype=np.float32)
-    sample["forecast_rootzone"] = np.full((4, 4), 20.0, dtype=np.float32)
-    sample["month"] = 6
-
-    pred = predictor.predict(sample)
-    metadata = predictor.stage3_k0_context_shrinkage_metadata
-
-    np.testing.assert_allclose(pred["pred_increment_surface"], 2.5)
-    np.testing.assert_allclose(pred["pred_increment_rootzone"], 5.0)
-    np.testing.assert_allclose(pred["pred_analysis_surface"], 12.5)
-    np.testing.assert_allclose(pred["pred_analysis_rootzone"], 25.0)
-    assert metadata["enabled"] is True
-    assert metadata["stage3_variant"] == "M2_4_target_context_conservative_hyperda"
-    assert metadata["target_labels_used_for_adaptation"] is False
-    assert metadata["target_eval_input_stats_used_for_update"] is False
-    assert metadata["rho_cap"] == 0.5
-    assert metadata["last_rho"] == 0.5
-
-
-def test_stage3_k0_variable_context_shrinkage_uses_independent_surface_rootzone_rhos(tmp_path):
-    from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
-
-    ckpt_path = tmp_path / "hyperda.pt"
-    model = HyperAdapterConditionalResUNet(
-        in_channels=12,
-        out_channels=2,
-        width=4,
-        prompt_dim=8,
-        hyper_n_basis=3,
-        hyper_adapter_bottleneck=2,
-        zero_raw_increment_init=True,
-    )
-    prompt_encoder = RegionPromptEncoder(num_regions=2, input_channels=12, hidden_dim=8)
-    prompt_state = {
-        "schema_version": "target_context_prompt_state_v1",
-        "prompt_source": "target_context_monthly_prompt_prototypes",
-        "label_usage": "none",
-        "context_hash": "ctxhash",
-        "monthly_counts": {str(i): (1 if i == 6 else 0) for i in range(1, 13)},
-        "reliability_feature_schema": [
-            "monthly_count",
-            "has_monthly_prototype",
-            "global_context_count",
-            "finite_input_coverage",
-            "prompt_to_source_manifold_distance",
-        ],
-        "reliability_features": {
-            str(i): ([1.0, 1.0, 1.0, 1.0, 0.0] if i == 6 else [0.0, 0.0, 1.0, 1.0, 1.0])
-            for i in range(1, 13)
-        },
-        "global_prototype": torch.zeros(8),
-        "monthly_prototypes": {str(i): None for i in range(1, 13)},
-        "metadata": {
-            "target_val_usage": "unused_in_main_protocol",
-            "target_eval_usage": "final_eval_only_no_selection",
-            "label_usage": "none",
-        },
-    }
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "prompt_encoder_state_dict": prompt_encoder.state_dict(),
-            "target_context_prompt_state": prompt_state,
-            "config": {
-                "model_type": "hyperda_basis_adapter",
-                "width": 4,
-                "prompt_dim": 8,
-                "hyper_n_basis": 3,
-                "hyper_adapter_bottleneck": 2,
-                "hyper_adapter_scale": 1.0,
-                "zero_raw_increment_init": True,
-                "num_regions": 2,
-                "source_region_global_indices": [1, 2],
-                "ch_mean": [0.0] * 12,
-                "ch_std": [1.0] * 12,
-                "inc_mean": [0.0, 0.0],
-                "inc_std": [1.0, 1.0],
-            },
-        },
-        ckpt_path,
-    )
-    predictor = PromptConditionedBackbonePredictor(
-        checkpoint_path=str(ckpt_path),
-        device="cpu",
-        target_region="US-R1",
-    )
-
-    def fixed_model_forward(_x, _z, **_kwargs):
-        return torch.stack(
-            [
-                torch.full((1, 4, 4), 4.0, dtype=torch.float32),
-                torch.full((1, 4, 4), 8.0, dtype=torch.float32),
-            ],
-            dim=1,
-        )
-
-    def fixed_source_base(_x):
-        return torch.stack(
-            [
-                torch.full((1, 4, 4), 1.0, dtype=torch.float32),
-                torch.full((1, 4, 4), 2.0, dtype=torch.float32),
-            ],
-            dim=1,
-        )
-
-    predictor.model.forward = fixed_model_forward
-    predictor.model.source_base_forward = fixed_source_base
-    predictor.enable_stage3_k0_context_shrinkage(
-        policy="variable_reliability_v1",
-        surface_rho_cap=0.25,
-        rootzone_rho_cap=0.75,
-    )
-    sample = _make_prompt_sample(
-        split_role="target_eval",
-        target_region_id="US-R1",
-        sample_region_id="US-R2",
-    )
-    sample["x"] = np.zeros((12, 4, 4), dtype=np.float32)
-    sample["forecast_surface"] = np.full((4, 4), 10.0, dtype=np.float32)
-    sample["forecast_rootzone"] = np.full((4, 4), 20.0, dtype=np.float32)
-    sample["month"] = 6
-
-    pred = predictor.predict(sample)
-    metadata = predictor.stage3_k0_context_shrinkage_metadata
-
-    np.testing.assert_allclose(pred["pred_increment_surface"], 1.75)
-    np.testing.assert_allclose(pred["pred_increment_rootzone"], 6.5)
-    np.testing.assert_allclose(pred["pred_analysis_surface"], 11.75)
-    np.testing.assert_allclose(pred["pred_analysis_rootzone"], 26.5)
-    assert metadata["policy"] == "variable_reliability_v1"
-    assert metadata["rho_surface_cap"] == 0.25
-    assert metadata["rho_rootzone_cap"] == 0.75
-    assert metadata["last_rho_surface"] == 0.25
-    assert metadata["last_rho_rootzone"] == 0.75
-    assert predictor.stage3_k0_context_shrinkage_last_rho == 0.5
-    assert predictor.stage3_k0_context_shrinkage_last_rhos == {"surface": 0.25, "rootzone": 0.75}
-
-
 def test_transfer_safe_score_uses_source_val_only():
     """Verify transfer safe score computation uses only source_val data."""
     from hydroda.training.calibration import calibrate_residual_gain_region_aware
@@ -2104,6 +3503,8 @@ def test_transfer_safe_score_uses_source_val_only():
 
     assert result, "calibrate_residual_gain_region_aware should return non-empty result"
     assert "selection_score" in result
+    assert "dual_variable_cvar_score" in result
+    assert "dual_variable_non_degradation" in result
     assert "selection_trace" in result
     assert len(result["selection_trace"]) == 9  # 3x3 grid
     # Score should be finite and not -inf
@@ -2111,10 +3512,55 @@ def test_transfer_safe_score_uses_source_val_only():
     # Each trace entry should have the score formula fields
     trace = result["selection_trace"][0]
     assert "transfer_safe_score" in trace
+    assert "dual_variable_cvar_safe_score" in trace
+    assert "dual_variable_non_degradation" in trace
+    assert "worst_region_surface_skill" in trace
+    assert "worst_region_rootzone_skill" in trace
     assert "worst_region_balanced_skill" in trace
     assert "neg_rootzone_count" in trace
 
     print(f"  test_transfer_safe_score_uses_source_val_only passed: score={result['selection_score']:.4f}")
+
+
+def test_stable_source_val_plateau_policy_selects_earliest_non_degrading_checkpoint(tmp_path):
+    records = [
+        {"epoch": 9, "dual_variable_cvar_score": 0.101, "dual_variable_non_degradation": False},
+        {"epoch": 19, "dual_variable_cvar_score": 0.116, "dual_variable_non_degradation": True},
+        {"epoch": 29, "dual_variable_cvar_score": 0.121, "dual_variable_non_degradation": True},
+        {"epoch": 39, "dual_variable_cvar_score": 0.120, "dual_variable_non_degradation": True},
+    ]
+    for record in records:
+        (tmp_path / f"checkpoint_epoch_{record['epoch']:03d}.pt").write_bytes(b"checkpoint")
+
+    selected = train_pc.select_stable_source_val_plateau_checkpoint(
+        records,
+        checkpoint_dir=tmp_path,
+    )
+
+    assert selected is not None
+    assert selected["epoch"] == 19
+    assert selected["policy"] == "source_val_plateau_early"
+    assert selected["selection_source"] == "source_val_only"
+    assert selected["plateau_margin"] == pytest.approx(0.02)
+    assert selected["dual_variable_non_degradation"] is True
+    assert selected["checkpoint_path"].endswith("checkpoint_epoch_019.pt")
+
+
+def test_stable_source_val_plateau_threshold_uses_best_score_before_non_degradation(tmp_path):
+    records = [
+        {"epoch": 9, "dual_variable_cvar_score": 0.130, "dual_variable_non_degradation": False},
+        {"epoch": 19, "dual_variable_cvar_score": 0.105, "dual_variable_non_degradation": True},
+        {"epoch": 29, "dual_variable_cvar_score": 0.109, "dual_variable_non_degradation": True},
+    ]
+    for record in records:
+        (tmp_path / f"checkpoint_epoch_{record['epoch']:03d}.pt").write_bytes(b"checkpoint")
+
+    selected = train_pc.select_stable_source_val_plateau_checkpoint(
+        records,
+        checkpoint_dir=tmp_path,
+    )
+
+    assert selected is None
 
 
 def test_latitude_weights_equal_one_unweighted_equivalence():
@@ -2223,7 +3669,12 @@ def test_checkpoint_contains_model_and_prompt_encoder_state_dicts():
         gain_results = {
             "best_alpha_surface": 0.5,
             "best_alpha_rootzone": 0.6,
+            "alpha_selection_objective": "dual_variable_cvar_safe_score",
             "selection_score": 0.1,
+            "dual_variable_cvar_score": 0.07,
+            "dual_variable_non_degradation": True,
+            "selected_surface_region_skills": {"US-R1": 0.2, "US-R2": 0.1},
+            "selected_rootzone_region_skills": {"US-R1": 0.15, "US-R2": 0.05},
             "skill_surface_with_alpha": 0.2,
             "skill_rootzone_with_alpha": 0.15,
             "rmse_surface_model": 0.01,
@@ -2243,8 +3694,16 @@ def test_checkpoint_contains_model_and_prompt_encoder_state_dicts():
         assert "prompt_encoder_state_dict" in ckpt, "Checkpoint must contain prompt_encoder_state_dict"
         assert "residual_gain_alpha_surface" in ckpt, "Checkpoint must contain residual_gain_alpha_surface"
         assert "residual_gain_alpha_rootzone" in ckpt, "Checkpoint must contain residual_gain_alpha_rootzone"
+        assert ckpt["alpha_selection_objective"] == "dual_variable_cvar_safe_score"
         assert "selection_score" in ckpt
+        assert ckpt["dual_variable_cvar_score"] == 0.07
+        assert ckpt["dual_variable_non_degradation"] is True
+        assert ckpt["selected_surface_region_skills"] == {"US-R1": 0.2, "US-R2": 0.1}
+        assert ckpt["selected_rootzone_region_skills"] == {"US-R1": 0.15, "US-R2": 0.05}
         assert "config" in ckpt
+        assert "trust_bank_hash" in ckpt["config"]
+        assert "source_neighbor_top_m" in ckpt["config"]
+        assert "trust_strength" in ckpt["config"]
         assert ckpt["config"]["source_regions"] == ["US-R1", "US-R2"]
         assert ckpt["config"]["checkpoint_every_n_epochs"] == 5  # default
         assert ckpt["config"]["adaptation_setting"] == "zero_shot_context"
@@ -2288,6 +3747,8 @@ def test_alpha_calibration_uses_region_aware_score():
     assert "best_alpha_surface" in result
     assert "best_alpha_rootzone" in result
     assert "selection_score" in result
+    assert "dual_variable_cvar_score" in result
+    assert "dual_variable_non_degradation" in result
     assert "region_variable_skills" in result
     assert result["calibration_mode"] == "region_aware_2d"
     assert result["region_names"] == ["US-R2", "US-R3", "US-R4"]
@@ -2300,6 +3761,8 @@ def test_alpha_calibration_uses_region_aware_score():
     assert "alpha_surface" in trace
     assert "alpha_rootzone" in trace
     assert "transfer_safe_score" in trace
+    assert "dual_variable_cvar_safe_score" in trace
+    assert "dual_variable_non_degradation" in trace
     assert "worst_region_balanced_skill" in trace
 
     print(f"  test_alpha_calibration_uses_region_aware_score passed: "

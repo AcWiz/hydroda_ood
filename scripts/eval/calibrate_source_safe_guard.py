@@ -43,8 +43,8 @@ SCHEDULES = (
 )
 SUPPORT_LOSS_REDUCTIONS = ("global_pixel", "cycle_balanced")
 RHO_POLICIES = ("fixed_1.0", "fixed_0.75", "fixed_0.5", "fixed_0.25", "rule_a", "rule_b", "rule_c")
-M2_4A_RHO_GRID = (0.25, 0.5, 0.75, 1.0)
 TRUST_POLICIES = ("none", "mild_groupwise", "strong_groupwise")
+KSHOT_POLICY_UPDATE_REQUIREMENTS = ("nonzero_update", "allow_no_update")
 COMPACT_BASE_CONFIGS = (
     {
         "base_config_id": "C0",
@@ -369,29 +369,6 @@ def candidate_config_hash(config: Mapping[str, Any]) -> str:
 
 def enumerate_guard_base_configs(candidate_set: str = "compact_v1") -> list[dict[str, Any]]:
     """Enumerate GPU-heavy base adaptations before offline rho expansion."""
-    if candidate_set == "stage3_k0_m2_4a_variable_v1":
-        out = []
-        for rho_surface in M2_4A_RHO_GRID:
-            for rho_rootzone in M2_4A_RHO_GRID:
-                candidate = {
-                    "K": 0,
-                    "adapt_scope": "none",
-                    "adapt_solver": "none",
-                    "schedule_label": "stage3_k0_m2_4a_variable",
-                    "support_loss_reduction": "not_applicable_k0",
-                    "trust_policy": "none",
-                    "rho_policy": "source_episode_calibrated_v1",
-                    "context_shrinkage_policy": "source_episode_calibrated_v1",
-                    "context_shrinkage_rho_surface": float(rho_surface),
-                    "context_shrinkage_rho_rootzone": float(rho_rootzone),
-                    "base_config_id": f"M2_4a_s{rho_surface:g}_r{rho_rootzone:g}",
-                }
-                candidate["candidate_id"] = (
-                    f"m2_4a_surface_{rho_surface:g}__rootzone_{rho_rootzone:g}"
-                )
-                candidate["candidate_config_hash"] = candidate_config_hash(candidate)
-                out.append(candidate)
-        return out
     if candidate_set == "compact_v1":
         base_configs = [dict(config) for config in COMPACT_BASE_CONFIGS]
     elif candidate_set == "full_v1":
@@ -447,8 +424,6 @@ def enumerate_guard_base_configs(candidate_set: str = "compact_v1") -> list[dict
 
 def enumerate_guard_candidates(candidate_set: str = "compact_v1") -> list[dict[str, Any]]:
     """Enumerate logical P2.8 K12 guard candidates for the requested set."""
-    if candidate_set == "stage3_k0_m2_4a_variable_v1":
-        return enumerate_guard_base_configs(candidate_set)
     candidates: list[dict[str, Any]] = []
     for base in enumerate_guard_base_configs(candidate_set):
         for rho_policy in RHO_POLICIES:
@@ -522,14 +497,6 @@ def required_gpu_row_configs(
     top_candidate_ids: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """Return baseline rows plus K12 base adaptations needed for this stage."""
-    if candidate_set == "stage3_k0_m2_4a_variable_v1":
-        return [
-            baseline_gpu_row_configs()[0],
-            *base_configs_for_logical_candidate_ids(
-                candidate_set=candidate_set,
-                candidate_ids=top_candidate_ids,
-            ),
-        ]
     return [
         *baseline_gpu_row_configs(),
         *base_configs_for_logical_candidate_ids(
@@ -580,52 +547,6 @@ def compute_rho_for_policy(policy: str, diagnostics: Mapping[str, Any]) -> float
     raise ValueError(f"unsupported rho_policy={policy!r}")
 
 
-def compute_m2_4_context_shrinkage(
-    reliability_features: Sequence[Any] | Mapping[str, Any],
-    *,
-    source_calibrated_rho_cap: float = 1.0,
-) -> float:
-    """Map input-only context reliability features to conservative residual shrinkage.
-
-    Feature order follows ``SOURCE_RESIDUAL_RELIABILITY_FEATURE_SCHEMA``:
-    monthly_count, has_monthly_prototype, global_context_count,
-    finite_input_coverage, prompt_to_source_manifold_distance.  The last field
-    is a bounded distance, so higher distance lowers shrinkage.
-    """
-    if isinstance(reliability_features, Mapping):
-        monthly_count = _clean_float(reliability_features.get("monthly_count"))
-        has_monthly = _clean_float(reliability_features.get("has_monthly_prototype"))
-        global_count = _clean_float(reliability_features.get("global_context_count"))
-        coverage = _clean_float(reliability_features.get("finite_input_coverage"))
-        distance = _clean_float(reliability_features.get("prompt_to_source_manifold_distance"))
-    else:
-        values = list(reliability_features)
-        padded = [*_json_safe(values), *([0.0] * 5)][:5]
-        monthly_count = _clean_float(padded[0])
-        has_monthly = _clean_float(padded[1])
-        global_count = _clean_float(padded[2])
-        coverage = _clean_float(padded[3])
-        distance = _clean_float(padded[4])
-
-    cap = _clean_float(source_calibrated_rho_cap)
-    if cap is None or cap <= 0.0:
-        return 0.0
-    cap = min(1.0, float(cap))
-    monthly_count = 0.0 if monthly_count is None else max(0.0, min(1.0, float(monthly_count)))
-    has_monthly = 0.0 if has_monthly is None else max(0.0, min(1.0, float(has_monthly)))
-    global_count = 0.0 if global_count is None else max(0.0, min(1.0, float(global_count)))
-    coverage = 0.0 if coverage is None else max(0.0, min(1.0, float(coverage)))
-    distance = 1.0 if distance is None else max(0.0, min(1.0, float(distance)))
-    reliability = (
-        0.30 * monthly_count
-        + 0.20 * has_monthly
-        + 0.15 * global_count
-        + 0.25 * coverage
-        + 0.10 * (1.0 - distance)
-    )
-    return float(max(0.0, min(1.0, cap * reliability)))
-
-
 def _overall_skill(row: Mapping[str, Any]) -> float | None:
     overall = _clean_float(row.get("overall_skill"))
     if overall is not None:
@@ -648,387 +569,6 @@ def _candidate_id_for_row(row: Mapping[str, Any]) -> str:
 def _is_k0_baseline(row: Mapping[str, Any]) -> bool:
     candidate_id = _candidate_id_for_row(row).lower()
     return _clean_int(row.get("K")) == 0 or "k0" in candidate_id or "identity" in candidate_id
-
-
-def _is_m2_1_baseline(row: Mapping[str, Any]) -> bool:
-    candidate_id = _candidate_id_for_row(row).lower()
-    method = str(row.get("method", "")).lower()
-    ablation_id = str(row.get("ablation_id", "")).lower()
-    return (
-        "m2_1" in candidate_id
-        or "m2_1" in method
-        or "m2_1" in ablation_id
-        or candidate_id in {"m2_1_frozen_prior", "m2_1_rank_gated_dora_stable"}
-    )
-
-
-def score_m2_4_source_episode_candidates(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    safe_score_floor_ratio: float = 0.98,
-) -> list[dict[str, Any]]:
-    """Score M2.4 K=0 shrinkage candidates against frozen M2.1 source episodes."""
-    baseline_by_episode: dict[str, dict[str, float | None]] = {}
-    for row in rows:
-        if not _is_m2_1_baseline(row):
-            continue
-        overall = _overall_skill(row)
-        surface, rootzone = _metric_pair(row)
-        if overall is not None:
-            baseline_by_episode[str(row.get("episode_id"))] = {
-                "overall": overall,
-                "surface": surface,
-                "rootzone": rootzone,
-            }
-    if not baseline_by_episode:
-        raise ValueError("Cannot score M2.4 candidates without M2.1 frozen-prior baseline rows")
-
-    floor = float(safe_score_floor_ratio)
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    exemplars: dict[str, Mapping[str, Any]] = {}
-    for row in rows:
-        if _is_m2_1_baseline(row):
-            continue
-        episode_id = str(row.get("episode_id"))
-        baseline = baseline_by_episode.get(episode_id)
-        if baseline is None:
-            continue
-        overall = _overall_skill(row)
-        surface, rootzone = _metric_pair(row)
-        if overall is None:
-            continue
-
-        def ratio(value: float | None, base: float | None) -> float | None:
-            if value is None or base is None:
-                return None
-            if abs(float(base)) < 1e-12:
-                return 1.0 if float(value) >= float(base) else 0.0
-            return float(value) / float(base)
-
-        surface_ratio = ratio(surface, baseline["surface"])
-        rootzone_ratio = ratio(rootzone, baseline["rootzone"])
-        overall_ratio = ratio(overall, baseline["overall"])
-        variable_ratios = [value for value in (surface_ratio, rootzone_ratio) if value is not None]
-        worst_variable_ratio = min(variable_ratios) if variable_ratios else overall_ratio
-        candidate_id = _candidate_id_for_row(row)
-        grouped.setdefault(candidate_id, []).append(
-            {
-                "episode_id": episode_id,
-                "pseudo_target_region": row.get("pseudo_target_region", ""),
-                "overall_skill": overall,
-                "m2_1_overall_skill": baseline["overall"],
-                "delta_vs_m2_1": float(overall) - float(baseline["overall"]),
-                "surface_delta_vs_m2_1": (
-                    None if surface is None or baseline["surface"] is None else float(surface) - float(baseline["surface"])
-                ),
-                "rootzone_delta_vs_m2_1": (
-                    None if rootzone is None or baseline["rootzone"] is None else float(rootzone) - float(baseline["rootzone"])
-                ),
-                "surface_ratio_vs_m2_1": surface_ratio,
-                "rootzone_ratio_vs_m2_1": rootzone_ratio,
-                "overall_ratio_vs_m2_1": overall_ratio,
-                "worst_variable_ratio_vs_m2_1": worst_variable_ratio,
-            }
-        )
-        exemplars.setdefault(candidate_id, row)
-
-    summaries: list[dict[str, Any]] = []
-    for candidate_id, episode_rows in grouped.items():
-        deltas = [float(row["delta_vs_m2_1"]) for row in episode_rows]
-        surface_ratios = [
-            float(row["surface_ratio_vs_m2_1"])
-            for row in episode_rows
-            if row["surface_ratio_vs_m2_1"] is not None
-        ]
-        rootzone_ratios = [
-            float(row["rootzone_ratio_vs_m2_1"])
-            for row in episode_rows
-            if row["rootzone_ratio_vs_m2_1"] is not None
-        ]
-        variable_ratios = [
-            float(row["worst_variable_ratio_vs_m2_1"])
-            for row in episode_rows
-            if row["worst_variable_ratio_vs_m2_1"] is not None
-        ]
-        worst_surface = min(surface_ratios) if surface_ratios else None
-        worst_rootzone = min(rootzone_ratios) if rootzone_ratios else None
-        worst_variable = min(variable_ratios) if variable_ratios else None
-        safe = worst_variable is not None and worst_variable >= floor
-        mean_delta = statistics.fmean(deltas)
-        exemplar = exemplars[candidate_id]
-        summaries.append(
-            {
-                "candidate_id": candidate_id,
-                "score": mean_delta if safe else mean_delta - 1.0,
-                "mean_delta_vs_m2_1": mean_delta,
-                "worst_surface_ratio_vs_m2_1": worst_surface,
-                "worst_rootzone_ratio_vs_m2_1": worst_rootzone,
-                "worst_variable_ratio_vs_m2_1": worst_variable,
-                "safe_against_m2_1_98pct": bool(safe),
-                "safe_score_floor_ratio": floor,
-                "episode_count": len(episode_rows),
-                "episode_results": episode_rows,
-                "context_shrinkage_rho": _clean_float(exemplar.get("context_shrinkage_rho")),
-                "rho_policy": rho_policy_from_row(exemplar),
-                "selection_baseline_candidate_id": "M2_1_frozen_prior",
-                "target_labels_used_for_adaptation": False,
-                "target_val_usage": "unused_in_main_protocol",
-                "target_eval_usage": "final_eval_only_no_selection",
-                "target_eval_input_stats_used_for_update": False,
-            }
-        )
-    if not summaries:
-        raise ValueError("No M2.4 source-episode candidate rows could be scored")
-    summaries.sort(
-        key=lambda row: (
-            not bool(row.get("safe_against_m2_1_98pct")),
-            -float(row.get("score", float("-inf"))),
-            str(row.get("candidate_id", "")),
-        )
-    )
-    return summaries
-
-
-def select_m2_4_conservative_candidate(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    safe_score_floor_ratio: float = 0.98,
-) -> dict[str, Any]:
-    """Select the best source-episode-safe M2.4 candidate."""
-    summaries = score_m2_4_source_episode_candidates(
-        rows,
-        safe_score_floor_ratio=safe_score_floor_ratio,
-    )
-    safe = [row for row in summaries if row.get("safe_against_m2_1_98pct")]
-    return dict((safe or summaries)[0])
-
-
-def _m2_4a_rho_cap(row: Mapping[str, Any], variable: str) -> float | None:
-    value = (
-        row.get(f"context_shrinkage_rho_{variable}")
-        or row.get(f"rho_{variable}_cap")
-        or row.get(f"{variable}_rho_cap")
-    )
-    if value is None and variable == "surface":
-        value = row.get("context_shrinkage_rho_surface_cap")
-    if value is None and variable == "rootzone":
-        value = row.get("context_shrinkage_rho_rootzone_cap")
-    if value is None:
-        value = row.get("context_shrinkage_rho")
-    cap = _clean_float(value)
-    if cap is None:
-        return None
-    return float(max(0.0, min(1.0, cap)))
-
-
-def score_m2_4a_variable_source_episode_candidates(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    safe_score_floor_ratio: float = 0.98,
-) -> list[dict[str, Any]]:
-    """Score M2.4a variable-rho K=0 candidates against frozen M2.1 rows."""
-    return score_m2_4_source_episode_candidates(
-        rows,
-        safe_score_floor_ratio=safe_score_floor_ratio,
-    )
-
-
-def _select_m2_4a_variable_cap(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    variable: str,
-    baseline_by_episode: Mapping[str, float],
-    safe_score_floor_ratio: float,
-) -> dict[str, Any]:
-    grouped: dict[float, list[dict[str, Any]]] = {}
-    for row in rows:
-        if _is_m2_1_baseline(row):
-            continue
-        cap = _m2_4a_rho_cap(row, variable)
-        if cap is None:
-            continue
-        episode_id = str(row.get("episode_id"))
-        baseline = baseline_by_episode.get(episode_id)
-        value = _clean_float(row.get(f"{variable}_skill_primary"))
-        if baseline is None or value is None:
-            continue
-        if abs(float(baseline)) < 1e-12:
-            ratio = 1.0 if float(value) >= float(baseline) else 0.0
-        else:
-            ratio = float(value) / float(baseline)
-        grouped.setdefault(cap, []).append(
-            {
-                "episode_id": episode_id,
-                "pseudo_target_region": row.get("pseudo_target_region", ""),
-                f"{variable}_skill_primary": value,
-                f"m2_1_{variable}_skill_primary": baseline,
-                f"{variable}_delta_vs_m2_1": float(value) - float(baseline),
-                f"{variable}_ratio_vs_m2_1": ratio,
-            }
-        )
-    summaries: list[dict[str, Any]] = []
-    for cap, episode_rows in grouped.items():
-        deltas = [float(row[f"{variable}_delta_vs_m2_1"]) for row in episode_rows]
-        ratios = [float(row[f"{variable}_ratio_vs_m2_1"]) for row in episode_rows]
-        mean_delta = statistics.fmean(deltas)
-        worst_ratio = min(ratios)
-        safe = worst_ratio >= float(safe_score_floor_ratio)
-        summaries.append(
-            {
-                "variable": variable,
-                "rho_cap": float(cap),
-                "score": mean_delta if safe else mean_delta - 1.0,
-                "mean_delta_vs_m2_1": mean_delta,
-                "worst_ratio_vs_m2_1": worst_ratio,
-                "safe_against_m2_1_98pct": bool(safe),
-                "safe_score_floor_ratio": float(safe_score_floor_ratio),
-                "episode_count": len(episode_rows),
-                "episode_results": episode_rows,
-            }
-        )
-    if not summaries:
-        raise ValueError(f"No M2.4a {variable} variable-rho source-episode candidates could be scored")
-    summaries.sort(
-        key=lambda row: (
-            not bool(row.get("safe_against_m2_1_98pct")),
-            -float(row.get("score", float("-inf"))),
-            float(row.get("rho_cap", 1.0)),
-        )
-    )
-    return dict(summaries[0])
-
-
-def select_m2_4a_variable_conservative_candidate(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    safe_score_floor_ratio: float = 0.98,
-) -> dict[str, Any]:
-    """Select variable-specific M2.4a rho caps from source episodes."""
-    baseline_surface: dict[str, float] = {}
-    baseline_rootzone: dict[str, float] = {}
-    for row in rows:
-        if not _is_m2_1_baseline(row):
-            continue
-        episode_id = str(row.get("episode_id"))
-        surface, rootzone = _metric_pair(row)
-        if surface is not None:
-            baseline_surface[episode_id] = surface
-        if rootzone is not None:
-            baseline_rootzone[episode_id] = rootzone
-    if not baseline_surface or not baseline_rootzone:
-        raise ValueError("Cannot score M2.4a candidates without M2.1 surface/rootzone baseline rows")
-    surface = _select_m2_4a_variable_cap(
-        rows,
-        variable="surface",
-        baseline_by_episode=baseline_surface,
-        safe_score_floor_ratio=safe_score_floor_ratio,
-    )
-    rootzone = _select_m2_4a_variable_cap(
-        rows,
-        variable="rootzone",
-        baseline_by_episode=baseline_rootzone,
-        safe_score_floor_ratio=safe_score_floor_ratio,
-    )
-    source_episode_regions = sorted(
-        {
-            str(result.get("pseudo_target_region"))
-            for result in [*surface.get("episode_results", []), *rootzone.get("episode_results", [])]
-            if str(result.get("pseudo_target_region", ""))
-        }
-    )
-    selected = {
-        "candidate_id": (
-            f"m2_4a_surface_{float(surface['rho_cap']):g}__"
-            f"rootzone_{float(rootzone['rho_cap']):g}"
-        ),
-        "score": (float(surface["score"]) + float(rootzone["score"])) / 2.0,
-        "rho_surface_cap": float(surface["rho_cap"]),
-        "rho_rootzone_cap": float(rootzone["rho_cap"]),
-        "context_shrinkage_policy": "source_episode_calibrated_v1",
-        "mean_delta_surface_vs_m2_1": float(surface["mean_delta_vs_m2_1"]),
-        "mean_delta_rootzone_vs_m2_1": float(rootzone["mean_delta_vs_m2_1"]),
-        "mean_delta_vs_m2_1": (
-            float(surface["mean_delta_vs_m2_1"]) + float(rootzone["mean_delta_vs_m2_1"])
-        )
-        / 2.0,
-        "worst_surface_ratio_vs_m2_1": float(surface["worst_ratio_vs_m2_1"]),
-        "worst_rootzone_ratio_vs_m2_1": float(rootzone["worst_ratio_vs_m2_1"]),
-        "worst_variable_ratio_vs_m2_1": min(
-            float(surface["worst_ratio_vs_m2_1"]),
-            float(rootzone["worst_ratio_vs_m2_1"]),
-        ),
-        "safe_against_m2_1_98pct": bool(
-            surface["safe_against_m2_1_98pct"] and rootzone["safe_against_m2_1_98pct"]
-        ),
-        "safe_score_floor_ratio": float(safe_score_floor_ratio),
-        "episode_count": len(
-            {
-                str(result.get("episode_id"))
-                for result in [*surface.get("episode_results", []), *rootzone.get("episode_results", [])]
-            }
-        ),
-        "source_episode_regions": source_episode_regions,
-        "selection_baseline_candidate_id": "M2_1_frozen_prior",
-        "surface_selection": surface,
-        "rootzone_selection": rootzone,
-        "target_labels_used_for_adaptation": False,
-        "target_val_usage": "unused_in_main_protocol",
-        "target_eval_usage": "final_eval_only_no_selection",
-        "target_eval_input_stats_used_for_update": False,
-    }
-    selected["policy_hash"] = compute_stage3_k0_m2_4a_policy_hash(selected)
-    return selected
-
-
-def compute_stage3_k0_m2_4a_policy_hash(policy: Mapping[str, Any]) -> str:
-    payload = dict(policy)
-    payload.pop("policy_hash", None)
-    return _json_hash(payload)
-
-
-def build_stage3_k0_m2_4a_policy_json(
-    selected_candidate: Mapping[str, Any],
-    *,
-    final_target_region: str,
-    seed: int,
-) -> dict[str, Any]:
-    """Export the source-episode calibrated K=0 M2.4a shrinkage policy."""
-    policy = {
-        "schema_version": "stage3_k0_m2_4a_source_episode_policy_v1",
-        "stage3_variant": "M2_4_target_context_conservative_hyperda",
-        "method_variant": "M2.4a",
-        "policy": "source_episode_calibrated_v1",
-        "policy_source": "source_episode_calibrated_v1",
-        "final_target_region": final_target_region,
-        "seed": int(seed),
-        "rho_surface_cap": _clean_float(selected_candidate.get("rho_surface_cap")),
-        "rho_rootzone_cap": _clean_float(selected_candidate.get("rho_rootzone_cap")),
-        "candidate_id": selected_candidate.get("candidate_id", ""),
-        "selection_baseline_candidate_id": selected_candidate.get(
-            "selection_baseline_candidate_id",
-            "M2_1_frozen_prior",
-        ),
-        "safe_score_floor_ratio": _clean_float(selected_candidate.get("safe_score_floor_ratio")) or 0.98,
-        "worst_surface_ratio_vs_m2_1": _clean_float(selected_candidate.get("worst_surface_ratio_vs_m2_1")),
-        "worst_rootzone_ratio_vs_m2_1": _clean_float(selected_candidate.get("worst_rootzone_ratio_vs_m2_1")),
-        "worst_variable_ratio_vs_m2_1": _clean_float(selected_candidate.get("worst_variable_ratio_vs_m2_1")),
-        "source_episode_regions": list(selected_candidate.get("source_episode_regions", []) or []),
-        "source_episode_variable_selection": {
-            "surface": selected_candidate.get("surface_selection", {}),
-            "rootzone": selected_candidate.get("rootzone_selection", {}),
-        },
-        "source_prior": "M2_1_rank_gated_dora_stable",
-        "extra_source_finetune": False,
-        "target_context_signal": "input_side_monthly_prototype_reliability_only",
-        "target_labels_used_for_adaptation": False,
-        "target_val_usage": "unused_in_main_protocol",
-        "target_eval_usage": "final_eval_only_no_selection",
-        "target_eval_input_stats_used_for_update": False,
-        "target_eval_selection_usage": "none",
-        "created_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    policy["policy_hash"] = compute_stage3_k0_m2_4a_policy_hash(policy)
-    return policy
 
 
 def score_candidates(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -1170,6 +710,21 @@ def _k4_no_update_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "anchor_alpha": 0.0,
         "adapt_mix_rho": 0.0,
     }
+
+
+def is_nonzero_kshot_policy_candidate(candidate: Mapping[str, Any]) -> bool:
+    """Return True when a K-shot policy candidate will actually update and mix."""
+    if _clean_int(candidate.get("K")) is not None and int(_clean_int(candidate.get("K")) or 0) <= 0:
+        return False
+    if str(candidate.get("adapt_scope", "")) == "none":
+        return False
+    if (_clean_int(candidate.get("adaptation_steps")) or 0) <= 0:
+        return False
+    if (_clean_float(candidate.get("lr")) or 0.0) <= 0.0:
+        return False
+    if (_candidate_adapt_mix_rho(candidate) or 0.0) <= 0.0:
+        return False
+    return True
 
 
 def score_candidates_for_k(
@@ -1887,6 +1442,13 @@ def _fixed_rho_from_policy(policy: str) -> float | None:
     return None
 
 
+def _candidate_adapt_mix_rho(candidate: Mapping[str, Any]) -> float | None:
+    rho = _clean_float(candidate.get("adapt_mix_rho"))
+    if rho is not None:
+        return rho
+    return _fixed_rho_from_policy(str(candidate.get("rho_policy", "fixed_1.0")))
+
+
 def build_selected_guard_config(
     *,
     candidate: Mapping[str, Any],
@@ -1961,11 +1523,33 @@ def select_per_k_safe_policy_configs(
     seed: int,
     evidence_level: str,
     source_metadata: Mapping[str, Any],
+    kshot_policy_update_requirement: str = "nonzero_update",
 ) -> dict[int, dict[str, Any]]:
     """Select independently calibrated SAFE configs for paper-facing K4 and K12."""
+    if kshot_policy_update_requirement not in KSHOT_POLICY_UPDATE_REQUIREMENTS:
+        raise ValueError(
+            "kshot_policy_update_requirement must be one of "
+            f"{KSHOT_POLICY_UPDATE_REQUIREMENTS}; got {kshot_policy_update_requirement!r}"
+        )
+    include_no_update = kshot_policy_update_requirement == "allow_no_update"
     selected: dict[int, dict[str, Any]] = {}
     for target_k in (4, 12):
-        summaries = score_candidates_for_k(rows, K=target_k, include_no_update=(target_k == 4))
+        try:
+            summaries = score_candidates_for_k(rows, K=target_k, include_no_update=include_no_update and target_k == 4)
+        except ValueError as exc:
+            if kshot_policy_update_requirement == "nonzero_update":
+                raise ValueError(
+                    f"No nonzero source-side SAFE policy candidate is available for K={target_k}; "
+                    "paper-facing K-shot cannot fall back to no-update."
+                ) from exc
+            raise
+        if kshot_policy_update_requirement == "nonzero_update":
+            summaries = [summary for summary in summaries if is_nonzero_kshot_policy_candidate(summary)]
+            if not summaries:
+                raise ValueError(
+                    f"No nonzero source-side SAFE policy candidate is available for K={target_k}; "
+                    "paper-facing K-shot cannot fall back to no-update."
+                )
         ranked = rank_candidates(summaries)
         top = ranked[0]
         selected[target_k] = build_selected_guard_config(
@@ -1980,6 +1564,8 @@ def select_per_k_safe_policy_configs(
                 "per_k_selection": True,
                 "selected_K": target_k,
                 "per_k_top_candidate_ids": [str(row.get("candidate_id", "")) for row in ranked[:5]],
+                "kshot_policy_update_requirement": kshot_policy_update_requirement,
+                "no_update_candidates_allowed": include_no_update,
             },
         )
     return selected
@@ -2019,8 +1605,14 @@ def build_safe_policy_json(
     final_target_region: str,
     seed: int,
     selected_configs_by_k: Mapping[int, Mapping[str, Any]] | None = None,
+    kshot_policy_update_requirement: str = "nonzero_update",
 ) -> dict[str, Any]:
     """Export the source-side selected guard as the phase5 SAFE policy contract."""
+    if kshot_policy_update_requirement not in KSHOT_POLICY_UPDATE_REQUIREMENTS:
+        raise ValueError(
+            "kshot_policy_update_requirement must be one of "
+            f"{KSHOT_POLICY_UPDATE_REQUIREMENTS}; got {kshot_policy_update_requirement!r}"
+        )
     source_metadata = dict(selected_config.get("source_metadata", {}) or {})
     source_episode_regions = sorted(
         str(region)
@@ -2032,6 +1624,13 @@ def build_safe_policy_json(
         selected_by_k = {4: dict(selected_config), 12: dict(selected_config)}
     k4_config = selected_by_k.get(4, dict(selected_config))
     k12_config = selected_by_k.get(12, dict(selected_config))
+    if kshot_policy_update_requirement == "nonzero_update":
+        for target_k, config in ((4, k4_config), (12, k12_config)):
+            if not is_nonzero_kshot_policy_candidate({**dict(config), "K": target_k}):
+                raise ValueError(
+                    f"Cannot export paper-facing SAFE policy for K={target_k}: selected policy is no-update "
+                    "or has zero lr/steps/rho."
+                )
     policy = {
         "schema_version": "hyperda_safe_policy_v1",
         "policy_source": "source_side_episode_calibration",
@@ -2045,6 +1644,8 @@ def build_safe_policy_json(
         "source_calibration": {
             "candidate_id": selected_config.get("candidate_id", ""),
             "guard_config_hash": selected_config.get("guard_config_hash", ""),
+            "kshot_policy_update_requirement": kshot_policy_update_requirement,
+            "no_update_candidates_allowed": kshot_policy_update_requirement == "allow_no_update",
             "source_safety_evidence_level": selected_config.get("source_safety_evidence_level", ""),
             "selection_query_role": selected_config.get("selection_query_role", "source_val_pseudo_query_only"),
             "selection_label_usage": selected_config.get(
@@ -2167,7 +1768,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--candidate_set",
         default="compact_v1",
-        choices=["compact_v1", "full_v1", "stage3_conservative_v1", "stage3_k0_m2_4a_variable_v1"],
+        choices=["compact_v1", "full_v1", "stage3_conservative_v1"],
     )
     parser.add_argument("--calibration_stage", default="coarse", choices=["coarse", "final"])
     parser.add_argument("--source_query_max_samples", type=int, default=256)
@@ -2175,6 +1776,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--pseudo_target_regions", default="")
     parser.add_argument("--source_rows_root", default="")
     parser.add_argument("--resume_command_prefix", default="")
+    parser.add_argument(
+        "--kshot_policy_update_requirement",
+        default="nonzero_update",
+        choices=list(KSHOT_POLICY_UPDATE_REQUIREMENTS),
+        help=(
+            "Paper-facing K-shot policy export requires nonzero target_support fine-tuning by default. "
+            "Use allow_no_update only for explicit diagnostics."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -2229,73 +1839,6 @@ def main() -> None:
         source_query_max_samples=args.source_query_max_samples,
     )
 
-    if args.candidate_set == "stage3_k0_m2_4a_variable_v1":
-        summaries = score_m2_4a_variable_source_episode_candidates(rows)
-        selected_config = select_m2_4a_variable_conservative_candidate(rows)
-        policy = build_stage3_k0_m2_4a_policy_json(
-            selected_config,
-            final_target_region=args.final_target_region,
-            seed=args.seed,
-        )
-        source_metadata = build_calibration_audit_metadata(
-            rows,
-            paths,
-            summaries,
-            checkpoint_source_regions=checkpoint_source_regions,
-            candidate_set=args.candidate_set,
-        )
-        source_metadata = {
-            **source_metadata,
-            "candidate_set": args.candidate_set,
-            "calibration_stage": args.calibration_stage,
-            "source_query_max_samples": int(args.source_query_max_samples),
-            "deterministic_source_subset_hash": subset_hash,
-            "top_candidate_ids_input": top_candidate_ids,
-            "checkpoint_source_regions": checkpoint_source_regions,
-            "validation_metadata": validation_metadata,
-        }
-        summary = {
-            "schema_version": "stage3_k0_m2_4a_source_episode_calibration_v1",
-            "source_safety_evidence_level": evidence_level,
-            "score_formula": "variable-specific worst-case non-degradation vs M2.1 with 98pct floor",
-            "calibration_query_role": "source_val_pseudo_query_only",
-            "target_eval_usage": "never_read_by_calibration",
-            "target_val_usage": "unused_in_main_protocol",
-            "calibration_audit": source_metadata,
-            "candidate_rankings": summaries,
-            "selected_guard_config": selected_config,
-            "stage3_k0_m2_4a_policy": policy,
-            "safe_policy": policy,
-            "deterministic_source_subset_hash": subset_hash,
-            "top5_candidate_ids": [str(row.get("candidate_id", "")) for row in summaries[:5]],
-        }
-        leakage_metadata = {
-            "target_eval_loaded": False,
-            "target_eval_labels_loaded": False,
-            "target_eval_features_loaded": False,
-            "calibration_query_split": "source_val",
-            "support_label_source": "source_pseudo_target_eval_labels_only_for_source_episode_scoring",
-            "final_target_region": args.final_target_region,
-            "evidence_level": evidence_level,
-            "target_eval_input_stats_used_for_update": False,
-        }
-        _write_json(output_dir / "selected_guard_config.json", selected_config)
-        _write_json(output_dir / "stage3_k0_m2_4a_policy.json", policy)
-        _write_json(output_dir / "safe_policy.json", policy)
-        _write_json(output_dir / "source_safe_calibration_summary.json", summary)
-        _write_json(output_dir / "candidate_rankings.json", summaries)
-        _write_json(output_dir / "leakage_protocol_metadata.json", leakage_metadata)
-        _write_json(output_dir / "calibration_audit_metadata.json", source_metadata)
-        _write_csv(output_dir / "candidate_rankings.csv", summaries)
-        _write_csv(output_dir / "source_safe_calibration_summary.csv", [selected_config])
-        stage_prefix = "final" if args.calibration_stage == "final" else "coarse"
-        _write_json(output_dir / f"{stage_prefix}_source_safe_calibration_summary.json", summary)
-        _write_csv(output_dir / f"{stage_prefix}_source_safe_calibration_summary.csv", [selected_config])
-        print(f"Selected M2.4a policy: {selected_config['candidate_id']}")
-        print(f"policy_hash={policy['policy_hash']}")
-        print(f"Artifacts: {output_dir}")
-        return
-
     trust_radii = derive_trust_radii(rows)
     summaries = score_candidates(rows)
     if args.calibration_stage == "final" and top_candidate_ids:
@@ -2345,8 +1888,11 @@ def main() -> None:
             seed=args.seed,
             evidence_level=evidence_level,
             source_metadata=source_metadata,
+            kshot_policy_update_requirement=args.kshot_policy_update_requirement,
         )
     except ValueError as exc:
+        if args.kshot_policy_update_requirement == "nonzero_update":
+            raise SystemExit(str(exc)) from exc
         selected_config["per_k_safe_policy_selection_fallback_reason"] = str(exc)
         selected_configs_by_k = {4: dict(selected_config), 12: dict(selected_config)}
     safe_policy = build_safe_policy_json(
@@ -2354,6 +1900,7 @@ def main() -> None:
         final_target_region=args.final_target_region,
         seed=args.seed,
         selected_configs_by_k=selected_configs_by_k,
+        kshot_policy_update_requirement=args.kshot_policy_update_requirement,
     )
     summary = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -2368,6 +1915,8 @@ def main() -> None:
         "target_eval_usage": "never_read_by_calibration",
         "trust_radii": trust_radii,
         "calibration_audit": source_metadata,
+        "kshot_policy_update_requirement": args.kshot_policy_update_requirement,
+        "no_update_candidates_allowed": args.kshot_policy_update_requirement == "allow_no_update",
         "stability_diagnostics": compute_stability_diagnostics(summaries),
         "selected_guard_config": selected_config,
         "selected_guard_configs_by_k": {str(k): config for k, config in selected_configs_by_k.items()},

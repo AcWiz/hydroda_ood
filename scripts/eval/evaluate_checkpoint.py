@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -175,46 +176,26 @@ def main():
         help="Fixed output mixture with same-context K0 prediction; diagnostic only, never selected on target_eval.",
     )
     parser.add_argument(
+        "--eval_raw_adapted_before_mix",
+        action="store_true",
+        help="Diagnostic Stage 3 eval: hash raw-adapted predictions from raw_adapted_state_dict before gate/mix.",
+    )
+    parser.add_argument(
         "--prediction_record_path",
         type=str,
         default="",
         help="Optional JSONL path for source-safe prediction records used by offline calibration mixing.",
     )
     parser.add_argument(
-        "--stage3_k0_context_shrinkage",
-        action="store_true",
-        help="Diagnostic M2.4: post-hoc K=0 source-base residual shrinkage from target_context input reliability.",
-    )
-    parser.add_argument(
-        "--stage3_k0_context_shrinkage_rho_cap",
-        type=float,
-        default=1.0,
-        help="Source-calibrated upper cap for M2.4 target_context reliability shrinkage rho.",
-    )
-    parser.add_argument(
-        "--stage3_k0_context_shrinkage_policy",
+        "--output_level",
         type=str,
-        default="variable_reliability_v1",
-        choices=["scalar_reliability_v1", "variable_reliability_v1", "source_episode_calibrated_v1"],
-        help="Stage 3 K=0 M2.4a residual guard policy.",
-    )
-    parser.add_argument(
-        "--stage3_k0_context_shrinkage_surface_rho_cap",
-        type=float,
-        default=None,
-        help="Surface-channel M2.4a rho cap. Defaults to --stage3_k0_context_shrinkage_rho_cap.",
-    )
-    parser.add_argument(
-        "--stage3_k0_context_shrinkage_rootzone_rho_cap",
-        type=float,
-        default=None,
-        help="Rootzone-channel M2.4a rho cap. Defaults to --stage3_k0_context_shrinkage_rho_cap.",
-    )
-    parser.add_argument(
-        "--stage3_k0_context_shrinkage_policy_json",
-        type=str,
-        default="",
-        help="Optional source-episode calibrated M2.4a policy JSON with variable rho caps.",
+        default=os.environ.get("EVAL_OUTPUT_LEVEL", "compact"),
+        choices=["compact", "long", "full"],
+        help=(
+            "Artifact volume profile: compact writes summary and aggregate CSVs, "
+            "long also writes metrics_long.csv.gz, full writes metrics_long.csv "
+            "and honors --prediction_record_path."
+        ),
     )
     args = parser.parse_args()
 
@@ -236,28 +217,6 @@ def main():
         )
     if not 0.0 <= float(args.adapt_mix_rho) <= 1.0:
         raise ValueError("--adapt_mix_rho must be in [0, 1]")
-    if not 0.0 <= float(args.stage3_k0_context_shrinkage_rho_cap) <= 1.0:
-        raise ValueError("--stage3_k0_context_shrinkage_rho_cap must be in [0, 1]")
-    if args.stage3_k0_context_shrinkage_surface_rho_cap is None:
-        args.stage3_k0_context_shrinkage_surface_rho_cap = float(args.stage3_k0_context_shrinkage_rho_cap)
-    if args.stage3_k0_context_shrinkage_rootzone_rho_cap is None:
-        args.stage3_k0_context_shrinkage_rootzone_rho_cap = float(args.stage3_k0_context_shrinkage_rho_cap)
-    if not 0.0 <= float(args.stage3_k0_context_shrinkage_surface_rho_cap) <= 1.0:
-        raise ValueError("--stage3_k0_context_shrinkage_surface_rho_cap must be in [0, 1]")
-    if not 0.0 <= float(args.stage3_k0_context_shrinkage_rootzone_rho_cap) <= 1.0:
-        raise ValueError("--stage3_k0_context_shrinkage_rootzone_rho_cap must be in [0, 1]")
-    if args.stage3_k0_context_shrinkage:
-        if args.predictor_type != "hyperda_target_adapt":
-            raise ValueError("--stage3_k0_context_shrinkage requires --predictor_type hyperda_target_adapt")
-        if int(args.K) != 0 or args.adaptation_setting != "zero_shot_context":
-            raise ValueError("--stage3_k0_context_shrinkage is valid only for K=0 zero_shot_context")
-        if args.split_type not in ("target_eval", "target_query"):
-            raise ValueError("--stage3_k0_context_shrinkage is valid only for target_eval/target_query")
-        if args.stage3_k0_context_shrinkage_policy == "source_episode_calibrated_v1" and not args.stage3_k0_context_shrinkage_policy_json:
-            raise ValueError(
-                "--stage3_k0_context_shrinkage_policy=source_episode_calibrated_v1 requires "
-                "--stage3_k0_context_shrinkage_policy_json"
-            )
 
     if (
         args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt")
@@ -322,6 +281,9 @@ def main():
     # Load predictor
     print(f"\nLoading checkpoint...")
     zero_shot_predictor = None
+    raw_adapted_predictor = None
+    no_tta_predictor = None
+    no_tta_zero_shot_predictor = None
     if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt"):
         from hydroda.baselines.prompt_conditioned import PromptConditionedBackbonePredictor
 
@@ -330,11 +292,28 @@ def main():
             device=str(device),
             target_region=args.target_region,
         )
-        if args.predictor_type == "hyperda_target_adapt" and float(args.adapt_mix_rho) < 1.0:
+        raw_checkpoint = None
+        context_tta_effective_for_comparator = bool(
+            predictor.stage3_protocol_metadata.get("context_tta_effective", False)
+            or getattr(predictor, "_target_prompt_metadata", {}).get("context_tta_effective", False)
+        )
+        if context_tta_effective_for_comparator:
+            try:
+                no_tta_predictor = PromptConditionedBackbonePredictor(
+                    checkpoint_path=str(ckpt_path),
+                    device=str(device),
+                    target_region=args.target_region,
+                )
+                no_tta_predictor.load_no_tta_target_context_prompt_state_from_current()
+            except (RuntimeError, ValueError) as exc:
+                print(f"  no-TTA comparator unavailable for this TTA mode: {exc}")
+                no_tta_predictor = None
+        if args.predictor_type == "hyperda_target_adapt" and int(args.K or 0) > 0:
             zero_shot_predictor = PromptConditionedBackbonePredictor(
                 checkpoint_path=str(ckpt_path),
                 device=str(device),
                 target_region=args.target_region,
+                apply_support_affine_calibration=False,
             )
             import torch
 
@@ -342,10 +321,36 @@ def main():
             anchor_state = raw_checkpoint.get("target_adapter_anchor_state")
             if not anchor_state:
                 raise ValueError(
-                    "--adapt_mix_rho < 1 requires checkpoint target_adapter_anchor_state "
-                    "to reconstruct same-context K0 predictions."
+                    "K-shot hyperda_target_adapt evaluation requires checkpoint "
+                    "target_adapter_anchor_state to reconstruct same-context K0 "
+                    "predictions for Stage 3 hash/delta diagnostics."
                 )
             apply_target_adapter_state(zero_shot_predictor.model, anchor_state)
+            if no_tta_predictor is not None:
+                no_tta_zero_shot_predictor = PromptConditionedBackbonePredictor(
+                    checkpoint_path=str(ckpt_path),
+                    device=str(device),
+                    target_region=args.target_region,
+                    apply_support_affine_calibration=False,
+                )
+                no_tta_zero_shot_predictor.load_no_tta_target_context_prompt_state_from_current()
+                apply_target_adapter_state(no_tta_zero_shot_predictor.model, anchor_state)
+        if args.predictor_type == "hyperda_target_adapt" and args.eval_raw_adapted_before_mix:
+            raw_adapted_predictor = PromptConditionedBackbonePredictor(
+                checkpoint_path=str(ckpt_path),
+                device=str(device),
+                target_region=args.target_region,
+            )
+            import torch
+
+            if raw_checkpoint is None:
+                raw_checkpoint = torch.load(ckpt_path, map_location=str(device), weights_only=False)
+            raw_state = (raw_checkpoint.get("raw_adapted_state_dict") or {}).get("target_adapter_state_dict")
+            if not raw_state:
+                raise ValueError(
+                    "--eval_raw_adapted_before_mix requires checkpoint raw_adapted_state_dict.target_adapter_state_dict"
+                )
+            apply_target_adapter_state(raw_adapted_predictor.model, raw_state)
         target_context_dataset = None
         target_train_dataset = None
         if args.target_context_prompt:
@@ -387,30 +392,27 @@ def main():
                 target_context_dataset.get_input_side_sample(i)
                 for i in range(len(target_context_dataset))
             )
+            if no_tta_predictor is not None:
+                no_tta_predictor.set_target_context_prompt_from_samples(
+                    (
+                        target_context_dataset.get_input_side_sample(i)
+                        for i in range(len(target_context_dataset))
+                    ),
+                    context_tta_mode="none",
+                )
+            if no_tta_zero_shot_predictor is not None:
+                no_tta_zero_shot_predictor.set_target_context_prompt_from_samples(
+                    (
+                        target_context_dataset.get_input_side_sample(i)
+                        for i in range(len(target_context_dataset))
+                    ),
+                    context_tta_mode="none",
+                )
             print(
                 "  target-context prompt state: "
                 f"n={prompt_metadata['n_samples']} "
                 f"dates={prompt_metadata['date_start']}..{prompt_metadata['date_end']} "
                 f"labels={prompt_metadata['label_usage']}"
-            )
-
-        if args.stage3_k0_context_shrinkage:
-            shrinkage_metadata = predictor.enable_stage3_k0_context_shrinkage(
-                source_calibrated_rho_cap=float(args.stage3_k0_context_shrinkage_rho_cap),
-                policy=str(args.stage3_k0_context_shrinkage_policy),
-                surface_rho_cap=float(args.stage3_k0_context_shrinkage_surface_rho_cap),
-                rootzone_rho_cap=float(args.stage3_k0_context_shrinkage_rootzone_rho_cap),
-                policy_json_path=str(args.stage3_k0_context_shrinkage_policy_json or ""),
-            )
-            if shrinkage_metadata is None:
-                shrinkage_metadata = getattr(predictor, "stage3_k0_context_shrinkage_metadata", {})
-            print(
-                "  Stage 3 K=0 context shrinkage enabled: "
-                f"variant={shrinkage_metadata['stage3_variant']} "
-                f"policy={shrinkage_metadata.get('policy')} "
-                f"rho_cap={shrinkage_metadata['rho_cap']} "
-                f"rho_surface_cap={shrinkage_metadata.get('rho_surface_cap')} "
-                f"rho_rootzone_cap={shrinkage_metadata.get('rho_rootzone_cap')}"
             )
 
         target_train_calibration = {}
@@ -515,8 +517,15 @@ def main():
             predictor=predictor,
             return_hashes=True,
             zero_shot_predictor=zero_shot_predictor,
+            raw_adapted_predictor=raw_adapted_predictor,
+            no_tta_predictor=no_tta_predictor,
+            no_tta_zero_shot_predictor=no_tta_zero_shot_predictor,
             adapt_mix_rho=float(args.adapt_mix_rho),
-            prediction_record_path=args.prediction_record_path or None,
+            prediction_record_path=(
+                args.prediction_record_path or None
+                if args.output_level == "full"
+                else None
+            ),
             **eval_kwargs,
         )
 
@@ -532,11 +541,26 @@ def main():
             json.dump(summary, f, indent=2)
         return
 
-    # Save long-form results
+    # Save long-form results according to the selected artifact volume profile.
     df = pd.DataFrame(rows)
     long_path = region_output_dir / "metrics_long.csv"
-    df.to_csv(long_path, index=False)
-    print(f"  Saved {len(rows)} rows to {long_path}")
+    long_gz_path = region_output_dir / "metrics_long.csv.gz"
+    if args.output_level == "full":
+        df.to_csv(long_path, index=False)
+        if long_gz_path.exists():
+            long_gz_path.unlink()
+        print(f"  Saved {len(rows)} rows to {long_path}")
+    elif args.output_level == "long":
+        df.to_csv(long_gz_path, index=False, compression="gzip")
+        if long_path.exists():
+            long_path.unlink()
+        print(f"  Saved {len(rows)} compressed rows to {long_gz_path}")
+    else:
+        if long_path.exists():
+            long_path.unlink()
+        if long_gz_path.exists():
+            long_gz_path.unlink()
+        print("  EVAL_OUTPUT_LEVEL=compact: skipped metrics_long.csv")
 
     # Aggregate
     agg = aggregate_results(rows)
@@ -553,10 +577,24 @@ def main():
 
     metric_summary = summarize_metric_rows(df)
     stage3_protocol_metadata = dict(getattr(predictor, "stage3_protocol_metadata", {}) or {})
-    stage3_k0_context_shrinkage = dict(
-        getattr(predictor, "stage3_k0_context_shrinkage_metadata", {}) or {"enabled": False}
+    target_prompt_metadata = dict(getattr(predictor, "_target_prompt_metadata", {}) or {})
+    prompt_l2_delta_mean = float(
+        target_prompt_metadata.get(
+            "prompt_l2_delta_mean",
+            stage3_protocol_metadata.get("prompt_l2_delta_mean", 0.0),
+        )
+        or 0.0
     )
-    stage3_k0_context_shrinkage.update(eval_hashes.get("stage3_k0_context_shrinkage", {}))
+    prediction_delta_vs_no_tta = float(
+        eval_hashes.get(
+            "prediction_delta_vs_no_tta",
+            stage3_protocol_metadata.get("prediction_delta_vs_no_tta", 0.0),
+        )
+        or 0.0
+    )
+    prediction_max_abs_delta_vs_no_tta = float(
+        eval_hashes.get("prediction_max_abs_delta_vs_no_tta", 0.0) or 0.0
+    )
 
     summary = {
         "method": predictor.method_name,
@@ -570,6 +608,7 @@ def main():
         "n_samples_evaluated": n_samples_effective,
         "n_metric_rows": len(rows),
         "eval_batch_size": args.batch_size,
+        "output_level": args.output_level,
         "protocol_freeze_id": protocol_freeze_id,
         "split_manifest_sha256": split_manifest_sha256,
         "target_context_dates_hash": dataset_date_hash(dataset, "target_context_dates_hash"),
@@ -577,20 +616,40 @@ def main():
         "support_dates_hash": dataset_date_hash(dataset, "support_dates_hash"),
         "target_train_dates_hash": dataset_date_hash(dataset, "target_train_dates_hash"),
         "target_eval_dates_hash": dataset_date_hash(dataset, "target_eval_dates_hash"),
-        "target_prompt": getattr(predictor, "_target_prompt_metadata", {}),
+        "target_prompt": target_prompt_metadata,
         "stage3_protocol": stage3_protocol_metadata,
-        "stage3_k0_context_shrinkage": stage3_k0_context_shrinkage,
+        "context_tta_effective": bool(
+            stage3_protocol_metadata.get(
+                "context_tta_effective",
+                target_prompt_metadata.get("context_tta_effective", False),
+            )
+        ),
+        "context_tta_source_stat_status": stage3_protocol_metadata.get(
+            "context_tta_source_stat_status",
+            target_prompt_metadata.get("context_tta_source_stat_status", "not_requested"),
+        ),
+        "prompt_l2_delta_mean": prompt_l2_delta_mean,
+        "prediction_delta_vs_no_tta": prediction_delta_vs_no_tta,
+        "prediction_max_abs_delta_vs_no_tta": prediction_max_abs_delta_vs_no_tta,
         "target_train_residual_gain_calibration": target_train_calibration if args.predictor_type in ("prompt_conditioned", "hyperda_target_adapt") else {},
         "prediction_content_hash": eval_hashes.get("prediction_content_hash", ""),
         "prediction_record_count": eval_hashes.get("prediction_record_count", 0),
+        "prediction_records_written": bool(args.output_level == "full" and args.prediction_record_path),
         "metric_content_hash": eval_hashes.get("metric_content_hash", ""),
         "metric_row_content_hash": eval_hashes.get("metric_content_hash", ""),
         "metric_values_content_hash": eval_hashes.get("metric_values_content_hash", ""),
         "metric_hash_source": "in_memory_metric_rows_before_csv_write",
         "adapt_mix_rho": float(args.adapt_mix_rho),
+        "eval_raw_adapted_before_mix": bool(args.eval_raw_adapted_before_mix),
         "zero_shot_prediction_content_hash": eval_hashes.get("zero_shot_prediction_content_hash", ""),
         "adapted_pre_mix_prediction_content_hash": eval_hashes.get("adapted_pre_mix_prediction_content_hash", ""),
+        "raw_adapted_prediction_content_hash": eval_hashes.get("raw_adapted_prediction_content_hash", ""),
+        "post_gate_prediction_content_hash": eval_hashes.get("post_gate_prediction_content_hash", ""),
         "final_mixed_prediction_content_hash": eval_hashes.get("final_mixed_prediction_content_hash", ""),
+        "no_tta_prediction_content_hash": eval_hashes.get("no_tta_prediction_content_hash", ""),
+        "raw_to_k0_mean_abs_delta": eval_hashes.get("raw_to_k0_mean_abs_delta", 0.0),
+        "post_gate_to_k0_mean_abs_delta": eval_hashes.get("post_gate_to_k0_mean_abs_delta", 0.0),
+        "final_mix_to_k0_mean_abs_delta": eval_hashes.get("final_mix_to_k0_mean_abs_delta", 0.0),
         "mix_mean_abs_change_from_k0": eval_hashes.get("mix_mean_abs_change_from_k0", 0.0),
         "mix_max_abs_change_from_k0": eval_hashes.get("mix_max_abs_change_from_k0", 0.0),
         "mix_mean_abs_change_from_adapted": eval_hashes.get("mix_mean_abs_change_from_adapted", 0.0),
@@ -628,6 +687,7 @@ def main():
         "n_samples_evaluated": n_samples_effective,
         "n_metric_rows": len(rows),
         "eval_batch_size": args.batch_size,
+        "output_level": args.output_level,
         "target_context_dates_hash": dataset_date_hash(dataset, "target_context_dates_hash"),
         "target_support_dates_hash": dataset_date_hash(dataset, "target_support_dates_hash"),
         "target_eval_dates_hash": dataset_date_hash(dataset, "target_eval_dates_hash"),
@@ -636,16 +696,36 @@ def main():
         "variables": sorted(df["variable"].unique().tolist()),
         "seasonal_breakdown": sorted(df["season"].unique().tolist()) if "season" in df.columns else [],
         "stage3_protocol": stage3_protocol_metadata,
-        "stage3_k0_context_shrinkage": stage3_k0_context_shrinkage,
+        "context_tta_effective": bool(
+            stage3_protocol_metadata.get(
+                "context_tta_effective",
+                target_prompt_metadata.get("context_tta_effective", False),
+            )
+        ),
+        "context_tta_source_stat_status": stage3_protocol_metadata.get(
+            "context_tta_source_stat_status",
+            target_prompt_metadata.get("context_tta_source_stat_status", "not_requested"),
+        ),
+        "prompt_l2_delta_mean": prompt_l2_delta_mean,
+        "prediction_delta_vs_no_tta": prediction_delta_vs_no_tta,
+        "prediction_max_abs_delta_vs_no_tta": prediction_max_abs_delta_vs_no_tta,
         "prediction_content_hash": eval_hashes.get("prediction_content_hash", ""),
         "prediction_record_count": eval_hashes.get("prediction_record_count", 0),
+        "prediction_records_written": bool(args.output_level == "full" and args.prediction_record_path),
         "metric_content_hash": eval_hashes.get("metric_content_hash", ""),
         "metric_values_content_hash": eval_hashes.get("metric_values_content_hash", ""),
         "metric_hash_source": "in_memory_metric_rows_before_csv_write",
         "adapt_mix_rho": float(args.adapt_mix_rho),
+        "eval_raw_adapted_before_mix": bool(args.eval_raw_adapted_before_mix),
         "zero_shot_prediction_content_hash": eval_hashes.get("zero_shot_prediction_content_hash", ""),
         "adapted_pre_mix_prediction_content_hash": eval_hashes.get("adapted_pre_mix_prediction_content_hash", ""),
+        "raw_adapted_prediction_content_hash": eval_hashes.get("raw_adapted_prediction_content_hash", ""),
+        "post_gate_prediction_content_hash": eval_hashes.get("post_gate_prediction_content_hash", ""),
         "final_mixed_prediction_content_hash": eval_hashes.get("final_mixed_prediction_content_hash", ""),
+        "no_tta_prediction_content_hash": eval_hashes.get("no_tta_prediction_content_hash", ""),
+        "raw_to_k0_mean_abs_delta": eval_hashes.get("raw_to_k0_mean_abs_delta", 0.0),
+        "post_gate_to_k0_mean_abs_delta": eval_hashes.get("post_gate_to_k0_mean_abs_delta", 0.0),
+        "final_mix_to_k0_mean_abs_delta": eval_hashes.get("final_mix_to_k0_mean_abs_delta", 0.0),
         "mix_mean_abs_change_from_k0": eval_hashes.get("mix_mean_abs_change_from_k0", 0.0),
         "mix_max_abs_change_from_k0": eval_hashes.get("mix_max_abs_change_from_k0", 0.0),
         "mix_mean_abs_change_from_adapted": eval_hashes.get("mix_mean_abs_change_from_adapted", 0.0),
@@ -658,7 +738,8 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"{phase_label} Evaluation Complete")
     print(f"  Output: {region_output_dir}/")
-    print(f"  metrics_long.csv | metrics_by_region.csv | metrics_by_season.csv")
+    print(f"  output_level={args.output_level}")
+    print(f"  metrics_by_region.csv | metrics_by_season.csv")
     print(f"  summary.json | diagnostics.json")
 
 

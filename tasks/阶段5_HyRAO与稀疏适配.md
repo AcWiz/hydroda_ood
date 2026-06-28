@@ -12,7 +12,7 @@ tasks/phase5_hyperda_safe_zero_few_shot.md
 当前主协议：
 
 ```text
-HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement
+HyperDA-TRUST K=0 mainline; SAFE K-shot diagnostic / future extension
 V4.4 zero/few-shot target generalization
 K in {0,4,12}
 target_context=2015-2021 input-side only

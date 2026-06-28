@@ -14,7 +14,7 @@ Active protocol:
 
 ```text
 V4.4 zero/few-shot target generalization
-HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement
+HyperDA-TRUST K=0 mainline; SAFE K-shot diagnostic / future extension
 K in {0,4,12}
 target_context=2015-2021 input-side only
 target_support=K labeled cycles

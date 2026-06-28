@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from hydroda.models.hyper_adapters import BasisHyperAdapter
@@ -347,6 +348,701 @@ def test_stable_rank_gated_saliency_prior_can_change_topk_in_legacy_diagnostic_m
     assert torch.argmax(coeffs, dim=1).tolist() == [1, 1]
 
 
+def test_phys_token_operator_zero_init_preserves_m3_1_logits_and_forward():
+    torch.manual_seed(2026)
+    baseline = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    torch.manual_seed(2026)
+    phys = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.25,
+        hyper_phys_gate_init=0.90,
+        hyper_operator_droppath_p=0.10,
+    )
+    baseline.eval()
+    phys.eval()
+    x = torch.randn(2, 12, 16, 16)
+    z = torch.randn(2, 16)
+    z_phys = torch.randn(2, 16)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.randn(5, 16),
+        "layer_consensus_logits": {
+            "bottleneck": torch.randn(5, 4),
+            "dec2": torch.randn(5, 4),
+            "dec1": torch.randn(5, 4),
+        },
+        "prompt_distance_quantiles": {"q75": 1.0},
+    }
+    reliability = torch.zeros(2, 5)
+
+    with torch.no_grad():
+        for layer_name in ("bottleneck", "dec2", "dec1"):
+            assert torch.allclose(
+                baseline.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                ),
+                phys.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                    z_phys=z_phys,
+                ),
+                atol=0.0,
+                rtol=0.0,
+            )
+        assert torch.allclose(
+            baseline(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+            ),
+            phys(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                z_phys=z_phys,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+
+
+def test_formula_phys_context_encoder_zero_init_preserves_m3_1_logits_and_forward():
+    torch.manual_seed(2027)
+    baseline = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    torch.manual_seed(2027)
+    phys = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.10,
+        hyper_phys_gate_init=0.50,
+        hyper_operator_droppath_p=0.10,
+        phys_context_source="raw_input_side_formula_v2",
+    )
+    baseline.eval()
+    phys.eval()
+    assert phys.formula_phys_context_encoder is not None
+
+    x = torch.randn(2, 12, 16, 16)
+    z = torch.randn(2, 16)
+    formula_features = torch.rand(2, 10)
+    z_phys = phys.formula_phys_context_encoder(formula_features)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.randn(5, 16),
+        "layer_consensus_logits": {
+            "bottleneck": torch.randn(5, 4),
+            "dec2": torch.randn(5, 4),
+            "dec1": torch.randn(5, 4),
+        },
+        "prompt_distance_quantiles": {"q75": 1.0},
+    }
+    reliability = torch.zeros(2, 5)
+    variable_gate = torch.ones(2, 2)
+
+    with torch.no_grad():
+        for layer_name in ("bottleneck", "dec2", "dec1"):
+            assert torch.allclose(
+                baseline.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                ),
+                phys.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                    z_phys=z_phys,
+                ),
+                atol=0.0,
+                rtol=0.0,
+            )
+        assert torch.allclose(
+            baseline(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                variable_trust_gate=variable_gate,
+            ),
+            phys(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                z_phys=z_phys,
+                variable_trust_gate=variable_gate,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+    assert phys.last_phys_operator_summary["enabled"] is True
+    assert phys.last_phys_operator_summary["phys_delta_scale"] == pytest.approx(0.10)
+
+
+def test_formula_phys_context_encoder_enhanced_zero_init_preserves_m3_1_logits_and_forward():
+    from hydroda.models.phys_trust import PHYS_FORMULA_ENHANCED_FEATURE_SCHEMA
+
+    torch.manual_seed(2028)
+    baseline = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    torch.manual_seed(2028)
+    phys = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.05,
+        hyper_phys_gate_init=0.35,
+        hyper_operator_droppath_p=0.10,
+        phys_context_source="raw_input_side_formula_v3_enhanced",
+    )
+    baseline.eval()
+    phys.eval()
+    assert phys.formula_phys_context_encoder is not None
+    assert phys.formula_phys_context_encoder.feature_dim == len(PHYS_FORMULA_ENHANCED_FEATURE_SCHEMA)
+
+    x = torch.randn(2, 12, 16, 16)
+    z = torch.randn(2, 16)
+    formula_features = torch.rand(2, len(PHYS_FORMULA_ENHANCED_FEATURE_SCHEMA))
+    z_phys = phys.formula_phys_context_encoder(formula_features)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.randn(5, 16),
+        "layer_consensus_logits": {
+            "bottleneck": torch.randn(5, 4),
+            "dec2": torch.randn(5, 4),
+            "dec1": torch.randn(5, 4),
+        },
+        "prompt_distance_quantiles": {"q75": 1.0},
+    }
+    reliability = torch.zeros(2, 5)
+    variable_gate = torch.ones(2, 2)
+
+    with torch.no_grad():
+        for layer_name in ("bottleneck", "dec2", "dec1"):
+            assert torch.allclose(
+                baseline.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                ),
+                phys.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                    z_phys=z_phys,
+                ),
+                atol=0.0,
+                rtol=0.0,
+            )
+        assert torch.allclose(
+            baseline(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                variable_trust_gate=variable_gate,
+            ),
+            phys(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                z_phys=z_phys,
+                variable_trust_gate=variable_gate,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+    assert phys.last_phys_operator_summary["enabled"] is True
+    assert phys.last_phys_operator_summary["phys_context_source"] == "raw_input_side_formula_v3_enhanced"
+    assert phys.last_phys_operator_summary["phys_delta_scale"] == pytest.approx(0.05)
+    assert phys.last_phys_operator_summary["phys_gate_init"] == pytest.approx(0.35)
+    assert phys.last_phys_operator_summary["target_eval_usage"] == "final_eval_only_no_selection"
+
+
+def test_m3_14_formula_gain_operator_zero_init_preserves_logits_and_has_no_output_residual_branch():
+    from hydroda.models.phys_trust import PHYS_FORMULA_GAIN_FEATURE_SCHEMA
+
+    torch.manual_seed(2029)
+    baseline = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    torch.manual_seed(2029)
+    phys = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.05,
+        hyper_phys_gate_init=0.50,
+        hyper_operator_droppath_p=0.10,
+        phys_context_source="raw_input_side_formula_gain",
+    )
+    baseline.eval()
+    phys.eval()
+    assert phys.formula_phys_context_encoder is not None
+    assert phys.formula_phys_context_encoder.feature_dim == len(PHYS_FORMULA_GAIN_FEATURE_SCHEMA)
+    assert phys.phys_gain_basis_residual is None
+    assert phys.hyper_phys_gain_basis_residual is False
+
+    x = torch.randn(2, 12, 16, 16)
+    z = torch.randn(2, 16)
+    formula_features = torch.rand(2, len(PHYS_FORMULA_GAIN_FEATURE_SCHEMA))
+    z_phys = phys.formula_phys_context_encoder(formula_features)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.randn(5, 16),
+        "layer_consensus_logits": {
+            "bottleneck": torch.randn(5, 4),
+            "dec2": torch.randn(5, 4),
+            "dec1": torch.randn(5, 4),
+        },
+        "prompt_distance_quantiles": {"q75": 1.0},
+    }
+    reliability = torch.zeros(2, 5)
+    variable_gate = torch.ones(2, 2)
+
+    with torch.no_grad():
+        for layer_name in ("bottleneck", "dec2", "dec1"):
+            assert torch.allclose(
+                baseline.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                ),
+                phys.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                    z_phys=z_phys,
+                ),
+                atol=0.0,
+                rtol=0.0,
+            )
+        assert torch.allclose(
+            baseline(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                variable_trust_gate=variable_gate,
+            ),
+            phys(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                z_phys=z_phys,
+                variable_trust_gate=variable_gate,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+    summary = phys.last_phys_operator_summary
+    assert summary["enabled"] is True
+    assert summary["method_id"] == "M3_14_source_trained_phys_formula_gain_hypertrust"
+    assert summary["phys_context_source"] == "raw_input_side_formula_gain"
+    assert summary["coefficient_injection_role"] == "bounded_operator_coefficient_logit_delta_only"
+    assert summary["final_output_residual_allowed"] is False
+    assert summary["phys_delta_scale"] == pytest.approx(0.05)
+    assert summary["phys_gate_init"] == pytest.approx(0.50)
+    assert summary["checkpoint_start"] == "source_pooled_global_backbone"
+
+
+def test_m3_16_lite_formula_gain_operator_zero_init_preserves_m3_1_path():
+    from hydroda.models.phys_trust import PHYS_FORMULA_GAIN_FEATURE_SCHEMA
+
+    torch.manual_seed(2030)
+    baseline = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    torch.manual_seed(2030)
+    phys = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        hyper_phys_delta_scale=0.03,
+        hyper_phys_gate_init=0.25,
+        hyper_operator_droppath_p=0.10,
+        phys_context_source="raw_input_side_formula_gain",
+    )
+    baseline.eval()
+    phys.eval()
+    assert phys.formula_phys_context_encoder is not None
+    assert phys.formula_phys_context_encoder.feature_dim == len(PHYS_FORMULA_GAIN_FEATURE_SCHEMA)
+    assert phys.phys_gain_basis_residual is None
+    assert phys.hyper_phys_gain_basis_residual is False
+
+    x = torch.randn(2, 12, 16, 16)
+    z = torch.randn(2, 16)
+    z_phys = phys.formula_phys_context_encoder(torch.rand(2, len(PHYS_FORMULA_GAIN_FEATURE_SCHEMA)))
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.randn(5, 16),
+        "layer_consensus_logits": {
+            "bottleneck": torch.randn(5, 4),
+            "dec2": torch.randn(5, 4),
+            "dec1": torch.randn(5, 4),
+        },
+        "prompt_distance_quantiles": {"q75": 1.0},
+    }
+    reliability = torch.zeros(2, 5)
+    variable_gate = torch.ones(2, 2)
+
+    with torch.no_grad():
+        for layer_name in ("bottleneck", "dec2", "dec1"):
+            assert torch.allclose(
+                baseline.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                ),
+                phys.adapter_coefficient_logits(
+                    z,
+                    layer_name,
+                    source_trust_bank=trust_bank,
+                    z_phys=z_phys,
+                ),
+                atol=0.0,
+                rtol=0.0,
+            )
+        assert torch.allclose(
+            baseline(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                variable_trust_gate=variable_gate,
+            ),
+            phys(
+                x,
+                z,
+                reliability_features=reliability,
+                source_trust_bank=trust_bank,
+                z_phys=z_phys,
+                variable_trust_gate=variable_gate,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+    summary = phys.last_phys_operator_summary
+    assert summary["enabled"] is True
+    assert summary["method_id"] == "M3_16_source_only_phys_m3trust_lite"
+    assert summary["coefficient_injection_role"] == "bounded_operator_coefficient_logit_delta_only"
+    assert summary["final_output_residual_allowed"] is False
+    assert summary["second_model_forward_allowed"] is False
+    assert summary["stage2_source_only_invariant"] is True
+    assert summary["phys_delta_scale"] == pytest.approx(0.03)
+    assert summary["phys_gate_init"] == pytest.approx(0.25)
+    assert summary["checkpoint_start"] == "source_pooled_global_backbone"
+    assert summary["source_fit_regularization_lambda_default"] == pytest.approx(0.0)
+
+
+def test_m3_15_phys_coeff_delta_scope_trains_only_operator_residual():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+        hyper_source_trust_variable_gate=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        hyper_phys_context_modulation=True,
+        phys_context_source="raw_input_side_formula_gain",
+    )
+    prompt_encoder = RegionPromptEncoder(num_regions=5, input_channels=12, hidden_dim=16)
+
+    metadata = apply_trainable_scope(
+        model=model,
+        prompt_encoder=prompt_encoder,
+        trainable_scope="phys_coeff_delta_only",
+    )
+
+    trainable = metadata["trainable_parameter_names"]
+    assert trainable
+    assert all(name.startswith("model.phys_operator_residual.") for name in trainable)
+    assert not any(name.startswith("model.formula_phys_context_encoder.") for name in trainable)
+    assert not any(name.startswith("prompt_encoder.") for name in trainable)
+    assert "formula_phys_context_encoder" in metadata["frozen_source_base_modules"]
+    assert model.phys_gain_basis_residual is None
+
+
+def test_phys_token_does_not_replace_prompt_space_trust_neighbor_query():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=1.0,
+        hyper_source_trust_top_m=1,
+        hyper_phys_context_modulation=True,
+        hyper_operator_droppath_p=0.0,
+    )
+    model.eval()
+    z = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    z_phys_a = torch.tensor([[0.0, 1.0, 0.0, 0.0]])
+    z_phys_b = torch.tensor([[0.0, -1.0, 0.0, 0.0]])
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "source_trust_query_embeddings": torch.tensor(
+            [[0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.tensor([[10.0, 0.0, 0.0], [0.0, 10.0, 0.0]]),
+        },
+        "prompt_distance_quantiles": {"q75": 1.0},
+        "source_trust_query_mode": "prompt_embedding",
+    }
+
+    logits_a = model.adapter_coefficient_logits(
+        z,
+        "bottleneck",
+        source_trust_bank=trust_bank,
+        z_phys=z_phys_a,
+    )
+    logits_b = model.adapter_coefficient_logits(
+        z,
+        "bottleneck",
+        source_trust_bank=trust_bank,
+        z_phys=z_phys_b,
+    )
+
+    assert torch.allclose(logits_a, logits_b)
+    summary = model.last_trust_routing_summary["bottleneck"]
+    assert summary["source_bank_embedding_key"] == "source_prompt_embeddings"
+    assert summary["trust_query_source"] == "target_prompt"
+    assert summary["nearest_neighbor_indices"] == [[0]]
+    assert summary["trust_routing_geometry"] == "prompt_embedding"
+
+
+def test_operator_droppath_only_changes_phys_delta_in_train_mode():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_phys_context_modulation=True,
+        hyper_operator_droppath_p=0.5,
+    )
+    with torch.no_grad():
+        model.phys_operator_residual.delta_head.weight.fill_(0.25)
+        model.phys_operator_residual.delta_head.bias.fill_(0.1)
+    z = torch.ones(8, 4)
+    z_phys = torch.full((8, 4), 0.5)
+    base = torch.zeros(8, 3)
+
+    model.eval()
+    eval_a = model.phys_modulated_coefficient_logits(z, z_phys, "bottleneck", base)
+    eval_b = model.phys_modulated_coefficient_logits(z, z_phys, "bottleneck", base)
+    assert torch.allclose(eval_a, eval_b)
+    assert model.last_phys_operator_summary["operator_droppath_active"] is False
+
+    model.train()
+    torch.manual_seed(1)
+    train_a = model.phys_modulated_coefficient_logits(z, z_phys, "bottleneck", base)
+    torch.manual_seed(2)
+    train_b = model.phys_modulated_coefficient_logits(z, z_phys, "bottleneck", base)
+    assert not torch.allclose(train_a, train_b)
+    assert model.last_phys_operator_summary["operator_droppath_active"] is True
+    assert model.last_phys_operator_summary["operator_droppath_p"] == pytest.approx(0.5)
+
+
 def test_prompt_manifold_reliability_scales_adapter_residual_gate_only_with_features():
     model = HyperAdapterConditionalResUNet(
         in_channels=12,
@@ -368,6 +1064,677 @@ def test_prompt_manifold_reliability_scales_adapter_residual_gate_only_with_feat
 
     assert torch.allclose(multiplier[:, 0], torch.tensor([1.0, 0.5]))
     assert (gate[:, 0] <= model.adapter_reliability_gate(z, "bottleneck")[:, 0]).all()
+
+
+def test_source_manifold_guard_shrinks_residual_without_changing_source_base_path():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        source_residual_rho=1.0,
+        hyper_source_manifold_guard=True,
+        hyper_source_manifold_guard_strength=0.5,
+    )
+    x = torch.randn(1, 12, 16, 16)
+    z = torch.randn(1, 16)
+    low_distance = torch.zeros(1, 5)
+    high_distance = torch.zeros(1, 5)
+    high_distance[:, 4] = 1.0
+
+    with torch.no_grad():
+        source_before = model.source_base_forward(x)
+        rho0 = model(x, z, reliability_features=high_distance, rho=0.0)
+        rho1_low = model(x, z, reliability_features=low_distance, rho=1.0)
+        rho1_high = model(x, z, reliability_features=high_distance, rho=1.0)
+        source_after = model.source_base_forward(x)
+
+    assert torch.allclose(source_before, source_after)
+    assert torch.allclose(rho0, source_before)
+    assert torch.linalg.vector_norm(rho1_high - source_before) <= torch.linalg.vector_norm(rho1_low - source_before)
+
+
+def test_trust_routed_coefficients_blend_target_logits_with_source_neighbor_consensus():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=2,
+    )
+    z = torch.tensor([[0.8, 0.2, 0.0, 0.0]], dtype=torch.float32)
+    target_logits = torch.tensor([[4.0, 0.0, -4.0]], dtype=torch.float32)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.tensor(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [-1.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.tensor(
+                [
+                    [0.0, 4.0, 0.0],
+                    [0.0, 2.0, 0.0],
+                    [4.0, 0.0, 0.0],
+                ],
+                dtype=torch.float32,
+            )
+        },
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    routed = model.trust_routed_coefficient_logits(
+        z,
+        "bottleneck",
+        target_logits,
+        source_trust_bank=trust_bank,
+    )
+
+    distances = torch.tensor([[((0.8 - 1.0) ** 2 + 0.2**2) ** 0.5, (0.8**2 + (0.2 - 1.0) ** 2) ** 0.5]])
+    weights = torch.softmax(-distances / 1.0, dim=1)
+    expected_consensus = weights[:, :1] * torch.tensor([[0.0, 4.0, 0.0]]) + weights[:, 1:] * torch.tensor([[0.0, 2.0, 0.0]])
+    expected = 0.5 * target_logits + 0.5 * expected_consensus
+    assert torch.allclose(routed, expected, atol=1e-6)
+    assert model.last_trust_routing_summary["bottleneck"]["source_neighbor_top_m"] == 2
+    assert model.last_trust_routing_summary["bottleneck"]["trust_strength"] == 0.5
+    assert model.last_trust_routing_summary["bottleneck"]["nearest_neighbor_indices"] == [[0, 1]]
+
+
+def test_trust_routing_can_use_separate_query_without_replacing_target_prompt_logits():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=1.0,
+        hyper_source_trust_top_m=1,
+    )
+    target_prompt = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    raw_trust_query = torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+    target_logits = torch.tensor([[9.0, -9.0, 1.0]], dtype=torch.float32)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_prompt_embeddings": torch.tensor(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        ),
+        "source_trust_query_embeddings": torch.tensor(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.tensor(
+                [
+                    [3.0, 0.0, 0.0],
+                    [0.0, 5.0, 0.0],
+                ],
+                dtype=torch.float32,
+            )
+        },
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    routed = model.trust_routed_coefficient_logits(
+        target_prompt,
+        "bottleneck",
+        target_logits,
+        source_trust_bank=trust_bank,
+        source_trust_query=raw_trust_query,
+    )
+
+    assert torch.allclose(routed, torch.tensor([[0.0, 5.0, 0.0]]), atol=1e-6)
+    assert model.last_trust_routing_summary["bottleneck"]["nearest_neighbor_indices"] == [[1]]
+    assert model.last_trust_routing_summary["bottleneck"]["trust_query_source"] == "source_trust_query"
+
+
+def test_raw_trust_query_requires_matching_source_query_bank():
+    from hydroda.baselines.prompt_conditioned import normalize_hyperda_source_trust_bank_state
+
+    stale_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "label_usage": "none",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "source_trust_query_mode": "raw_input_side_da_diagnostics",
+        "source_prompt_embeddings": torch.zeros(2, 4),
+        "layer_consensus_logits": {
+            "bottleneck": torch.zeros(2, 3),
+        },
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    with pytest.raises(ValueError, match="raw_input_side_da_diagnostics.*source_trust_query_embeddings"):
+        normalize_hyperda_source_trust_bank_state(stale_bank)
+
+
+def test_blended_trust_query_uses_separate_blended_bank_without_changing_prompt_logits():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=1.0,
+        hyper_source_trust_top_m=1,
+    )
+    target_prompt = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    blended_query = torch.tensor([[0.75, 0.25, 0.0, 0.0]], dtype=torch.float32)
+    target_logits = torch.tensor([[9.0, -9.0, 1.0]], dtype=torch.float32)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "source_trust_query_mode": "blended_prompt_raw_da_0p25",
+        "source_prompt_embeddings": torch.tensor(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        ),
+        "source_trust_query_embeddings": torch.tensor(
+            [
+                [0.75, 0.25, 0.0, 0.0],
+                [0.25, 0.75, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.tensor(
+                [
+                    [3.0, 0.0, 0.0],
+                    [0.0, 5.0, 0.0],
+                ],
+                dtype=torch.float32,
+            )
+        },
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    routed = model.trust_routed_coefficient_logits(
+        target_prompt,
+        "bottleneck",
+        target_logits,
+        source_trust_bank=trust_bank,
+        source_trust_query=blended_query,
+    )
+
+    assert torch.allclose(routed, torch.tensor([[3.0, 0.0, 0.0]]), atol=1e-6)
+    summary = model.last_trust_routing_summary["bottleneck"]
+    assert summary["nearest_neighbor_indices"] == [[0]]
+    assert summary["source_bank_embedding_key"] == "source_trust_query_embeddings"
+    assert summary["trust_query_source"] == "source_trust_query"
+
+
+def test_phys_agreement_guard_keeps_prompt_space_m3_1_when_neighbors_agree():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=1,
+        hyper_phys_agreement_guard=True,
+        hyper_phys_agreement_guard_strength=1.0,
+    )
+    target_prompt = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    raw_phys_query = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    target_logits = torch.tensor([[4.0, 0.0, -4.0]], dtype=torch.float32)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "source_trust_query_mode": "raw_input_side_da_diagnostics",
+        "source_prompt_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "source_trust_query_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.tensor(
+                [[0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+                dtype=torch.float32,
+            )
+        },
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    routed = model.trust_routed_coefficient_logits(
+        target_prompt,
+        "bottleneck",
+        target_logits,
+        source_trust_bank=trust_bank,
+        source_trust_query=raw_phys_query,
+    )
+
+    expected = 0.5 * target_logits + 0.5 * torch.tensor([[0.0, 4.0, 0.0]])
+    summary = model.last_trust_routing_summary["bottleneck"]
+    assert torch.allclose(routed, expected, atol=1e-6)
+    assert summary["source_bank_embedding_key"] == "source_prompt_embeddings"
+    assert summary["trust_query_source"] == "target_prompt"
+    assert summary["phys_agreement_guard"]["enabled"] is True
+    assert summary["phys_agreement_guard"]["soft_neighbor_agreement_mean"] == pytest.approx(1.0)
+    assert summary["effective_trust_strength_mean"] == pytest.approx(0.5)
+
+
+def test_phys_agreement_guard_uses_prompt_temperature_and_phys_ood_temperature():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=2,
+        hyper_n_basis=2,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=1.0,
+        hyper_source_trust_top_m=2,
+        hyper_phys_agreement_guard=True,
+        hyper_phys_agreement_guard_strength=1.0,
+    )
+    target_prompt = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+    raw_phys_query = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+    target_logits = torch.zeros(1, 2, dtype=torch.float32)
+    consensus_logits = torch.tensor([[10.0, 0.0], [0.0, 10.0]], dtype=torch.float32)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "source_trust_query_mode": "raw_input_side_da_diagnostics",
+        "source_prompt_embeddings": torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32),
+        "source_trust_query_embeddings": torch.tensor([[0.0, 0.0], [0.0, 1.0]], dtype=torch.float32),
+        "layer_consensus_logits": {"bottleneck": consensus_logits},
+        "distance_quantiles": {"q75": 10.0},
+        "prompt_distance_quantiles": {"q75": 0.1},
+        "source_trust_query_distance_quantiles": {"q75": 10.0},
+    }
+
+    routed = model.trust_routed_coefficient_logits(
+        target_prompt,
+        "bottleneck",
+        target_logits,
+        source_trust_bank=trust_bank,
+        source_trust_query=raw_phys_query,
+    )
+
+    weights = torch.softmax(torch.tensor([[0.0, -10.0]], dtype=torch.float32), dim=1)
+    expected = weights @ consensus_logits
+    summary = model.last_trust_routing_summary["bottleneck"]
+    assert torch.allclose(routed, expected, atol=1e-5)
+    assert summary["distance_temperature"] == pytest.approx(0.1)
+    assert summary["phys_agreement_guard"]["distance_temperature"] == pytest.approx(10.0)
+    assert summary["phys_agreement_guard"]["multiplier_mean"] == pytest.approx(1.0)
+
+
+def test_phys_agreement_guard_only_shrinks_when_phys_neighbors_disagree():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=1,
+        hyper_phys_agreement_guard=True,
+        hyper_phys_agreement_guard_strength=1.0,
+    )
+    target_prompt = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    raw_phys_query = torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+    target_logits = torch.tensor([[4.0, 0.0, -4.0]], dtype=torch.float32)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "source_trust_query_mode": "raw_input_side_da_diagnostics",
+        "source_prompt_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "source_trust_query_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.tensor(
+                [[0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+                dtype=torch.float32,
+            )
+        },
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    routed = model.trust_routed_coefficient_logits(
+        target_prompt,
+        "bottleneck",
+        target_logits,
+        source_trust_bank=trust_bank,
+        source_trust_query=raw_phys_query,
+    )
+
+    summary = model.last_trust_routing_summary["bottleneck"]
+    assert torch.allclose(routed, target_logits, atol=1e-6)
+    assert summary["source_bank_embedding_key"] == "source_prompt_embeddings"
+    assert summary["phys_agreement_guard"]["prompt_neighbor_indices"] == [[0]]
+    assert summary["phys_agreement_guard"]["phys_neighbor_indices"] == [[1]]
+    assert summary["phys_agreement_guard"]["soft_neighbor_agreement_mean"] == pytest.approx(0.0)
+    assert summary["effective_trust_strength_mean"] == pytest.approx(0.0)
+
+
+def test_phys_agreement_guard_conservative_and_rule_requires_disagreement_and_ood():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=1,
+        hyper_phys_agreement_guard=True,
+        hyper_phys_agreement_guard_strength=1.0,
+        hyper_phys_agreement_guard_min_multiplier=0.8,
+        hyper_phys_agreement_guard_risk_rule="and",
+    )
+    target_prompt = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    raw_phys_query = torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+    target_logits = torch.tensor([[4.0, 0.0, -4.0]], dtype=torch.float32)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "source_trust_query_mode": "raw_input_side_da_diagnostics",
+        "source_prompt_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "source_trust_query_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.tensor(
+                [[0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+                dtype=torch.float32,
+            )
+        },
+        "source_trust_query_distance_quantiles": {"q75": 10.0},
+        "prompt_distance_quantiles": {"q75": 1.0},
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    routed = model.trust_routed_coefficient_logits(
+        target_prompt,
+        "bottleneck",
+        target_logits,
+        source_trust_bank=trust_bank,
+        source_trust_query=raw_phys_query,
+    )
+
+    expected = 0.5 * target_logits + 0.5 * torch.tensor([[0.0, 4.0, 0.0]])
+    summary = model.last_trust_routing_summary["bottleneck"]
+    assert torch.allclose(routed, expected, atol=1e-6)
+    assert summary["phys_agreement_guard"]["soft_neighbor_agreement_mean"] == pytest.approx(0.0)
+    assert summary["phys_agreement_guard"]["phys_ood_distance_bounded_mean"] < 0.2
+    assert summary["phys_agreement_guard"]["risk_rule"] == "and"
+    assert summary["phys_agreement_guard"]["multiplier_mean"] == pytest.approx(1.0)
+    assert summary["effective_trust_strength_mean"] == pytest.approx(0.5)
+
+
+def test_phys_agreement_guard_min_multiplier_prevents_global_off_switch():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=1,
+        hyper_phys_agreement_guard=True,
+        hyper_phys_agreement_guard_strength=1.0,
+        hyper_phys_agreement_guard_min_multiplier=0.8,
+        hyper_phys_agreement_guard_risk_rule="and",
+    )
+    target_prompt = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    raw_phys_query = torch.tensor([[0.0, 3.0, 0.0, 0.0]], dtype=torch.float32)
+    target_logits = torch.tensor([[4.0, 0.0, -4.0]], dtype=torch.float32)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "source_trust_query_mode": "raw_input_side_da_diagnostics",
+        "source_prompt_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "source_trust_query_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.tensor(
+                [[0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+                dtype=torch.float32,
+            )
+        },
+        "source_trust_query_distance_quantiles": {"q75": 1.0},
+        "prompt_distance_quantiles": {"q75": 1.0},
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    routed = model.trust_routed_coefficient_logits(
+        target_prompt,
+        "bottleneck",
+        target_logits,
+        source_trust_bank=trust_bank,
+        source_trust_query=raw_phys_query,
+    )
+
+    expected = 0.6 * target_logits + 0.4 * torch.tensor([[0.0, 4.0, 0.0]])
+    summary = model.last_trust_routing_summary["bottleneck"]
+    assert torch.allclose(routed, expected, atol=1e-6)
+    assert summary["phys_agreement_guard"]["phys_ood_distance_bounded_mean"] == pytest.approx(1.0)
+    assert summary["phys_agreement_guard"]["multiplier_min"] == pytest.approx(0.8)
+    assert summary["phys_agreement_guard"]["min_multiplier"] == pytest.approx(0.8)
+    assert summary["effective_trust_strength_mean"] == pytest.approx(0.4)
+
+
+def test_phys_agreement_guard_shrinks_source_residual_without_amplifying_it():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=4,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware",
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        source_residual_rho=1.0,
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.5,
+        hyper_source_trust_top_m=1,
+        hyper_phys_agreement_guard=True,
+        hyper_phys_agreement_guard_strength=1.0,
+    )
+    x = torch.randn(1, 12, 16, 16)
+    target_prompt = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    raw_agree = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    raw_disagree = torch.tensor([[0.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+    reliability = torch.zeros(1, 5)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source": "source_fit_source_val_only",
+        "source_trust_query_mode": "raw_input_side_da_diagnostics",
+        "source_prompt_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "source_trust_query_embeddings": torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=torch.float32,
+        ),
+        "layer_consensus_logits": {
+            "bottleneck": torch.zeros(2, 3),
+            "dec2": torch.zeros(2, 3),
+            "dec1": torch.zeros(2, 3),
+        },
+        "distance_quantiles": {"q75": 1.0},
+    }
+    with torch.no_grad():
+        model.residual_head.weight.zero_()
+        model.residual_head.bias.copy_(torch.tensor([0.1, -0.2]))
+        source_base = model.source_base_forward(x)
+        agree = model(
+            x,
+            target_prompt,
+            reliability_features=reliability,
+            source_trust_bank=trust_bank,
+            source_trust_query=raw_agree,
+        )
+        disagree = model(
+            x,
+            target_prompt,
+            reliability_features=reliability,
+            source_trust_bank=trust_bank,
+            source_trust_query=raw_disagree,
+        )
+
+    agree_norm = torch.linalg.vector_norm(agree - source_base)
+    disagree_norm = torch.linalg.vector_norm(disagree - source_base)
+    assert disagree_norm <= agree_norm
+    assert disagree_norm == pytest.approx(0.0, abs=1e-6)
+
+
+def test_trust_strength_zero_preserves_m2_1_coefficient_logits_exactly():
+    torch.manual_seed(314)
+    baseline = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=8,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+    )
+    torch.manual_seed(314)
+    trust_zero = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=8,
+        hyper_n_basis=4,
+        hyper_adapter_bottleneck=8,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_rank_gate_top_k=2,
+        hyper_rank_gate_temperature_init=2.0,
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_source_trust_routing=True,
+        hyper_source_trust_strength=0.0,
+        hyper_source_trust_top_m=4,
+    )
+    z = torch.randn(3, 8)
+    trust_bank = {
+        "schema_version": "hyperda_source_trust_bank_v1",
+        "source_prompt_embeddings": torch.randn(5, 8),
+        "layer_consensus_logits": {
+            "bottleneck": torch.randn(5, 4),
+            "dec2": torch.randn(5, 4),
+            "dec1": torch.randn(5, 4),
+        },
+        "distance_quantiles": {"q75": 1.0},
+    }
+
+    for layer_name in ("bottleneck", "dec2", "dec1"):
+        assert torch.allclose(
+            baseline.adapter_coefficient_logits(z, layer_name),
+            trust_zero.adapter_coefficient_logits(
+                z,
+                layer_name,
+                source_trust_bank=trust_bank,
+            ),
+            atol=0.0,
+            rtol=0.0,
+        )
+
+
+def test_variable_trust_gate_can_shrink_surface_without_shrinking_rootzone():
+    model = HyperAdapterConditionalResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        prompt_dim=16,
+        hyper_n_basis=3,
+        hyper_adapter_bottleneck=8,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+        source_residual_rho=1.0,
+        hyper_source_trust_variable_gate=True,
+    )
+    x = torch.randn(1, 12, 16, 16)
+    z = torch.randn(1, 16)
+    reliability = torch.zeros(1, 5)
+    gate = torch.tensor([[0.25, 1.0]], dtype=torch.float32)
+
+    with torch.no_grad():
+        model.residual_head.weight.zero_()
+        model.residual_head.bias.copy_(torch.tensor([0.1, -0.2]))
+        source_base = model.source_base_forward(x)
+        no_gate = model(x, z, reliability_features=reliability, rho=1.0)
+        variable_gated = model(
+            x,
+            z,
+            reliability_features=reliability,
+            rho=1.0,
+            variable_trust_gate=gate,
+        )
+
+    residual_no_gate = no_gate - source_base
+    residual_gated = variable_gated - source_base
+    assert torch.allclose(residual_gated[:, 0], residual_no_gate[:, 0] * 0.25, atol=1e-6)
+    assert torch.allclose(residual_gated[:, 1], residual_no_gate[:, 1], atol=1e-6)
+    assert model.last_variable_trust_gate_summary["surface"]["mean"] == 0.25
+    assert model.last_variable_trust_gate_summary["rootzone"]["mean"] == 1.0
 
 
 def test_source_residual_prior_zero_init_is_strict_source_base_identity():

@@ -8,13 +8,18 @@ PAPER_MAIN_BASELINES = {
     "zero_few_shot_generalization": [
         "forecast_only",
         "source_pooled_global_backbone",
+        "swad_source_pooled_global_backbone",
+        "mixstyle_source_pooled_global_backbone",
+        "disam_source_domain_sharpness_alignment",
+        "udim_unknown_domain_inconsistency_minimization",
+        "moment_alignment_source_domain_invariance",
+        "identify_unlearn_source_domain_gradient_ascent",
         # Backward-compatible display alias for old docs/artifacts.
         "source_only_backbone",
         "prompt_conditioned_shared_backbone",
         "source_regime_specialist_bank",
         "hyperda_zero_shot_context",
-        "hyperda_safe_few_shot_k4",
-        "hyperda_safe_few_shot_k12",
+        "hyperda_trust_zero_shot_context",
     ],
 }
 
@@ -46,6 +51,17 @@ INTERNAL_SANITY_ONLY = {
     "hyperda_basis_adapter_shared",
     "hyperda_few_shot_k4",
     "hyperda_few_shot_k12",
+    "hyperda_safe_few_shot_k4",
+    "hyperda_safe_few_shot_k12",
+    "hyperda_rise_source_side_router_prior",
+    "hyperda_rise_k0_context_router",
+    "hyperda_rise_k4_support_posterior",
+    "hyperda_rise_k12_support_posterior",
+    "deep_coral_target_context_alignment",
+    "ssa_reg_target_context_subspace_alignment",
+    "tca_target_context_correlation_alignment",
+    "self_bootstrap_target_context_consistency_tta",
+    "weatherpeft_weather_fm_future_baseline",
     # Deprecated names retained in old artifacts/scripts.
     "hyperda_basis_adapter",
     "target_support_mean_increment",

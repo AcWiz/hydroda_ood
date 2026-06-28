@@ -166,7 +166,7 @@ checklists/no_leakage_checklist.md
 
 ---
 
-### Phase 5: HyperDA-SAFE zero/few-shot target generalization
+### Phase 5: HyperDA-TRUST zero-shot target generalization
 
 读取：
 
@@ -181,10 +181,12 @@ specs/protocol_v4.yaml
 checklists/no_leakage_checklist.md
 ```
 
-目标：执行 V4.4 zero/few-shot + HyperDA-SAFE 主协议，使用 source-trained
-HyperDA prior、target_context monthly prompt prototypes 和 K in {0,4,12}
-target_support 标签预算。K=4/K=12 paper-facing runs 必须使用 source-side
-SAFE policy metadata；`target_val` 不用于主协议 selection/gain calibration。
+目标：执行 V4.4 zero-shot HyperDA-TRUST 主协议，使用 source-trained
+HyperDA Operator Generator、target_context monthly prompt prototypes 和
+source-manifold trust routing。K=4/K=12 SAFE 路径保留为 diagnostic / frozen
+future extension；若展示必须使用 source-side SAFE policy metadata 并标注
+`rejected_to_k0_anchor` 或 accepted/future-extension status。`target_val` 不用于
+主协议 selection/gain calibration。
 
 Legacy note:
 
@@ -267,3 +269,17 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 - `context/01_RESEARCH_CONTRACT.md`：冻结主协议 `source_fit=2015-2021`、`source_val=2022`、`target_context=2015-2021 input-side`、`target_support K∈{0,4,12}`、`target_eval=2023-2025`。
 - `specs/protocol_v4.yaml`：机器可读的 Protocol V4.4 zero/few-shot single source of truth。
 - `specs/kdate_protocol.yaml`：V4.4 zero/few-shot split details and legacy K-date compatibility notes。
+
+## M3_14 physics-informed HyperDA-TRUST design handoff
+
+For physics-informed HyperDA-TRUST work after M3_13, also read:
+
+```text
+docs/hydroda_physics_formula_knowledge_base.md
+docs/m3_14_source_trained_physics_hypertrust_plan.md
+```
+
+Current rule: physics-module ablation is US-R1 seed0 K=0 only. M3_14 must start
+from `source_pooled_global_backbone`, must not warm-start from M2_1/M3_1, and
+must not use M3_13 final-output shrinkage. US-R2..US-R6 are deferred locked
+confirmation regions after method freeze.

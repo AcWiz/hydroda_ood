@@ -300,8 +300,9 @@ def test_paper_main_registry_uses_zero_few_shot_methods():
     assert "source_pooled_global_backbone" in allowed
     assert "source_regime_specialist_bank" in allowed
     assert "hyperda_zero_shot_context" in allowed
-    assert "hyperda_safe_few_shot_k4" in allowed
-    assert "hyperda_safe_few_shot_k12" in allowed
+    assert "hyperda_trust_zero_shot_context" in allowed
+    assert "hyperda_safe_few_shot_k4" not in allowed
+    assert "hyperda_safe_few_shot_k12" not in allowed
     assert "hyperda_few_shot_k4" not in allowed
     assert "hyperda_few_shot_k12" not in allowed
     assert "legacy_all_regions_sanity" not in allowed
@@ -309,7 +310,11 @@ def test_paper_main_registry_uses_zero_few_shot_methods():
     assert "hyperda_generated_operator_full_target_train" not in allowed
 
     assert_allowed_for_table("source_pooled_global_backbone", "paper_main")
-    assert_allowed_for_table("hyperda_safe_few_shot_k4", "paper_main")
+    assert_allowed_for_table("hyperda_trust_zero_shot_context", "paper_main")
+    with pytest.raises(ValueError, match="paper_main"):
+        assert_allowed_for_table("hyperda_safe_few_shot_k4", "paper_main")
+    with pytest.raises(ValueError, match="paper_main"):
+        assert_allowed_for_table("hyperda_safe_few_shot_k12", "paper_main")
     with pytest.raises(ValueError, match="paper_main"):
         assert_allowed_for_table("hyperda_few_shot_k4", "paper_main")
     with pytest.raises(ValueError, match="paper_main"):

@@ -10,7 +10,7 @@
 
 ```text
 HydroDA-OOD is a leakage-controlled cross-continental benchmark for neural land DA increment emulation.
-HyperDA-SAFE is a hydroclimatic spatio-temporal prompt-conditioned hypernetwork with Source-Anchored Few-Shot Operator Refinement for generating target-specific lightweight neural DA increment operators.
+HyperDA-TRUST is a source-trained prompt-conditioned HyperDA operator generator with Source-Manifold Trust Routing for zero-shot target-specific lightweight neural DA increment operators.
 ```
 
 ## 2. 任务定义
@@ -53,9 +53,10 @@ adaptation_setting ∈ {zero_shot_context, few_shot_k4, few_shot_k12}
 ```
 
 目标域 2015-2021 只作为 input-side `target_context` 构造 target-context
-monthly prompt prototypes。K=0 不使用目标域标签；K=4/12 只允许在 K 个 labeled
-target DA cycles 上更新轻量 target-specific 变量，并在 forward 中继续使用同一
-monthly context prototype 策略。主协议不使用 `target_val` 做 checkpoint
+monthly prompt prototypes。当前论文主结果聚焦 K=0 zero-shot，不使用目标域标签。
+K=4/12 保留为 frozen SAFE diagnostic / future extension；若 Stage 3 gate
+拒绝更新并回退到 K0 anchor，必须显式标注 `rejected_to_k0_anchor`，不能解释为
+accepted few-shot adaptation。主协议不使用 `target_val` 做 checkpoint
 selection、early stopping 或 gain calibration。2023-2025 target_eval labels
 只用于最终离线评估。
 
@@ -71,9 +72,8 @@ K 表示 labeled target DA analysis cycles，不是 patches/pixels/mini-batches�
 
 ## 4. 方法契约
 
-HyperDA-SAFE 的核心不是 feature-level conditioning，也不是 final-output
-residual patch，而是 parameter-space transfer with a source-anchored target
-operator update：
+HyperDA 的核心不是 feature-level conditioning，也不是 final-output residual
+patch，而是 source-trained parameter-space operator generation：
 
 ```text
 ζ_R = H_ψ(P_R)
@@ -95,11 +95,11 @@ parameter-space operator generation；是否进入主方法必须由 source_val
 selection 和 target_eval final evidence 支撑，不能用 target_val/target_eval
 调参。
 
-当前固定的 HyperDA-SAFE source prior 主线是：
+当前固定的 HyperDA Operator Generator 主线是：
 
 ```text
 M2_1_rank_gated_dora_stable
-stable rank-gated bounded-DoRA HyperDA prior + SAFE refinement
+stable rank-gated bounded-DoRA HyperDA prior
 shared_layer_aware_rank_gated_stable
 dora_like_gain_bounded
 temperature `2.0`
@@ -138,16 +138,106 @@ confidence、H/V polarization contrast、vegetation opacity、soil/surface
 temperature、surface/rootzone forecast state、finite coverage，以及 bounded
 `base_valid_mask` diagnostic coverage。禁止读取 target labels、target_val、
 target_eval statistics；channel 11 不得作为 loss/metric/obs/region hard mask。
-`M2_4_target_context_conservative_hyperda` 是 Stage 3 K=0 target-context
-conservative shrinkage diagnostic，不是 source-stage ablation：冻结 M2.1
-source prior，不继续 source fine-tune，用 target_context input-only
-reliability 做 post-hoc residual shrinkage，并通过
-leave-one-source-region pseudo-target episodes 选择 worst-case
-non-degradation vs M2.1；必须记录
-`target_labels_used_for_adaptation=false`、`target_val_usage=unused_in_main_protocol`、
-`target_eval_usage=final_eval_only_no_selection`、
-`target_eval_input_stats_used_for_update=false`。Hessian/Fisher/top-parameter
-selection 不进入主线，保留为 future source-side ablation。
+`M2_6_source_manifold_guarded_prior` 是新的
+`diagnostic_source_manifold_guarded_prior`：回到 M2.1 的 `current_mean_std`
+prompt route、`shared_layer_aware_rank_gated_stable`、
+`dora_like_gain_bounded`、top-k=4、temperature `2.0`、`USE_AMP=0` 和
+`LR=2e-4`，但使用
+`zero_shot_prior_form=source_base_residual_reliability_gated`、
+`source_residual_rho=1.0`、`SOURCE_RESIDUAL_GATE_INIT=0.95`，并只增加由
+source_fit/source_val 校准的 `source_manifold_distance_bounded` guard。该
+guard 只收缩 adapter/HyperDA residual branch，不改变 frozen
+`source_base_forward(x)`；它不是 target_eval-tuned shrinkage，也不是 M2.4
+post-hoc target-context shrinkage。M2.5b 的 raw DA prompt + manifold
+reliability 混合变量尚未通过 source/K0 evidence，因此不能替代 M2.1。
+K=0 主线保留冻结 M2.1 target-context HyperDA prior，不做 post-hoc residual
+shrinkage。Hessian/Fisher/top-parameter selection 以及其他额外 target-context
+guard 不进入主线，仅在后续明确提升时作为 source-side future ablation 讨论。
+`HyperDA-TRUST` / M3 是 source-manifold trust-routing 增强模块：
+Source-Manifold Trust-Routed Operator Generation。它不再像 M2.6 只做 scalar
+residual shrink，而是只用 source_fit/source_val 构建 source trust bank
+（source prompt embeddings、nearest-source distance quantiles、
+source-neighborhood coefficient consensus），在 target prompt 不被 source
+operator manifold 支持时把轻量 operator coefficients 路由/混合到 nearest
+source-neighborhood consensus，并记录 surface/rootzone 分变量 trust gate。
+source-side checkpoint selection 使用
+`source_val_dual_variable_cvar_safe_score`，要求两个变量和最差 source region
+都受保护。M3 不使用 target labels、target_val 或 target_eval statistics 做
+selection。看过 target_eval 后再调的候选只能标记 exploratory，不能进入
+paper-facing claim。2026-06-21 的 US-R1 seed0 preregistered matrix 结论是：
+`M3_1_hyperda_trust_medium` 仍是当前 K=0 paper-facing HyperDA-TRUST
+候选；`M3_1a_trust_medium_dualalpha`、`M3_1b_trust_mid_high` 和
+`M3_1c_trust_medium_local` 标记为
+`negative_or_neutral_preregistered_ablation`，不得替代 M3_1。除非明确降级为
+exploratory，不再把 `M3_1d_trust_medium_broad` 作为 strict evidence 运行。
+证据卡：
+`reports/experiments/M3_1_plus_us_r1_seed0_ablation_decision_20260621.md`。
+M3_4 raw/blended physical-query neighbor replacement has been rejected as a
+negative diagnostic and should not be continued as the main M3 direction.
+`M3_5_phys_agreement_guarded_trust` is the conservative follow-up candidate:
+it starts from M3_1 (`trust_strength=0.50`, `top_m=4`,
+`context_encoder=current_mean_std`), keeps prompt embeddings as the trust
+routing geometry, and uses raw PhysTrust diagnostics only as a shrink/no-harm
+agreement guard. When prompt-neighbor and physical-neighbor sets agree, M3_5 is
+M3_1-equivalent; when they disagree or raw physical distance is high, it can
+only reduce effective trust/source-residual strength. Its source-side gate is
+source_val dual-variable CVaR: reject if more than 0.005 below M3_1. It must
+not use target labels, target_val, or target_eval statistics; target_eval is
+`final_eval_only_no_selection`.
+The initial M3_5 US-R1 seed0 source-side run was early-stopped because the
+guard behaved like a near-global off switch. The low-complexity redesign
+`M3_5b_phys_agreement_floor_guard` keeps the same M3_1 prompt routing and raw
+diagnostics but changes only the guard action: shrinkage requires both
+prompt/physical neighbor disagreement and high raw physical OOD distance
+(`risk_rule=and`), and the multiplier is floored at `0.8` so it can shrink
+trust/residual branches by at most 20 percent. It remains source-gated and must
+not use target_eval for tuning.
+`M3_6_phys_token_operator_droppath_trust` supersedes M3_5b as the next
+low-complexity source-gated candidate. It is a Stage 2 supernetwork extension
+from M3_1, not a Stage 3 post-hoc guard: the main prompt remains
+`current_mean_std`, trust-neighbor geometry remains `prompt_embedding`, and the
+new raw input-side physical context token only adds a bounded residual to M3_1
+adapter operator coefficient logits. The residual branch is zero-initialized
+(`phys_delta_scale=0.25`, `phys_gate_init=0.90`) and uses train-mode-only
+Operator DropPath (`p=0.10`). The first screen warm-starts from M3_1 best,
+freezes existing M3_1 parameters, trains only the physical branch for 5 epochs,
+and rejects if source_val dual-variable CVaR is more than 0.005 below M3_1.
+It must not read target labels, target_val, or target_eval statistics; target_eval
+is `final_eval_only_no_selection`.
+`M3_12_phys_gain_basis_hypertrust` is a
+`rejected_negative_diagnostic`: it learned a free output residual and the
+current US-R1 evidence shows large source_val and target_eval degradation
+relative to M3_1, so it must not be promoted or used for target_eval tuning.
+`M3_13_phys_gain_guarded_hypertrust` replaces it as a guarded diagnostic:
+warm-start from M3_1 best, freeze backbone/prompt/trust/adapter/hypernetwork,
+build a source_fit-only physics-gain bank, select eta only on source_val from
+`{0, 0.02, 0.05, 0.10}`, and output only
+`pred = source_base + guard * (pred_M3_1 - source_base)` with
+`guard in [0.90, 1.00]`. Target_eval requires a passing `source_gate.json`,
+a positive eta, and no identity fallback; otherwise target_eval is refused.
+M3_13 is retained as a guarded diagnostic, not the active physics route.
+`M3_14_source_trained_phys_formula_gain_hypertrust` is a
+`rejected_negative_diagnostic`: its best source_val
+`dual_variable_cvar_score=0.44455` is below the M3_1 anchor `0.446573`, it
+fell back to `0.431846` by epoch 35, and the seen US-R1 target_eval RMSE
+degraded. Do not continue M3_14 to US-R2..US-R6, and keep the seen US-R1
+target_eval as development evidence only. `M3_15_m31_anchored_source_safe_phys_coeff_delta`
+is retained only as an M3_1-warm-start diagnostic around a frozen M3_1 path; it
+cannot replace the active Stage 2 physics mainline because it starts from an
+M3_1 prompt checkpoint and uses post-training source_val eta interpolation.
+The active replacement candidate is
+`M3_16_source_only_phys_m3trust_lite`: every Stage 2 physics-informed
+HyperDA/HyperDA-TRUST candidate must start from the Stage 1
+`source_pooled_global_backbone` source-only checkpoint, never from M2_1/M3_1
+prompt checkpoints. M3_16 reuses the M3_1 architecture route
+(`trust_strength=0.50`, `top_m=4`, `context_encoder=current_mean_std`,
+prompt-space trust routing), trains with
+`trainable_scope=source_base_frozen_adapter_film`, and adds only a lightweight
+raw input-side physics token to adapter operator coefficient logits
+(`phys_delta_scale=0.03`, `phys_gate_init=0.25`, Operator DropPath `p=0.10`).
+Final-output `q_surface/q_rootzone` residuals and post-hoc
+`pred = pred_M3_1 + eta * q_phys` forms remain forbidden. Current selection is
+US-R1 seed0 K=0 only; US-R2..US-R6 are locked until M3_16 is frozen.
 
 当前 active source-stage 训练入口是 staged HyperDA：
 
@@ -161,9 +251,17 @@ FiLM 和 basis-adapter generation modules（`trainable_scope =
 source_base_frozen_adapter_film`）。旧 scratch `phase4_hyperda.sh` 仅作为兼容
 wrapper 转发到 staged 主线。
 
+Stage 2 invariant: all active HyperDA/HyperDA-TRUST/physics source-stage
+methods start from the Stage 1 `source_pooled_global_backbone` checkpoint via
+`--init_from_source_base_checkpoint`. M2_1/M3_1 prompt-checkpoint warm starts
+are allowed only for explicitly marked diagnostics such as M3_15, not for the
+active physics mainline.
+
 K=0 使用 source-trained HyperDA prior 和 target_context monthly prompt
-prototypes。K=4/12 只在 K 个 labeled target support DA cycles 上更新
-target-specific lightweight variables，并保存 source-anchored refinement：
+prototypes；M3_1 在此基础上用 source-only trust bank 做 coefficient routing。
+SAFE K=4/12 当前降级为 diagnostic / frozen future extension。若运行 K-shot，
+只允许在 K 个 labeled target support DA cycles 上更新 target-specific
+lightweight variables，并保存 source-anchored refinement：
 
 ```text
 θ_SAFE = θ_prior + α_K (θ_adapt - θ_prior)
@@ -175,11 +273,11 @@ target_eval labels 选择。论文主协议的 K=4/K=12 wrapper 必须读取 sou
 episode calibration 导出的 `safe_policy.json`，并记录
 `policy_source=source_side_episode_calibration`、source episode regions、
 policy hash、support manifest hash 和 output blend `adapt_mix_rho`。缺失该
-policy 的 K-shot run 只能作为 explicit diagnostic，不进入 paper-facing
-HyperDA-SAFE 结果。该方法在论文中命名为：
+policy 的 K-shot run 只能作为 explicit diagnostic；当前 rejected K-shot rows
+必须解释为 K0-anchor fallback，不进入主贡献。该 diagnostic extension 命名为：
 
 ```text
-HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement
+SAFE: Source-Anchored Few-Shot Operator Refinement
 ```
 
 ## 5. Baseline 契约
@@ -192,9 +290,8 @@ Source-only backbone (`source_pooled_global_backbone`)
 Prompt-conditioned shared backbone
 Source-regime specialist bank (`source_regime_specialist_bank`, final
 cross-continent source-side same-regime specialists)
-HyperDA K=0 zero-shot context prompt
-HyperDA K=4 lightweight target adaptation
-HyperDA K=12 lightweight target adaptation
+HyperDA Operator Generator K=0 zero-shot context prompt (`M2_1`)
+HyperDA-TRUST K=0 source-manifold trust routing (`M3_1`)
 ```
 
 以下只允许作为 internal sanity check，不进入论文主表：
@@ -209,6 +306,7 @@ prompt-weighted specialist
 kNN parameter interpolation
 linear prompt-to-parameter
 Adapter/LoRA K-shot ablations
+SAFE K=4/K=12 rejected-to-K0 diagnostics
 legacy full-target HyperDA-Calib/Refine
 legacy_all_regions_sanity
 target_full_history_region_oracle

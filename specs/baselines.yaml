@@ -2,11 +2,16 @@ paper_main_baselines:
   zero_few_shot_generalization:
     - forecast_only
     - source_pooled_global_backbone
+    - swad_source_pooled_global_backbone
+    - mixstyle_source_pooled_global_backbone
+    - disam_source_domain_sharpness_alignment
+    - udim_unknown_domain_inconsistency_minimization
+    - moment_alignment_source_domain_invariance
+    - identify_unlearn_source_domain_gradient_ascent
     - prompt_conditioned_shared_backbone
     - source_regime_specialist_bank
     - hyperda_zero_shot_context
-    - hyperda_safe_few_shot_k4
-    - hyperda_safe_few_shot_k12
+    - hyperda_trust_zero_shot_context
 
 baseline_definitions:
   source_pooled_global_backbone:
@@ -24,6 +29,273 @@ baseline_definitions:
     target_eval: 2023-2025
     target_labels_used_for_training: false
     paper_table_eligible: true
+    predicts: DA_increment
+  swad_source_pooled_global_backbone:
+    display_name: SWAD source-only backbone
+    training_policy: pooled_source_domains_only_with_source_val_weight_averaging
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_eval: 2023-2025
+    target_context_allowed: none
+    target_context_labels_allowed: false
+    target_labels_used_for_training: false
+    model_selection_source: source_val_2022
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: true
+  mixstyle_source_pooled_global_backbone:
+    display_name: MixStyle source-only backbone
+    training_policy: pooled_source_domains_only_with_feature_statistic_mixing
+    base_method: source_pooled_global_backbone
+    mixstyle_layers: [enc1, enc2]
+    source_fit: 2015-2021
+    source_val: 2022
+    target_eval: 2023-2025
+    target_context_allowed: none
+    target_context_labels_allowed: false
+    target_labels_used_for_training: false
+    model_selection_source: source_val_2022
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: true
+  disam_source_domain_sharpness_alignment:
+    display_name: DISAM source-domain sharpness alignment
+    status: paper_main_candidate_source_only_dg
+    training_policy: pooled_source_domains_with_region_masked_sharpness_aware_domain_loss_variance
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_eval: 2023-2025
+    target_context_allowed: none
+    target_context_labels_allowed: false
+    target_support_allowed: false
+    target_val_allowed: false
+    target_labels_used_for_training: false
+    target_context_usage: not_used
+    target_eval_usage: final_offline_evaluation_only
+    model_selection_source: source_val_2022
+    checkpoint_selection_metric: source_val_loss
+    source_region_episode_batching: false
+    source_domain_grouping: pooled_sample_region_masks
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: true
+    default_parameters:
+      disam_rho: 0.05
+      disam_lambda: 0.1
+    literature:
+      title: Domain-Inspired Sharpness-Aware Minimization Under Domain Shifts
+      venue_year: ICLR 2024
+      link: https://openreview.net/forum?id=I4wB3HA3dJ
+  udim_unknown_domain_inconsistency_minimization:
+    display_name: UDIM unknown-domain inconsistency minimization
+    status: paper_main_candidate_source_only_dg
+    training_policy: pooled_source_domains_with_region_masked_unknown_domain_inconsistency
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_eval: 2023-2025
+    target_context_allowed: none
+    target_context_labels_allowed: false
+    target_support_allowed: false
+    target_val_allowed: false
+    target_labels_used_for_training: false
+    target_context_usage: not_used
+    target_eval_usage: final_offline_evaluation_only
+    model_selection_source: source_val_2022
+    checkpoint_selection_metric: source_val_loss
+    source_region_episode_batching: false
+    source_domain_grouping: pooled_sample_region_masks
+    hydroda_adaptation: >-
+      Uses a SAM-style source-only perturbation as a proxy unknown domain and
+      penalizes mean-squared inconsistency between clean and perturbed
+      source-region loss vectors. No target context or target labels are used.
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: true
+    default_parameters:
+      udim_rho: 0.05
+      udim_lambda: 0.1
+      udim_objective: source_only_unknown_domain_inconsistency
+    literature:
+      title: Unknown Domain Inconsistency Minimization for Domain Generalization
+      venue_year: ICLR 2024
+      link: https://openreview.net/forum?id=eNoiRal5xi
+  moment_alignment_source_domain_invariance:
+    display_name: Moment Alignment source-domain invariance
+    status: paper_main_candidate_source_only_dg
+    training_policy: pooled_source_domains_with_region_masked_feature_moment_invariance
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_eval: 2023-2025
+    target_context_allowed: none
+    target_context_labels_allowed: false
+    target_support_allowed: false
+    target_val_allowed: false
+    target_labels_used_for_training: false
+    target_context_usage: not_used
+    target_eval_usage: final_offline_evaluation_only
+    model_selection_source: source_val_2022
+    checkpoint_selection_metric: source_val_loss
+    source_region_episode_batching: false
+    source_domain_grouping: pooled_sample_region_masks
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: true
+    default_parameters:
+      moment_align_lambda: 0.01
+      moment_align_feature_layer: bottleneck
+      moment_align_order: 2
+    literature:
+      title: "Moment Alignment: Unifying Gradient and Hessian Matching for Domain Generalization"
+      venue_year: UAI 2025
+      link: https://openreview.net/forum?id=EzwlQDs5Ck
+  identify_unlearn_source_domain_gradient_ascent:
+    display_name: Identify-and-Unlearn source-domain bounded penalty
+    status: paper_main_candidate_source_only_dg
+    training_policy: pooled_source_domains_with_region_masked_domain_specific_feature_unlearning
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_eval: 2023-2025
+    target_context_allowed: none
+    target_context_labels_allowed: false
+    target_support_allowed: false
+    target_val_allowed: false
+    target_labels_used_for_training: false
+    target_context_usage: not_used
+    target_eval_usage: final_offline_evaluation_only
+    model_selection_source: source_val_2022
+    checkpoint_selection_metric: source_val_loss
+    source_region_episode_batching: false
+    source_domain_grouping: pooled_sample_region_masks
+    hydroda_adaptation: >-
+      Identifies domain-specific channels by inter-domain variance of
+      source-region feature means, then applies a bounded penalty that
+      suppresses high-scoring source samples/channels. No target
+      context or target labels are used.
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: true
+    default_parameters:
+      iu_lambda: 0.001
+      iu_feature_layer: bottleneck
+      iu_top_fraction: 0.25
+      iu_sample_top_fraction: 0.5
+      iu_score_cap: 10.0
+      iu_objective: bounded_domain_specific_feature_penalty
+    literature:
+      title: "Unlearning during Training: Domain-Specific Gradient Ascent for Out-of-Distribution Generalization"
+      venue_year: ICLR 2026 Poster
+      link: https://openreview.net/forum?id=9ufS5Jl0O0
+  deep_coral_target_context_alignment:
+    display_name: Deep CORAL target-context alignment
+    status: internal_diagnostic_old_baseline_not_paper_main
+    training_policy: pooled_source_domains_only_with_unlabeled_target_context_feature_alignment
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_context_allowed: 2015-2021 input-side target_context only
+    target_context_labels_allowed: false
+    target_support_allowed: false
+    target_val_allowed: false
+    target_eval: 2023-2025
+    target_eval_usage: final_offline_evaluation_only
+    model_selection_source: source_val_2022
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: false
+  tca_target_context_correlation_alignment:
+    display_name: TCA target-context correlation alignment
+    status: diagnostic_runnable_not_paper_main_by_default
+    training_policy: pooled_source_domains_only_with_unlabeled_target_context_correlation_alignment
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_context_allowed: 2015-2021 input-side target_context only
+    target_context_labels_allowed: false
+    target_support_allowed: false
+    target_val_allowed: false
+    target_eval: 2023-2025
+    target_eval_usage: final_offline_evaluation_only
+    model_selection_source: source_val_2022
+    target_context_usage: input_side_only
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: false
+    literature:
+      title: Test-time Correlation Alignment
+      venue_year: ICML 2025
+      link: https://openreview.net/forum?id=0dualJz9OI
+  ssa_reg_target_context_subspace_alignment:
+    display_name: SSA-Reg target-context subspace alignment diagnostic
+    status: diagnostic_target_context_tta_not_dg_paper_main
+    training_policy: pooled_source_domains_only_with_unlabeled_target_context_subspace_alignment
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_context_allowed: 2015-2021 input-side target_context only
+    target_context_labels_allowed: false
+    target_support_allowed: false
+    target_val_allowed: false
+    target_eval: 2023-2025
+    target_eval_usage: final_offline_evaluation_only
+    model_selection_source: source_val_2022
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    target_context_usage: input_side_only
+    paper_table_eligible: false
+    literature:
+      title: Test-time Adaptation for Regression by Subspace Alignment
+      venue_year: ICLR 2025
+      link: https://openreview.net/forum?id=SXtl7NRyE5
+  self_bootstrap_target_context_consistency_tta:
+    display_name: Self-bootstrap target-context consistency TTA
+    status: diagnostic_runnable_not_paper_main_by_default
+    training_policy: pooled_source_domains_only_with_unlabeled_target_context_prediction_consistency
+    base_method: source_pooled_global_backbone
+    source_fit: 2015-2021
+    source_val: 2022
+    target_context_allowed: 2015-2021 input-side target_context only
+    target_context_labels_allowed: false
+    target_support_allowed: false
+    target_val_allowed: false
+    target_eval: 2023-2025
+    target_eval_usage: final_offline_evaluation_only
+    model_selection_source: source_val_2022
+    target_context_usage: input_side_only
+    predicts: DA_increment
+    pred_increment: model(x)
+    pred_analysis: forecast + pred_increment
+    paper_table_eligible: false
+    literature:
+      title: Self-Bootstrapping for Versatile Test-Time Adaptation
+      venue_year: ICML 2025
+      link: https://openreview.net/forum?id=Li4rieeClO
+  weatherpeft_weather_fm_future_baseline:
+    display_name: WeatherPEFT weather foundation model future baseline
+    status: related_work_future_weather_fm_baseline
+    training_policy: not_runnable_under_current_resunet_protocol
+    target_context_allowed: future_protocol_only
+    target_context_labels_allowed: false
+    target_labels_used_for_training: future_protocol_dependent
+    target_eval_usage: not_applicable_current_protocol
+    paper_table_eligible: false
+    literature:
+      title: Task-Adaptive Parameter-Efficient Fine-Tuning for Weather Foundation Models
+      venue_year: ICLR 2026 Poster
+      link: https://openreview.net/forum?id=eFExhM3tKr
   prompt_conditioned_global_backbone:
     display_name: Prompt-conditioned shared backbone
     training_policy: pooled_source_domains_only_with_input_side_context_prompt
@@ -46,6 +318,10 @@ baseline_definitions:
     paper_table_eligible: true
 
 secondary_ablation:
+  hyperda_safe_kshot_diagnostic:
+    status: frozen_diagnostic_future_extension_not_current_main_table
+    K_values: [4, 12]
+    required_status_for_reporting: rejected_to_k0_anchor_or_explicit_accepted_future_run
   adapter_lora_kshot:
     status: appendix_or_followup_not_main_table
     K_values: [4, 12]
@@ -70,6 +346,15 @@ internal_sanity_only:
   - knn_parameter_interpolation
   - linear_prompt_to_parameter
   - random_prompt_hyperda
+  - hyperda_safe_few_shot_k4
+  - hyperda_safe_few_shot_k12
+  - hyperda_rise_source_side_router_prior
+  - hyperda_rise_k0_context_router
+  - hyperda_rise_k4_support_posterior
+  - hyperda_rise_k12_support_posterior
+  - ssa_reg_target_context_subspace_alignment
+  - tca_target_context_correlation_alignment
+  - self_bootstrap_target_context_consistency_tta
   # Deprecated names retained in old result files/scripts:
   - source_only_all_regions
   - source_only_region_specific

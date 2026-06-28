@@ -459,6 +459,35 @@ def load_source_checkpoint_for_target_adaptation(
         hyper_prompt_manifold_reliability_strength=float(
             source_config.get("hyper_prompt_manifold_reliability_strength", 0.0)
         ),
+        hyper_source_manifold_guard=bool(source_config.get("hyper_source_manifold_guard", False)),
+        hyper_source_manifold_guard_strength=float(source_config.get("hyper_source_manifold_guard_strength", 0.25)),
+        hyper_source_manifold_guard_distance_key=source_config.get(
+            "hyper_source_manifold_guard_distance_key",
+            "source_manifold_distance_bounded",
+        ),
+        hyper_source_manifold_guard_min_multiplier=float(
+            source_config.get("hyper_source_manifold_guard_min_multiplier", 0.0)
+        ),
+        source_manifold_guard_calibration=source_config.get("source_manifold_guard_calibration", "disabled"),
+        hyper_source_trust_routing=bool(source_config.get("hyper_source_trust_routing", False)),
+        hyper_source_trust_strength=float(source_config.get("hyper_source_trust_strength", 0.0)),
+        hyper_source_trust_top_m=int(source_config.get("hyper_source_trust_top_m", 4)),
+        hyper_source_trust_variable_gate=bool(source_config.get("hyper_source_trust_variable_gate", False)),
+        hyper_phys_agreement_guard=bool(source_config.get("hyper_phys_agreement_guard", False)),
+        hyper_phys_agreement_guard_strength=float(source_config.get("hyper_phys_agreement_guard_strength", 1.0)),
+        hyper_phys_agreement_guard_min_multiplier=float(
+            source_config.get("hyper_phys_agreement_guard_min_multiplier", 0.0)
+        ),
+        hyper_phys_agreement_guard_risk_rule=source_config.get("hyper_phys_agreement_guard_risk_rule", "or"),
+        hyper_phys_context_modulation=bool(source_config.get("hyper_phys_context_modulation", False)),
+        hyper_phys_delta_scale=float(source_config.get("hyper_phys_delta_scale", 0.25)),
+        hyper_phys_gate_init=float(source_config.get("hyper_phys_gate_init", 0.90)),
+        hyper_operator_droppath_p=float(source_config.get("hyper_operator_droppath_p", 0.10)),
+        phys_context_source=source_config.get("phys_context_source", "raw_input_side_da_diagnostics"),
+        hyper_phys_gain_basis_residual=bool(source_config.get("hyper_phys_gain_basis_residual", False)),
+        hyper_phys_gain_basis_coeff_scale=float(source_config.get("hyper_phys_gain_basis_coeff_scale", 0.05)),
+        hyper_phys_gain_basis_residual_clip=float(source_config.get("hyper_phys_gain_basis_residual_clip", 0.25)),
+        hyper_phys_gain_basis_beta_init=float(source_config.get("hyper_phys_gain_basis_beta_init", 0.50)),
         hyper_enable_film=bool(source_config.get("hyper_enable_film", True)),
         hyper_enable_adapters=bool(source_config.get("hyper_enable_adapters", True)),
         zero_shot_prior_form=source_config.get("zero_shot_prior_form", "direct_hyper"),
@@ -787,6 +816,9 @@ def _model_forward(
     months: torch.Tensor,
     x_raw: torch.Tensor,
     reliability_features: Optional[torch.Tensor] = None,
+    source_trust_bank: Optional[Dict[str, Any]] = None,
+    source_trust_query: Optional[torch.Tensor] = None,
+    variable_trust_gate: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     parameters = inspect.signature(model.forward).parameters
     kwargs: Dict[str, Any] = {"month": months}
@@ -794,6 +826,12 @@ def _model_forward(
         kwargs["x_raw"] = x_raw
     if "reliability_features" in parameters and reliability_features is not None:
         kwargs["reliability_features"] = reliability_features
+    if "source_trust_bank" in parameters and source_trust_bank is not None:
+        kwargs["source_trust_bank"] = source_trust_bank
+        if "source_trust_query" in parameters and source_trust_query is not None:
+            kwargs["source_trust_query"] = source_trust_query
+    if "variable_trust_gate" in parameters and variable_trust_gate is not None:
+        kwargs["variable_trust_gate"] = variable_trust_gate
     return model(x_norm, z, **kwargs)
 
 

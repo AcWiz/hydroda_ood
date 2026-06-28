@@ -43,9 +43,10 @@ Dead-zone sign accuracy：当 `abs(true_increment) < epsilon` 时不计入 sign 
 
 ## 3. Adaptation metrics
 
-主协议按 `adaptation_setting` / K=0/4/12 报告 zero/few-shot 结果，并与
-source-only / prompt-conditioned shared baseline 比较。Full-target 结果只用于
-legacy/internal reproduction：
+主协议当前按 K=0 zero-shot 报告 HyperDA Operator Generator 和 HyperDA-TRUST，
+并与 source-only / prompt-conditioned shared baseline 比较。K=4/K=12 SAFE
+结果保留为 diagnostic / future extension；若为 `rejected_to_k0_anchor`，不得
+计入 few-shot improvement。Full-target 结果只用于 legacy/internal reproduction：
 
 ```text
 AdaptationGain(K) = Metric(adapted, K) - Metric(source_only, K=0)
@@ -77,8 +78,8 @@ Phase 3 起必须逐步产生：
 
 ```text
 Table 1: Forecast-only and source-only sanity by held-out target
-Table 2: Main zero/few-shot comparison across source-only, prompt-conditioned, HyperDA K=0/4/12
-Table 3: Lightweight adaptation mechanism ablation under K=4/12
+Table 2: Main K=0 comparison across source-only, prompt-conditioned, HyperDA Operator Generator, HyperDA-TRUST
+Table 3: SAFE K=4/K=12 diagnostic table with rejected_to_k0_anchor status when applicable
 Table 4: Legacy full-target reproduction (secondary/internal)
 Table 5: Event/high-update analysis after final model selection
 ```

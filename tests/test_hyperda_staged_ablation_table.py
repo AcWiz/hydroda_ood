@@ -24,6 +24,7 @@ def _write_run(
     hyper_residual_magnitude_penalty: float = 0.0,
     hyper_coeff_entropy_floor: float = 0.0,
     hyper_coeff_entropy_penalty: float = 0.0,
+    summary_extra: dict | None = None,
 ) -> Path:
     run_dir = root / ablation_id / target_region / f"run_{ablation_id}_{target_region}_s{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -63,6 +64,8 @@ def _write_run(
         "protocol_freeze_id": "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025",
         "normalization_source": "source_fit_only_from_source_checkpoint",
     }
+    if summary_extra:
+        payload.update(summary_extra)
     (summary_dir / "summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return run_dir
 
@@ -187,3 +190,144 @@ def test_build_hyperda_staged_ablation_table_collects_source_stage_summaries(tmp
     assert payload["target_region"] == "US-R1"
     assert payload["seed"] == 0
     assert payload["row_count"] == 5
+
+
+def test_build_hyperda_staged_ablation_table_includes_hyperda_trust_candidates(tmp_path):
+    from scripts.analysis.build_hyperda_staged_ablation_table import build_hyperda_staged_ablation_table
+
+    runs_root = tmp_path / "runs"
+    _write_run(
+        runs_root,
+        ablation_id="M3_1_hyperda_trust_medium",
+        best_selection_value=0.44657339054928213,
+        trainable_count=144042,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_enable_film=True,
+        hyper_enable_adapters=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    _write_run(
+        runs_root,
+        ablation_id="M3_1a_trust_medium_dualalpha",
+        best_selection_value=0.4380682817986459,
+        trainable_count=144042,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_enable_film=True,
+        hyper_enable_adapters=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    _write_run(
+        runs_root,
+        ablation_id="M3_1d_trust_medium_broad",
+        best_selection_value=0.447,
+        trainable_count=144042,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_enable_film=True,
+        hyper_enable_adapters=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+    _write_run(
+        runs_root,
+        ablation_id="M3_unregistered_future",
+        best_selection_value=0.99,
+        trainable_count=144042,
+        hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+        hyper_adapter_param_style="dora_like_gain_bounded",
+        hyper_reliability_gate="prompt_scalar",
+        hyper_enable_film=True,
+        hyper_enable_adapters=True,
+        zero_shot_prior_form="source_base_residual_reliability_gated",
+    )
+
+    result = build_hyperda_staged_ablation_table(
+        runs_root=runs_root,
+        output_dir=tmp_path / "reports",
+        target_region="US-R1",
+        seed=0,
+    )
+
+    rows = list(csv.DictReader(result["csv_path"].open(encoding="utf-8", newline="")))
+    assert [row["ablation_id"] for row in rows] == [
+        "M3_1_hyperda_trust_medium",
+        "M3_1a_trust_medium_dualalpha",
+        "M3_1d_trust_medium_broad",
+    ]
+    assert rows[0]["rank_by_best_selection_value"] == "2"
+    assert rows[2]["rank_by_best_selection_value"] == "1"
+    markdown = result["md_path"].read_text(encoding="utf-8")
+    assert "M3_1_hyperda_trust_medium" in markdown
+    assert "M3_unregistered_future" not in markdown
+
+
+def test_build_hyperda_staged_ablation_table_includes_physics_informed_trust_candidates(tmp_path):
+    from scripts.analysis.build_hyperda_staged_ablation_table import build_hyperda_staged_ablation_table
+
+    runs_root = tmp_path / "runs"
+    for ablation_id, score in [
+        ("M3_1_hyperda_trust_medium", 0.44657339054928213),
+        ("M3_8_phys_formula_operator_trust", 0.442),
+        ("M3_8b_phys_formula_light_guarded_trust", 0.445),
+        ("M3_8c_phys_formula_light_operator_only_trust", 0.444),
+        ("M3_12_phys_gain_basis_hypertrust", 0.443),
+        ("M3_13_phys_gain_guarded_hypertrust", 0.446),
+        ("M3_14_source_trained_phys_formula_gain_hypertrust", 0.44455),
+        ("M3_15_m31_anchored_source_safe_phys_coeff_delta", 0.4477),
+        ("M3_16_source_only_phys_m3trust_lite", 0.4480),
+    ]:
+        summary_extra = {}
+        if ablation_id == "M3_12_phys_gain_basis_hypertrust":
+            summary_extra = {
+                "hyper_phys_gain_basis_residual": True,
+                "phys_gain_source_bank_summary": {"source_gain_bank_hash": "gainbank123"},
+                "phys_gain_basis_summary": {"residual_abs_mean": 0.00125},
+            }
+        _write_run(
+            runs_root,
+            ablation_id=ablation_id,
+            best_selection_value=score,
+            trainable_count=144042,
+            hyper_coeff_generator="shared_layer_aware_rank_gated_stable",
+            hyper_adapter_param_style="dora_like_gain_bounded",
+            hyper_reliability_gate="prompt_scalar",
+            hyper_enable_film=True,
+            hyper_enable_adapters=True,
+            zero_shot_prior_form="source_base_residual_reliability_gated",
+            summary_extra=summary_extra,
+        )
+
+    result = build_hyperda_staged_ablation_table(
+        runs_root=runs_root,
+        output_dir=tmp_path / "reports",
+        target_region="US-R1",
+        seed=0,
+    )
+
+    rows = list(csv.DictReader(result["csv_path"].open(encoding="utf-8", newline="")))
+    assert [row["ablation_id"] for row in rows] == [
+        "M3_1_hyperda_trust_medium",
+        "M3_8_phys_formula_operator_trust",
+        "M3_8b_phys_formula_light_guarded_trust",
+        "M3_8c_phys_formula_light_operator_only_trust",
+        "M3_12_phys_gain_basis_hypertrust",
+        "M3_13_phys_gain_guarded_hypertrust",
+        "M3_14_source_trained_phys_formula_gain_hypertrust",
+        "M3_15_m31_anchored_source_safe_phys_coeff_delta",
+        "M3_16_source_only_phys_m3trust_lite",
+    ]
+    m3_12 = next(row for row in rows if row["ablation_id"] == "M3_12_phys_gain_basis_hypertrust")
+    assert m3_12["hyper_phys_gain_basis_residual"] == "1"
+    assert m3_12["phys_gain_source_bank_hash"] == "gainbank123"
+    markdown = result["md_path"].read_text(encoding="utf-8")
+    assert "M3_8b_phys_formula_light_guarded_trust" in markdown
+    assert "M3_8c_phys_formula_light_operator_only_trust" in markdown
+    assert "M3_12_phys_gain_basis_hypertrust" in markdown
+    assert "M3_13_phys_gain_guarded_hypertrust" in markdown
+    assert "M3_14_source_trained_phys_formula_gain_hypertrust" in markdown
+    assert "M3_15_m31_anchored_source_safe_phys_coeff_delta" in markdown
+    assert "M3_16_source_only_phys_m3trust_lite" in markdown

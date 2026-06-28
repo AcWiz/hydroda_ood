@@ -1,6 +1,6 @@
-method_name: HyperDA-SAFE
+method_name: HyperDA-TRUST
 method_version: v4.0
-paper_name: "HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement"
+paper_name: "HyperDA-TRUST: Source-Manifold Trust-Routed Operator Generation"
 
 backbone:
   first_version: SmallResUNet
@@ -25,13 +25,13 @@ parameter_generation:
   default_ablation_preset: M2_1_rank_gated_dora_stable
   main_source_prior:
     ablation_id: M2_1_rank_gated_dora_stable
-    paper_method_phrase: stable rank-gated bounded-DoRA HyperDA prior + SAFE refinement
+    paper_method_phrase: HyperDA Operator Generator with stable rank-gated bounded-DoRA lightweight operator generation
     hyper_coeff_generator: shared_layer_aware_rank_gated_stable
     hyper_adapter_param_style: dora_like_gain_bounded
     hyper_rank_gate_temperature_init: 2.0
     use_amp: 0
     lr: 2e-4
-    status: paper_facing_source_prior
+    status: paper_facing_zero_shot_operator_generator
   rank_gated_defaults:
     hyper_coeff_generator: shared_layer_aware_rank_gated
     hyper_rank_gate_top_k: 4
@@ -121,8 +121,898 @@ parameter_generation:
       - target_val
       - target_eval_statistics
     base_valid_mask_usage: bounded_diagnostic_feature_only_not_loss_metric_obs_or_region_mask
+  source_manifold_guarded_prior_defaults:
+    ablation_id: M2_6_source_manifold_guarded_prior
+    status: diagnostic_source_manifold_guarded_prior_not_paper_main_until_gates_pass
+    starts_from: M2_1_rank_gated_dora_stable
+    context_encoder: current_mean_std
+    hyper_coeff_generator: shared_layer_aware_rank_gated_stable
+    hyper_adapter_param_style: dora_like_gain_bounded
+    hyper_rank_gate_top_k: 4
+    hyper_rank_gate_temperature_init: 2.0
+    use_amp: 0
+    lr: 2e-4
+    zero_shot_prior_form: source_base_residual_reliability_gated
+    source_residual_rho: 1.0
+    source_residual_gate_init: 0.95
+    hyper_source_manifold_guard: 1
+    hyper_source_manifold_guard_distance_key: source_manifold_distance_bounded
+    source_manifold_guard_calibration: source_fit_source_val_only
+    target_eval_usage: final_eval_only_no_selection
+    guard_scope: adapter_and_hyper_residual_branch_only_not_frozen_source_base
+    promotion_rule: source_gate_then_single_final_k0_target_eval_only
+    forbidden_sources:
+      - target_labels
+      - target_val
+      - target_eval_statistics
+  hyperda_trust_defaults:
+    method_family: HyperDA-TRUST
+    paper_phrase: Source-Manifold Trust-Routed Operator Generation
+    status: current_zero_shot_regularization_module
+    starts_from: M2_1_rank_gated_dora_stable
+    contrast_to_m2_6: routes_coefficients_to_source_neighborhood_consensus_instead_of_scalar_residual_shrink_only
+    source_trust_bank:
+      source: source_fit_source_val_only
+      label_usage: none
+      target_eval_usage: final_eval_only_no_selection
+      contents:
+        - source_prompt_embeddings
+        - nearest_source_distance_quantiles
+        - source_neighborhood_coefficient_consensus
+    default_top_m: 4
+    trust_blend_formula: coeff_star = tau_layer * coeff_target_prompt + (1 - tau_layer) * coeff_source_neighbor_consensus
+    variable_gate: surface_rootzone_separate_residual_gate
+    selection_metric: source_val_dual_variable_cvar_safe_score
+    candidates:
+      M3_0_hyperda_trust_light:
+        trust_strength: 0.25
+        variable_gate: true
+      M3_1_hyperda_trust_medium:
+        trust_strength: 0.50
+        variable_gate: true
+        status: current_us_r1_k0_paper_facing_hyperda_trust_candidate
+        evidence_card: reports/experiments/M3_1_plus_us_r1_seed0_ablation_decision_20260621.md
+      M3_1a_trust_medium_dualalpha:
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        variable_gate: true
+        alpha_selection_objective: dual_variable_cvar_safe_score
+        status: negative_or_neutral_preregistered_ablation_do_not_promote
+        evidence_card: reports/experiments/M3_1_plus_us_r1_seed0_ablation_decision_20260621.md
+      M3_1b_trust_mid_high:
+        trust_strength: 0.375
+        source_neighbor_top_m: 4
+        variable_gate: true
+        alpha_selection_objective: dual_variable_cvar_safe_score
+        status: negative_or_neutral_preregistered_ablation_do_not_promote
+        evidence_card: reports/experiments/M3_1_plus_us_r1_seed0_ablation_decision_20260621.md
+      M3_1c_trust_medium_local:
+        trust_strength: 0.50
+        source_neighbor_top_m: 2
+        variable_gate: true
+        alpha_selection_objective: dual_variable_cvar_safe_score
+        status: negative_or_neutral_preregistered_ablation_do_not_promote
+        evidence_card: reports/experiments/M3_1_plus_us_r1_seed0_ablation_decision_20260621.md
+      M3_1d_trust_medium_broad:
+        trust_strength: 0.50
+        source_neighbor_top_m: 6
+        variable_gate: true
+        alpha_selection_objective: dual_variable_cvar_safe_score
+        optional_budget: true
+        status: do_not_run_as_strict_evidence_after_us_r1_target_eval_unless_exploratory
+        evidence_card: reports/experiments/M3_1_plus_us_r1_seed0_ablation_decision_20260621.md
+      M3_2_hyperda_trust_raw_reliability:
+        trust_strength: 0.25
+        context_encoder: current_mean_std
+        source_trust_query_mode: raw_input_side_da_diagnostics
+        raw_diagnostics_usage: trust_features_only_not_main_prompt_replacement
+      M3_2_phys_trust_raw_da_query:
+        alias_of: M3_2_hyperda_trust_raw_reliability
+        status: source_gated_ablation_not_paper_main_until_gates_pass
+        trust_strength: 0.25
+        context_encoder: current_mean_std
+        source_trust_query_mode: raw_input_side_da_diagnostics
+        raw_diagnostics_usage: trust_features_only_not_main_prompt_replacement
+        phys_trust_d0_summary: required_diagnostic_only
+      M3_4_phys_trust_blended_query:
+        status: negative_diagnostic_do_not_continue_query_space_replacement
+        trust_strength: 0.25
+        context_encoder: current_mean_std
+        source_trust_query_mode: blended_prompt_raw_da_0p25
+        failure_interpretation: blended_physical_query_neighbor_geometry_degraded_us_r1_k0_target_eval
+        target_eval_usage: negative_diagnostic_only_no_tuning
+      M3_5_phys_agreement_guarded_trust:
+        status: source_gated_diagnostic_candidate_not_paper_main_until_gates_pass
+        starts_from: M3_1_hyperda_trust_medium
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        source_trust_query_mode: raw_input_side_da_diagnostics
+        trust_routing_geometry: prompt_embedding
+        phys_trust_usage: guard_only_shrink_no_enhance
+        phys_guard_reads:
+          - x
+          - x_raw
+          - month
+          - region_mask
+        effective_strength_rule: keep_m3_1_when_prompt_and_phys_neighbors_agree_else_shrink_trust_and_source_residual_only
+        source_val_gate: reject_if_dual_variable_cvar_more_than_0.005_below_M3_1
+        target_eval_usage: final_eval_only_no_selection
+      M3_5b_phys_agreement_floor_guard:
+        status: source_gated_low_complexity_redesign_after_m3_5_early_stop
+        starts_from: M3_1_hyperda_trust_medium
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        source_trust_query_mode: raw_input_side_da_diagnostics
+        trust_routing_geometry: prompt_embedding
+        phys_trust_usage: guard_only_bounded_shrink_no_enhance
+        phys_guard_risk_rule: and
+        phys_guard_min_multiplier: 0.8
+        effective_strength_rule: keep_m3_1_unless_prompt_phys_disagreement_and_raw_physical_ood_cooccur_then_shrink_at_most_20_percent
+        source_val_gate: reject_if_dual_variable_cvar_more_than_0.005_below_M3_1
+        target_eval_usage: final_eval_only_no_selection
+      M3_6_phys_token_operator_droppath_trust:
+        status: source_gated_stage2_candidate_after_m3_5b
+        starts_from: M3_1_hyperda_trust_medium
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        trust_routing_geometry: prompt_embedding
+        source_trust_query_mode: prompt_embedding
+        phys_context_source: raw_input_side_da_diagnostics
+        phys_token_usage: operator_coefficient_delta_only
+        phys_delta_scale: 0.25
+        phys_gate_init: 0.90
+        operator_droppath_p: 0.10
+        operator_droppath_train_only: true
+        initial_behavior: zero_initialized_phys_delta_head_preserves_m3_1
+        first_screen:
+          warm_start: M3_1_best_checkpoint
+          trainable_scope: phys_context_only
+          max_epochs: 5
+        source_val_gate: reject_if_dual_variable_cvar_more_than_0.005_below_M3_1
+        target_eval_usage: final_eval_only_no_selection
+        forbidden_sources:
+          - target_labels
+          - target_val
+          - target_eval_statistics
+        base_valid_mask_usage: bounded_diagnostic_coverage_only_not_loss_metric_obs_or_region_mask
+      M3_8b_phys_formula_light_guarded_trust:
+        status: superseded_historical_physics_diagnostic_by_M3_14_design_handoff
+        paper_method_phrase: Physics-informed HyperDA-TRUST
+        design_anchor: M3_1_hyperda_trust_medium
+        checkpoint_start: source_pooled_global_backbone
+        not_init_from: M3_1_checkpoint_or_M2_1_checkpoint
+        comparison_role: physical_enhancement_of_M3_1_not_new_baseline
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        trust_routing_geometry: prompt_embedding
+        source_trust_query_mode: prompt_embedding
+        phys_context_source: raw_input_side_formula_v2
+        phys_formula_source: raw_input_side_formula_v2
+        phys_formula_schema_version: phys_formula_operator_v2_input_side
+        phys_token_usage: bounded_operator_coefficient_delta_only
+        phys_delta_scale: 0.05
+        phys_gate_init: 0.35
+        operator_droppath_p: 0.10
+        operator_droppath_train_only: true
+        initial_behavior: zero_initialized_phys_delta_head_preserves_m3_1
+        consistency_guard:
+          enabled: true
+          action: shrink_only_high_floor_variable_trust_gate
+          min_surface: 0.985
+          min_rootzone: 0.99
+          strength_surface: 0.02
+          strength_rootzone: 0.01
+        first_screen:
+          region: US-R1
+          seed: 0
+          K: 0
+          initialization: source_only_checkpoint_clean_hypernetwork_training
+          warm_start: none
+          prompt_checkpoint_warm_start: none_for_clean_physics_candidate
+          trainable_scope: source_base_frozen_adapter_film
+          max_epochs: 50
+          eval_every_epochs: 5
+          lr: 2e-4
+          use_amp: 0
+          batch_size: 64
+          accum_steps: 2
+          target_eval_usage: not_run_during_source_selection
+        source_val_selection_rule: source_val_dual_variable_cvar_safe_score >= M3_1 - 0.005; choose highest passing source safe score; tie within 0.0005 chooses smaller worst relative source_val RMSE degradation
+        target_eval_acceptance: improve_at_least_one_target_eval_RMSE_variable_and_other_degrades_lte_0.2pct_or_both_degrade_lte_0.2pct_else_diagnostic_if_any_degrades_gt_0.5pct
+        target_eval_usage: final_eval_only_no_selection
+        forbidden_sources:
+          - target_labels
+          - target_val
+          - target_eval_statistics
+        base_valid_mask_usage: bounded_diagnostic_coverage_only_not_loss_metric_obs_or_region_mask
+      M3_8c_phys_formula_light_operator_only_trust:
+        status: superseded_historical_operator_only_guard_ablation_by_M3_14_design_handoff
+        paper_method_phrase: Physics-informed HyperDA-TRUST operator-only guard ablation
+        design_anchor: M3_1_hyperda_trust_medium
+        checkpoint_start: source_pooled_global_backbone
+        not_init_from: M3_1_checkpoint_or_M2_1_checkpoint
+        comparison_role: diagnose_whether_consistency_guard_causes_RMSE_harm
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        trust_routing_geometry: prompt_embedding
+        source_trust_query_mode: prompt_embedding
+        phys_context_source: raw_input_side_formula_v2
+        phys_formula_source: raw_input_side_formula_v2
+        phys_formula_schema_version: phys_formula_operator_v2_input_side
+        phys_token_usage: bounded_operator_coefficient_delta_only
+        phys_delta_scale: 0.05
+        phys_gate_init: 0.35
+        operator_droppath_p: 0.10
+        operator_droppath_train_only: true
+        initial_behavior: zero_initialized_phys_delta_head_preserves_m3_1
+        consistency_guard:
+          enabled: false
+          env: HYPER_PHYS_CONSISTENCY_GUARD=0
+        first_screen:
+          region: US-R1
+          seed: 0
+          K: 0
+          initialization: source_only_checkpoint_clean_hypernetwork_training
+          warm_start: none
+          prompt_checkpoint_warm_start: none_for_clean_physics_candidate
+          trainable_scope: source_base_frozen_adapter_film
+          max_epochs: 50
+          eval_every_epochs: 5
+          lr: 2e-4
+          use_amp: 0
+          batch_size: 64
+          accum_steps: 2
+          target_eval_usage: not_run_during_source_selection
+        source_val_selection_rule: source_val_dual_variable_cvar_safe_score >= M3_1 - 0.005; choose highest passing source safe score; tie within 0.0005 chooses smaller worst relative source_val RMSE degradation
+        target_eval_acceptance: improve_at_least_one_target_eval_RMSE_variable_and_other_degrades_lte_0.2pct_or_both_degrade_lte_0.2pct_else_diagnostic_if_any_degrades_gt_0.5pct
+        target_eval_usage: final_eval_only_no_selection
+        forbidden_sources:
+          - target_labels
+          - target_val
+          - target_eval_statistics
+        base_valid_mask_usage: bounded_diagnostic_coverage_only_not_loss_metric_obs_or_region_mask
+      M3_9_phys_formula_enhanced_trust:
+        status: superseded_historical_physics_diagnostic_by_M3_14_design_handoff
+        starts_from: M3_1_hyperda_trust_medium
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        trust_routing_geometry: prompt_embedding
+        source_trust_query_mode: prompt_embedding
+        phys_context_source: raw_input_side_formula_v3_enhanced
+        phys_formula_source: raw_input_side_formula_v3_enhanced
+        phys_formula_schema_version: phys_formula_operator_v2_enhanced_input_side
+        phys_token_usage: bounded_operator_coefficient_delta_only
+        phys_delta_scale: 0.05
+        phys_gate_init: 0.35
+        operator_droppath_p: 0.10
+        operator_droppath_train_only: true
+        initial_behavior: zero_initialized_phys_delta_head_preserves_m3_1
+        consistency_guard:
+          enabled: true
+          action: shrink_only_high_floor_variable_trust_gate
+          min_surface: 0.98
+          min_rootzone: 0.99
+        first_screen:
+          warm_start: M3_1_best_checkpoint
+          trainable_scope: phys_formula_context_only
+          max_epochs: 3
+          lr: 1e-4
+          use_amp: 0
+          source_fit_max_batches_per_epoch: 384
+          target_eval_usage: not_run_during_screening
+        selection_rule: cap384_select_best_rootzone_if_dual_cvar_within_0.0005_of_M3_8_V1_and_surface_degrade_lte_0.2pct_else_stop
+        full_confirmation_gate: dual_cvar_gte_0.441573390549_surface_rootzone_rmse_degrade_lte_0.5pct_vs_M3_1_leakage_clean
+        target_eval_usage: final_eval_only_no_selection
+        forbidden_sources:
+          - target_labels
+          - target_val
+          - target_eval_statistics
+        base_valid_mask_usage: bounded_diagnostic_coverage_only_not_loss_metric_obs_or_region_mask
+      M3_10a_da_gain_router_lite:
+        status: exploratory_after_us_r1_target_eval_seen_not_paper_main
+        starts_from: M3_1_hyperda_trust_medium
+        neural_training_epochs: 0
+        neural_parameter_updates: 0
+        source_gain_bank:
+          source: source_fit_labels_only
+          grouping: source_region_by_month
+          formula:
+            d_H: (TB_H_obs - TB_H_assim) / (obs_err_H + eps)
+            d_V: (TB_V_obs - TB_V_assim) / (obs_err_V + eps)
+            G_vpm: Cov_source(DeltaSM_v, d_p) / (Var_source(d_p) + lambda)
+            C_rz: Cov_source(DeltaSM_rootzone, DeltaSM_surface) / (Var_source(DeltaSM_surface) + lambda)
+        inference:
+          action: post_hoc_bounded_increment_blend
+          eta_grid: [0.0, 0.025, 0.05, 0.10]
+          eta_selection_source: source_val_only
+          target_fallback: source_month_consensus
+        source_val_gate:
+          dual_variable_cvar_delta_gte: -0.005
+          rmse_degrade_lte_relative: 0.002
+          requires_corr_or_sign_gain: true
+        target_eval_usage: exploratory_final_eval_only_no_selection
+        forbidden_sources:
+          - target_labels_for_bank
+          - target_val
+          - target_eval_statistics_for_bank_or_eta_selection
+      M3_11_signed_da_gain_residual_trust:
+        status: superseded_historical_post_hoc_gain_diagnostic_by_M3_14_design_handoff
+        starts_from: M3_1_hyperda_trust_medium
+        design_reason: after_M3_8b_8c_source_gate_too_weak_use_signed_TB_innovation_DA_gain_residual
+        neural_training_epochs: 0
+        neural_parameter_updates: 0
+        base_anchor_frozen: true
+        gain_bank_schema: m3_11_source_signed_da_gain_bank_v1
+        source_gain_bank:
+          source: source_fit_labels_only
+          grouping: source_region_by_month
+          source_split_roles:
+            bank: [source_fit]
+            eta_selection: [source_val]
+          formula:
+            d_H: (tb_h_obs - tb_h_obs_assim) / (tb_h_obs_errstd + eps)
+            d_V: (tb_v_obs - tb_v_obs_assim) / (tb_v_obs_errstd + eps)
+            G_v_p: Cov_source(DeltaSM_v, d_p) / (Var_source(d_p) + lambda)
+            C_rz: Cov_source(DeltaSM_rootzone, DeltaSM_surface) / (Var_source(DeltaSM_surface) + lambda)
+        inference:
+          action: bounded_residual_blend_around_frozen_M3_1
+          q_surface: clip(G_s_H*d_H + G_s_V*d_V)
+          q_rootzone: clip(G_r_H*d_H + G_r_V*d_V + C_rz*q_surface)
+          final: pred_v = pred_M3_1_v + eta_v * conf_v(x) * clip(q_v - pred_M3_1_v)
+          eta_grid: [0.0, 0.025, 0.05, 0.10]
+          eta_selection_source: source_val_only
+          eta_zero_contract: exact_M3_1_prediction_identity
+          gain_source_priority:
+            - source_trust_top_m_neighbor_weighted_consensus
+            - source_month_consensus
+            - source_global_consensus
+        first_screen:
+          region: US-R1
+          purpose: source_only_sanity_debug_no_US_R1_target_eval_as_main_evidence
+        paper_eligible_screen:
+          status: canceled_by_M3_14_US_R1_only_physics_ablation_policy
+          former_region: US-R2
+          note: US-R2_to_US-R6_deferred_until_M3_14_method_freeze
+        source_val_gate:
+          requires_positive_eta: true
+          dual_variable_cvar_delta_gte: 0.002
+          variable_rmse_degrade_lte_relative: 0.001
+          source_region_rmse_degrade_lte_relative: 0.005
+          requires_corr_or_sign_nondecline: true
+        target_eval_acceptance:
+          improve_at_least_one_analysis_rmse_variable_gte_relative: 0.002
+          other_variable_rmse_degrade_lte_relative: 0.002
+          otherwise: physics_interpretability_diagnostic_only_do_not_replace_M3_1
+        allowed_inputs:
+          - x
+          - x_raw
+          - month
+          - source_region_metadata
+          - region_mask
+          - metric_mask
+        forbidden_sources:
+          - target_labels_for_bank_or_eta_selection
+          - target_val
+          - target_eval_statistics_for_bank_or_eta_selection
+          - target_full_train_records
+        base_valid_mask_usage: channel_11_diagnostic_coverage_only_not_obs_loss_metric_or_region_hard_mask
+        target_eval_usage: final_eval_only_no_selection
+      M3_12_phys_gain_basis_hypertrust:
+        status: rejected_negative_diagnostic_do_not_use_active_route
+        paper_method_phrase: Physics-Gain Basis HyperDA-TRUST
+        design_anchor: M3_1_hyperda_trust_medium
+        comparison_role: physical_enhancement_of_M3_1_not_new_baseline
+        checkpoint_start: source_pooled_global_backbone
+        not_init_from: M3_1_checkpoint_or_M2_1_checkpoint
+        trainable_scope: source_base_frozen_adapter_film
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        trust_routing_geometry: prompt_embedding
+        source_trust_query_mode: prompt_embedding
+        hyper_phys_gain_basis_residual: true
+        phys_gain_basis_schema_version: phys_gain_basis_hypertrust_v1
+        phys_gain_basis_maps:
+          - B_H
+          - B_V
+          - B_pol
+          - B_temp
+          - B_vert
+        formula_basis:
+          d_p: (TB_p_obs - TB_p_sim) / (TB_p_errstd + eps)
+          m_p: -d_p
+          gamma: exp(-clip(vegopacity,0,tau_max) * sec40)
+          B_H: gamma * rho_H * m_H
+          B_V: gamma * rho_V * m_V
+          B_pol: observed_polarization_contrast_minus_simulated_contrast
+          B_temp: bounded_soil_surface_temperature_contrast
+          B_vert: bounded_surface_rootzone_forecast_contrast
+        source_gain_bank:
+          schema_version: phys_gain_basis_source_gain_bank_v1
+          source: source_fit_labels_only
+          use_in_forward: false
+          role: interpretation_and_weak_regularization_metadata_only
+          source_split_roles:
+            bank: [source_fit]
+          formula:
+            G0_v_b: Cov_source(DeltaSM_v, B_b) / (Var_source(B_b) + lambda)
+            C0_rz: Cov_source(DeltaSM_rootzone, DeltaSM_surface) / (Var_source(DeltaSM_surface) + lambda)
+        residual_operator:
+          q_surface: sum_b a_surface_b * B_b
+          q_rootzone: sum_b a_rootzone_b * B_b + a_rz * q_surface
+          final: pred = pred_M3_1_design_path + beta(z_prompt,z_phys) * clip(q)
+          coefficient_heads: zero_initialized
+          initial_behavior: exact_M3_1_design_path_at_step0
+        citations:
+          - SMAP_L4_ATBD_EnKF_gain_innovation
+          - SMAP_L2_L3_ATBD_tau_omega_lband_rtm
+          - Qiu_2021_surface_rootzone_coupling
+          - Willard_2020_physics_guided_ml
+        first_screen:
+          region: US-R1
+          purpose: source_only_sanity_no_US_R1_target_eval_evidence
+          initialization: source_only_checkpoint_clean_hypernetwork_training
+          warm_start: none
+          max_epochs: 50
+          lr: 2e-4
+          use_amp: 0
+          batch_size: 64
+          accum_steps: 2
+        paper_eligible_screen:
+          status: canceled_rejected_negative_diagnostic
+          former_region: US-R2
+          note: do_not_use_for_active_route_or_current_physics_region_screen
+        source_val_gate:
+          dual_variable_cvar_delta_gte: -0.003
+          variable_rmse_degrade_lte_relative: 0.003
+          worst_source_region_rmse_degrade_lte_relative: 0.005
+          requires_sign_agreement_or_increment_correlation_improvement: true
+        target_eval_acceptance:
+          performance_promotion: improve_at_least_one_rmse_variable_gte_relative_0.002_and_other_degrade_lte_relative_0.002
+          interpretability_diagnostic: both_variables_degrade_lte_relative_0.005_and_physical_diagnostics_coherent
+          reject_active_route: any_variable_degrades_gt_relative_0.005
+        required_metadata:
+          - phys_gain_basis_formula_schema
+          - citation_keys
+          - source_gain_bank_hash
+          - source_split_roles
+          - learned_coefficient_summaries
+          - sign_agreement
+          - method_role
+        forbidden_sources:
+          - target_labels
+          - target_val
+          - target_eval_statistics
+          - target_full_train_records
+          - channel_11_hard_mask_usage
+        base_valid_mask_usage: channel_11_diagnostic_coverage_only_not_obs_loss_metric_or_region_hard_mask
+        target_eval_usage: negative_diagnostic_seen_no_tuning
+        rejection_evidence:
+          US_R1_source_val_safe_score: 0.263742
+          M3_1_source_val_safe_score_anchor: 0.446573
+          US_R1_target_eval_surface_rootzone_rmse: [0.0039694432, 0.0003349067]
+          interpretation: learned_physics_basis_as_free_output_residual_and_full_hyperda_path_retraining_harmed_M3_1_anchor
+      M3_13_phys_gain_guarded_hypertrust:
+        status: guarded_diagnostic_superseded_by_M3_14_design_handoff
+        paper_method_phrase: Physics-Gain Guarded HyperDA-TRUST
+        design_anchor: M3_1_hyperda_trust_medium
+        comparison_role: M3_1_plus_source_calibrated_physics_gain_no_harm_guard
+        starts_from: M3_1_hyperda_trust_medium
+        warm_start: M3_1_best_checkpoint_required
+        trainable_scope: phys_gain_guard_only
+        max_epochs: 0
+        neural_training_epochs: 0
+        neural_parameter_updates: 0
+        frozen:
+          - M3_1_backbone
+          - prompt_encoder
+          - trust_routing
+          - adapter_film_hypernetwork
+        source_gain_bank:
+          schema_version: m3_13_phys_gain_guard_source_bank_v1
+          source: source_fit_increments_only
+          source_split_roles:
+            bank: [source_fit]
+            eta_selection: [source_val]
+          forbidden:
+            - target_context
+            - target_val
+            - target_eval
+            - target_full_train
+          formula:
+            G0_v_b: Cov_source(DeltaSM_v, B_b) / (Var_source(B_b) + lambda)
+            C0_rz: Cov_source(DeltaSM_rootzone, DeltaSM_surface) / (Var_source(DeltaSM_surface) + lambda)
+        inference:
+          action: shrink_only_M3_1_residual_around_source_base
+          q_surface: sum_b G0_surface_b * B_b
+          q_rootzone: sum_b G0_rootzone_b * B_b + C0_rz * q_surface
+          gain_source_priority:
+            - source_trust_top_m_neighbor_weighted_consensus
+            - source_month_consensus
+            - source_global_consensus
+          risk_v: confidence_v * sign_conflict(pred_M3_1_v - source_base_v, q_v)
+          guard_v: clamp(1 - eta_v * risk_v, 0.90, 1.00)
+          final: pred_v = source_base_v + guard_v * (pred_M3_1_v - source_base_v)
+          eta_grid: [0.0, 0.02, 0.05, 0.10]
+          eta_zero_contract: exact_M3_1_prediction_identity
+        first_screen:
+          region: US-R1
+          purpose: source_only_exploratory_debug_because_US_R1_target_eval_seen
+          target_eval_policy: exploratory_only_not_paper_eligible
+        paper_eligible_screen:
+          status: canceled_by_M3_14_US_R1_only_physics_ablation_policy
+          former_region: US-R2
+          note: US-R2_to_US-R6_deferred_until_M3_14_method_freeze
+        source_val_gate:
+          requires_positive_eta: true
+          dual_variable_cvar_delta_gte: -0.001
+          variable_rmse_degrade_lte_relative: 0.001
+          worst_source_region_rmse_degrade_lte_relative: 0.003
+          fallback_if_no_positive_eta_passes: eta_zero_identity_diagnostic_no_target_eval
+        required_metadata:
+          - phys_gain_basis_formula_schema
+          - source_gain_bank_hash
+          - eta_grid
+          - selected_eta_surface
+          - selected_eta_rootzone
+          - guard_coverage
+          - conflict_coverage
+          - M3_1_checkpoint_hash
+          - source_split_roles
+          - target_eval_no_selection
+          - source_gate_json
+        forbidden_sources:
+          - target_labels_for_bank_or_eta_selection
+          - target_val
+          - target_eval_statistics_for_bank_or_eta_selection
+          - target_full_train_records
+          - channel_11_hard_mask_usage
+        base_valid_mask_usage: channel_11_diagnostic_coverage_only_not_obs_loss_metric_or_region_hard_mask
+        target_eval_usage: final_eval_only_no_selection_after_source_gate_json_passes
+      M3_14_source_trained_phys_formula_gain_hypertrust:
+        status: rejected_negative_diagnostic_do_not_continue_to_US_R2_R6
+        paper_method_phrase: Source-Trained Physics-Informed HyperDA-TRUST
+        design_anchor: M3_1_hyperda_trust_medium_architecture_only
+        comparison_role: physical_enhancement_of_M3_1_not_new_baseline
+        rejection_evidence:
+          best_source_val_dual_variable_cvar_score: 0.44455
+          epoch35_source_val_dual_variable_cvar_score: 0.431846
+          m3_1_source_val_dual_variable_cvar_anchor: 0.446573
+          seen_US_R1_target_eval_surface_rootzone_rmse: [0.0029485791, 0.0002351624]
+          m3_1_US_R1_K0_target_eval_surface_rootzone_rmse_anchor: [0.0027795457, 0.0002266369]
+          target_eval_role: development_evidence_only_not_hyperparameter_tuning
+          failure_interpretation: joint_retraining_plus_weak_sign_regularizer_and_always_available_physical_coeff_perturbation_did_not_protect_M3_1_anchor
+        checkpoint_start: source_pooled_global_backbone
+        init_from_source_base_checkpoint_required: true
+        forbidden_warm_starts:
+          - RESUME_FROM_M3_1_BEST
+          - init_from_prompt_checkpoint
+          - M2_1_checkpoint
+          - M3_1_checkpoint
+          - M3_13_post_hoc_guard
+        trainable_scope: source_base_frozen_adapter_film
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        hyper_coeff_generator: shared_layer_aware_rank_gated_stable
+        hyper_adapter_param_style: dora_like_gain_bounded
+        trust_routing_geometry: prompt_embedding
+        source_trust_query_mode: prompt_embedding
+        phys_context_source: raw_input_side_formula_gain
+        phys_formula_schema_version: m3_14_raw_input_side_formula_gain_v1
+        phys_token_usage: bounded_operator_coefficient_logit_delta_only
+        coefficient_injection:
+          formula: logits_l = logits_l_M3design + sigmoid(g_l) * 0.05 * DeltaLogits_l(z_prompt,z_phys)
+          delta_scale: 0.05
+          bounded_delta_logits: true
+          zero_initialized_or_identity_preserving: true
+        final_output_residual_allowed: false
+        disallowed_final_forms:
+          - pred = pred_M3 + eta * q_phys
+          - pred = pred_M3 + eta * clip(q_phys - pred_M3)
+          - pred = source_base + guard * (pred_M3 - source_base)
+        phys_features:
+          - d_H
+          - d_V
+          - m_H
+          - m_V
+          - gamma
+          - rho_H
+          - rho_V
+          - B_pol
+          - B_temp
+          - B_vert
+          - source_fit_gain_prior_summaries
+          - finite_input_coverage
+          - base_valid_mask_fraction_diagnostic_only
+        formula_bank: docs/hydroda_physics_formula_knowledge_base.md
+        design_plan: docs/m3_14_source_trained_physics_hypertrust_plan.md
+        source_fit_regularization:
+          enabled: true
+          cli_arg: --hyper_phys_consistency_regularization_weight
+          lambda_phys_default: 0.01
+          role: weak_high_confidence_tb_innovation_increment_direction_consistency
+        diagnostic_guard:
+          default_enabled: false
+          allowed_action_if_enabled: shrink_only_variable_gate_no_amplification
+        current_ablation_policy:
+          stage: archived_rejected_US_R1_development_ablation
+          target_region: US-R1
+          seed: 0
+          K: 0
+          baseline: M3_1_hyperda_trust_medium
+          forbidden_current_regions: [US-R2, US-R3, US-R4, US-R5, US-R6]
+          deferred_regions_after_freeze: []
+          freeze_before_deferred_regions: false
+          target_eval_role: development_ablation_evidence_only_no_tuning
+        source_val_selection_rule: source_val_not_weaker_than_M3_1_select_by_dual_variable_cvar_safe_score
+        target_eval_acceptance:
+          freeze_condition: improve_at_least_one_target_eval_RMSE_variable_and_other_degrades_lte_0.2pct
+          diagnostic_only_if: no_RMSE_improvement_but_physical_diagnostics_coherent
+          no_tuning_after_target_eval: true
+        implemented_entrypoint: run/phase4_hyperda_staged_ablation.sh
+        implemented_tests:
+          - tests/test_m3_14_source_trained_phys_formula_gain_hypertrust.py
+          - tests/test_phys_trust_diagnostics.py
+          - tests/test_hyperda_model.py
+        required_tests:
+          - wrapper_rejects_M2_1_M3_1_warm_start
+          - wrapper_logs_checkpoint_start_source_pooled_global_backbone
+          - current_wrapper_rejects_US_R2_to_US_R6_without_freeze_confirmation_flag
+          - d_positive_is_dry_direction
+          - m_negative_tanh_is_wet_support
+          - channel_11_diagnostic_only
+          - no_final_output_residual_branch
+          - gain_bank_source_fit_only
+          - selection_source_val_only
+      M3_15_m31_anchored_source_safe_phys_coeff_delta:
+        status: m3_1_warm_start_diagnostic_not_active_stage2_physics_mainline
+        paper_method_phrase: M3_1-Anchored Source-Safe Physics Coefficient-Delta
+        design_anchor: M3_1_hyperda_trust_medium_checkpoint
+        comparison_role: diagnostic_optional_source_selected_physics_delta_around_frozen_M3_1
+        active_stage2_physics_mainline: false
+        diagnostic_reason: starts_from_M3_1_prompt_checkpoint_and_uses_source_val_eta_interpolation
+        checkpoint_start: M3_1_best_checkpoint
+        init_from_prompt_checkpoint_required: true
+        required_warm_start: RESUME_FROM_M3_1_BEST
+        trainable_scope: phys_coeff_delta_only
+        frozen_modules:
+          - M3_1_backbone
+          - prompt_encoder
+          - source_manifold_trust_routing
+          - adapter_film_hypernetwork
+          - formula_phys_context_encoder
+        trainable_modules:
+          - phys_operator_residual
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        hyper_coeff_generator: shared_layer_aware_rank_gated_stable
+        hyper_adapter_param_style: dora_like_gain_bounded
+        trust_routing_geometry: prompt_embedding
+        source_trust_query_mode: prompt_embedding
+        phys_context_source: raw_input_side_formula_gain
+        phys_formula_schema_version: m3_14_raw_input_side_formula_gain_v1
+        phys_token_usage: bounded_operator_coefficient_logit_delta_only
+        coefficient_injection:
+          formula: logits_l = logits_l_M3_1 + sigmoid(g_l) * 0.05 * DeltaLogits_l(z_prompt,z_phys)
+          delta_scale: 0.05
+          bounded_delta_logits: true
+          zero_initialized_or_identity_preserving: true
+        source_fit_regularization:
+          enabled: false
+          previous_M3_14_sign_consistency_loss_role: diagnostic_only
+        final_output_residual_allowed: false
+        disallowed_final_forms:
+          - pred = pred_M3_1 + eta * q_phys
+          - pred = pred_M3_1 + eta * clip(q_phys - pred_M3_1)
+          - q_surface/q_rootzone final-output residual
+        inference:
+          pred_phys_coeff: M3_15_checkpoint_prediction
+          pred_m3_1: frozen_M3_1_anchor_prediction
+          formula: pred_v = (1 - eta_v) * pred_m3_1_v + eta_v * pred_phys_coeff_v
+          eta_grid: [0, 0.1, 0.25, 0.5, 1.0]
+          eta_selection_source: source_val_only
+          eta_zero_contract: exact_M3_1_prediction_identity
+        source_gate:
+          dual_variable_cvar_min: M3_1_plus_0.001
+          m3_1_source_val_dual_cvar_anchor: 0.446573
+          at_least_one_variable_rmse_relative_improve_gte: 0.001
+          other_variable_rmse_relative_degrade_lte: 0.0005
+          each_source_region_rmse_relative_degrade_lte: 0.003
+          each_source_season_rmse_relative_degrade_lte: 0.003
+          all_zero_eta: identity_diagnostic_refuse_target_eval
+        target_eval_policy:
+          allowed_only_if_source_gate_json_passes: true
+          if_gate_fails: refuse_target_eval
+          if_all_zero_eta: refuse_target_eval
+          target_eval_usage: final_eval_only_no_selection_after_source_gate_passes
+          US_R1_target_eval_role: development_ablation_only
+          US_R2_to_US_R6_policy: run_once_after_method_freeze_no_formula_eta_gate_changes
+        implemented_entrypoints:
+          - run/phase4_hyperda_staged_ablation.sh
+          - run/m3_15_phys_coeff_delta.sh
+          - scripts/eval/m3_15_phys_coeff_delta.py
+        implemented_tests:
+          - tests/test_m3_15_phys_coeff_delta.py
+          - tests/test_hyperda_model.py
+        forbidden_sources:
+          - target_context_for_training_or_selection
+          - target_val
+          - target_eval_statistics_for_eta_selection
+          - target_full_train_records
+          - channel_11_hard_mask_usage
+        allowed_inputs:
+          - x_raw
+          - raw_x
+          - month
+          - region_mask
+          - source_fit_metadata
+          - source_val_for_selection_only
+        forbidden_sources:
+          - target_labels
+          - target_context_labels
+          - target_support_labels_for_K0
+          - target_val
+          - target_eval_statistics
+          - target_full_train_records
+          - channel_11_hard_mask_usage
+        base_valid_mask_usage: channel_11_diagnostic_coverage_only_not_obs_loss_metric_or_region_hard_mask
+        target_eval_usage: US_R1_development_ablation_only_no_selection_until_method_freeze
+      M3_16_source_only_phys_m3trust_lite:
+        status: active_source_only_physics_mainline_candidate_US_R1_seed0_K0_only
+        paper_method_phrase: Source-Only Physics-Informed HyperDA-TRUST Lite
+        design_anchor: M3_1_hyperda_trust_medium_architecture_route_only
+        comparison_role: physical_enhancement_of_M3_1_not_new_baseline
+        stage2_source_only_invariant: true
+        checkpoint_start: source_pooled_global_backbone
+        init_from_source_base_checkpoint_required: true
+        forbidden_warm_starts:
+          - RESUME_FROM_M3_1_BEST
+          - init_from_prompt_checkpoint
+          - M2_1_checkpoint
+          - M3_1_checkpoint
+          - M3_15_m31_anchored_checkpoint
+        trainable_scope: source_base_frozen_adapter_film
+        trust_strength: 0.50
+        source_neighbor_top_m: 4
+        context_encoder: current_mean_std
+        hyper_coeff_generator: shared_layer_aware_rank_gated_stable
+        hyper_adapter_param_style: dora_like_gain_bounded
+        trust_routing_geometry: prompt_embedding
+        source_trust_query_mode: prompt_embedding
+        phys_context_source: raw_input_side_formula_gain
+        phys_formula_schema_version: m3_14_raw_input_side_formula_gain_v1
+        phys_token_usage: bounded_operator_coefficient_logit_delta_only
+        coefficient_injection:
+          formula: logits_l = logits_l_M3design + sigmoid(g_l) * 0.03 * DeltaLogits_l(z_prompt,z_phys)
+          delta_scale: 0.03
+          bounded_delta_logits: true
+          zero_initialized_or_identity_preserving: true
+        final_output_residual_allowed: false
+        second_model_forward_allowed: false
+        disallowed_final_forms:
+          - pred = pred_M3 + eta * q_phys
+          - pred = pred_M3 + eta * clip(q_phys - pred_M3)
+          - pred = pred_M3_1 + eta * q_phys
+          - q_surface/q_rootzone final-output residual
+        phys_features:
+          - d_H_dry_direction
+          - d_V_dry_direction
+          - m_H_wet_support
+          - m_V_wet_support
+          - gamma_tau_omega_attenuation
+          - rho_H_obs_error_confidence
+          - rho_V_obs_error_confidence
+          - B_pol_polarization_mismatch
+          - B_temp_temperature_contrast
+          - B_vert_surface_rootzone_contrast
+          - source_fit_gain_prior_summaries
+          - finite_input_coverage
+          - base_valid_mask_fraction_diagnostic_only
+        source_fit_gain_bank_policy:
+          source: source_fit_only
+          forbidden:
+            - target_context
+            - target_val
+            - target_eval
+            - target_full_train
+          use_in_forward: neutral_summary_if_missing_source_fit_priors
+          role: bounded_source_fit_prior_summary_not_target_calibration
+        source_fit_regularization:
+          enabled: false
+          previous_M3_14_sign_consistency_loss_role: diagnostic_only
+        defaults:
+          phys_delta_scale: 0.03
+          phys_gate_init: 0.25
+          operator_droppath_p: 0.10
+          operator_droppath_train_only: true
+          use_amp: 0
+          lr: 2e-4
+          max_epochs: 50
+          batch_size: 64
+          accum_steps: 2
+        current_ablation_policy:
+          target_region: US-R1
+          seed: 0
+          K: 0
+          baseline: M3_1_hyperda_trust_medium
+          forbidden_current_regions: [US-R2, US-R3, US-R4, US-R5, US-R6]
+          deferred_regions_after_freeze: [US-R2, US-R3, US-R4, US-R5, US-R6]
+          freeze_before_deferred_regions: true
+          target_eval_role: run_once_after_source_val_gate_no_tuning
+        source_val_selection_rule: source_val_dual_variable_cvar_safe_score >= M3_1_and_no_obvious_single_variable_region_or_season_RMSE_regression
+        target_eval_acceptance:
+          freeze_condition: improve_at_least_one_target_eval_RMSE_variable_and_other_degrades_lte_0.2pct
+          diagnostic_only_if: gate_fails_or_target_eval_freeze_condition_fails
+          no_tuning_after_target_eval: true
+        implemented_entrypoint: run/phase4_hyperda_staged_ablation.sh
+        required_tests:
+          - wrapper_rejects_M2_1_M3_1_warm_start
+          - wrapper_logs_checkpoint_start_source_pooled_global_backbone
+          - wrapper_rejects_US_R2_to_US_R6_without_frozen_confirmation_flag
+          - wrapper_logs_final_output_residual_allowed_false
+          - channel_11_diagnostic_only
+          - no_final_output_residual_branch
+          - gain_bank_rejects_target_context_target_val_target_eval
+          - trainable_params_lte_M3_1_stage2_plus_5pct
+        forbidden_sources:
+          - target_labels
+          - target_context_labels
+          - target_support_labels_for_K0
+          - target_val
+          - target_eval_statistics
+          - target_full_train_records
+          - channel_11_hard_mask_usage
+        base_valid_mask_usage: channel_11_diagnostic_coverage_only_not_obs_loss_metric_or_region_hard_mask
+        target_eval_usage: final_eval_only_once_after_source_val_gate_passes_no_selection
+      M3_3_hyperda_trust_selection_only:
+        forward_change: none
+        selection_metric: source_val_dual_variable_cvar_safe_score
+    promotion_rule: source_gate_then_single_final_k0_target_eval_only
+    required_metadata:
+      - trust_bank_hash
+      - source_neighbor_top_m
+      - trust_strength
+      - dual_variable_cvar_score
+      - per_variable_gates
+      - per_month_trust_summary
+      - phys_trust_d0_summary
+    phys_trust_d0:
+      forward_change: none
+      role: diagnostic_explanation_layer_only
+      allowed_sources:
+        - x
+        - x_raw
+        - month
+        - region_mask
+      diagnostics:
+        - tb_h_v_normalized_innovation
+        - obs_error_confidence
+        - vegetation_opacity
+        - surface_rootzone_forecast_contrast
+        - finite_input_coverage
+        - bounded_base_valid_mask_diagnostic_coverage
+        - monthly_trust_gate
+      forbidden_sources:
+        - target_labels
+        - target_val
+        - target_eval_statistics
+      base_valid_mask_usage: bounded_diagnostic_coverage_only_not_loss_metric_obs_or_region_mask
+    forbidden_sources:
+      - US-R1_labels_for_source_bank
+      - target_labels
+      - target_val
+      - target_eval_statistics
   safe_refinement_formula: theta_SAFE = theta_prior + alpha_K * (theta_adapt - theta_prior)
   safe_refinement_selection: source_val_preregistered_only
+  safe_refinement_status: diagnostic_frozen_future_extension_current_kshot_rejected_to_k0_anchor
 
 prompt:
   token_types:
@@ -150,30 +1040,16 @@ prompt:
 
 variants:
   HyperDA_ZeroShot_Context:
+    paper_name: HyperDA Operator Generator
     K: 0
     labels: none
     prompt: target_context_monthly_prompt_prototypes_2015_2021_input_side_only
     generated_parameters: target_specific_lightweight_operator
     selection_data: source_val_2022_preregistered_only
     final_eval_data: target_eval_2023_2025_offline_only
-  M2_4_TargetContextConservative_K0:
-    ablation_id: M2_4_target_context_conservative_hyperda
-    name: Stage 3 K=0 target-context conservative shrinkage diagnostic
-    status: diagnostic_not_paper_main_not_a_source_stage_ablation
-    stage: stage3_k0_target_context_adaptation_diagnostic
-    K: 0
-    starts_from: frozen_M2_1_rank_gated_dora_stable
-    source_prior: M2_1_rank_gated_dora_stable
-    extra_source_finetune: false
-    target_context_signal: input_side_monthly_prototype_reliability_only
-    shrinkage_policy: source_leave_one_region_worst_case_non_degradation_vs_m2_1
-    formula: pred = source_base + shrinkage(context_reliability) * M2_1_hyper_residual
-    target_labels_used_for_adaptation: false
-    target_val_usage: unused_in_main_protocol
-    target_eval_usage: final_eval_only_no_selection
-    target_eval_input_stats_used_for_update: false
   HyperDA_FewShot_K4:
-    paper_name: HyperDA-SAFE
+    paper_name: SAFE diagnostic
+    status: frozen_diagnostic_future_extension_current_rows_require_rejected_to_k0_anchor_label
     refinement: Source-Anchored Few-Shot Operator Refinement
     K: 4
     labels: up_to_4_labeled_target_support_cycles_2015_2021
@@ -194,7 +1070,8 @@ variants:
     selection_data: source_val_2022_preregistered_only
     target_val_usage: unused_in_main_protocol
   HyperDA_FewShot_K12:
-    paper_name: HyperDA-SAFE
+    paper_name: SAFE diagnostic
+    status: frozen_diagnostic_future_extension_current_rows_require_rejected_to_k0_anchor_label
     refinement: Source-Anchored Few-Shot Operator Refinement
     K: 12
     labels: up_to_12_labeled_target_support_cycles_2015_2021

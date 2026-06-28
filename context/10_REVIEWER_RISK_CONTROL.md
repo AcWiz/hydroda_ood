@@ -25,11 +25,13 @@ target-train mean/monthly/ridge 只作为 internal sanity 或附录。
 
 防御：区域在训练前固定，只使用 input/static/geophysical 信息，不使用 increment 或 model error。
 
-### R6. “HyperDA-SAFE 是否只是 adapter/LoRA 换名？”
+### R6. “HyperDA-TRUST 是否只是 adapter/LoRA 换名？”
 
-防御：必须展示 source-trained HyperDA prior、target_context input-only
-monthly prompt prototypes、parameter-space lightweight operator generation 和
-source-anchored K-shot refinement。HyRAO 是旧命名/旧方案，不作为主方法回应审稿。
+防御：必须展示 source-trained HyperDA Operator Generator、target_context
+input-only monthly prompt prototypes、parameter-space lightweight operator
+generation、source-only trust bank、nearest-source coefficient consensus 和
+label-free trust routing。SAFE K-shot refinement 当前是 diagnostic / future
+extension；HyRAO 是旧命名/旧方案，不作为主方法回应审稿。
 
 ---
 
@@ -56,7 +58,7 @@ seed variance tables
 1. Define the deployment problem.
 2. Introduce HydroDA-OOD target_context/target_support/target_eval protocol.
 3. Show forecast/source-only OOD gap.
-4. Compare HyperDA K=0/4/12 zero/few-shot generalization.
-5. Introduce HyperDA parameter generation.
-6. Analyze lightweight adaptation ablations and high-update events after model selection.
+4. Compare HyperDA Operator Generator K=0 and HyperDA-TRUST K=0.
+5. Introduce source-manifold trust routing and no-target-label selection.
+6. Report SAFE K-shot diagnostics only with rejected_to_k0_anchor labels, then analyze high-update events after model selection.
 ```

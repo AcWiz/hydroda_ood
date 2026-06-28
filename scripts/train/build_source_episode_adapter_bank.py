@@ -553,6 +553,7 @@ def _build_episode(
                 ridge_trust_region_radius=args.ridge_trust_region_radius,
                 ridge_max_feature_pixels=args.ridge_max_feature_pixels,
                 ridge_standardize_features=args.ridge_standardize_features,
+                ridge_weighting="global_pixel_l2",
                 surface_weight=args.surface_weight,
                 rootzone_weight=args.rootzone_weight,
                 use_lat_weighted_loss=args.use_lat_weighted_loss,

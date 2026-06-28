@@ -313,6 +313,9 @@ def evaluate_split(
     max_samples: Optional[int] = None,
     return_hashes: bool = False,
     zero_shot_predictor: Any = None,
+    raw_adapted_predictor: Any = None,
+    no_tta_predictor: Any = None,
+    no_tta_zero_shot_predictor: Any = None,
     adapt_mix_rho: float = 1.0,
     prediction_record_path: Optional[Union[str, Path]] = None,
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
@@ -328,17 +331,23 @@ def evaluate_split(
     rows: List[Dict[str, Any]] = []
     prediction_hasher = hashlib.sha256()
     zero_prediction_hasher = hashlib.sha256()
-    adapted_prediction_hasher = hashlib.sha256()
+    raw_adapted_prediction_hasher = hashlib.sha256()
+    post_gate_prediction_hasher = hashlib.sha256()
+    no_tta_prediction_hasher = hashlib.sha256()
     prediction_record_count = 0
     prediction_record_file: Optional[TextIO] = None
     mix_delta_from_zero_abs_sum = 0.0
     mix_delta_from_adapted_abs_sum = 0.0
+    raw_delta_from_zero_abs_sum = 0.0
+    post_gate_delta_from_zero_abs_sum = 0.0
+    no_tta_delta_abs_sum = 0.0
     mix_delta_element_count = 0
+    no_tta_delta_element_count = 0
     mix_delta_from_zero_max_abs = 0.0
     mix_delta_from_adapted_max_abs = 0.0
-    stage3_k0_context_shrinkage_rhos: List[float] = []
-    stage3_k0_context_shrinkage_surface_rhos: List[float] = []
-    stage3_k0_context_shrinkage_rootzone_rhos: List[float] = []
+    raw_delta_from_zero_max_abs = 0.0
+    post_gate_delta_from_zero_max_abs = 0.0
+    no_tta_delta_max_abs = 0.0
 
     # Global accumulators for correct skill aggregation (aggregate-then-sqrt,
     # not per-sample mean-of-ratios that produces spuriously negative skills).
@@ -368,38 +377,76 @@ def evaluate_split(
             if first_sample is None:
                 first_sample = sample
             adapted_pred = predictor.predict(sample)
-            shrinkage_rho = getattr(predictor, "stage3_k0_context_shrinkage_last_rho", None)
-            if shrinkage_rho is not None:
-                stage3_k0_context_shrinkage_rhos.append(float(shrinkage_rho))
-            shrinkage_rhos = getattr(predictor, "stage3_k0_context_shrinkage_last_rhos", None)
-            if isinstance(shrinkage_rhos, dict):
-                if shrinkage_rhos.get("surface") is not None:
-                    stage3_k0_context_shrinkage_surface_rhos.append(float(shrinkage_rhos["surface"]))
-                if shrinkage_rhos.get("rootzone") is not None:
-                    stage3_k0_context_shrinkage_rootzone_rhos.append(float(shrinkage_rhos["rootzone"]))
             zero_pred = None
+            raw_adapted_pred = None
             pred = adapted_pred
             if zero_shot_predictor is not None or float(adapt_mix_rho) != 1.0:
                 if zero_shot_predictor is None:
                     raise ValueError("zero_shot_predictor is required when adapt_mix_rho != 1.0")
                 zero_pred = zero_shot_predictor.predict(sample)
+                raw_adapted_pred = (
+                    raw_adapted_predictor.predict(sample)
+                    if raw_adapted_predictor is not None
+                    else adapted_pred
+                )
                 pred = mix_prediction_with_zero_shot(sample, adapted_pred, zero_pred, rho=float(adapt_mix_rho))
+                raw_delta_zero = prediction_pair_delta_summary(raw_adapted_pred, zero_pred)
+                post_gate_delta_zero = prediction_pair_delta_summary(adapted_pred, zero_pred)
                 delta_zero = prediction_pair_delta_summary(pred, zero_pred)
                 delta_adapted = prediction_pair_delta_summary(pred, adapted_pred)
                 elem_count = int(
                     np.asarray(pred["pred_increment_surface"]).size
                     + np.asarray(pred["pred_increment_rootzone"]).size
                 )
+                raw_delta_from_zero_abs_sum += raw_delta_zero["mean_abs"] * elem_count
+                post_gate_delta_from_zero_abs_sum += post_gate_delta_zero["mean_abs"] * elem_count
                 mix_delta_from_zero_abs_sum += delta_zero["mean_abs"] * elem_count
                 mix_delta_from_adapted_abs_sum += delta_adapted["mean_abs"] * elem_count
                 mix_delta_element_count += elem_count
+                raw_delta_from_zero_max_abs = max(raw_delta_from_zero_max_abs, raw_delta_zero["max_abs"])
+                post_gate_delta_from_zero_max_abs = max(
+                    post_gate_delta_from_zero_max_abs,
+                    post_gate_delta_zero["max_abs"],
+                )
                 mix_delta_from_zero_max_abs = max(mix_delta_from_zero_max_abs, delta_zero["max_abs"])
                 mix_delta_from_adapted_max_abs = max(mix_delta_from_adapted_max_abs, delta_adapted["max_abs"])
+            no_tta_pred = None
+            if no_tta_predictor is not None:
+                no_tta_adapted_pred = no_tta_predictor.predict(sample)
+                if zero_shot_predictor is not None or float(adapt_mix_rho) != 1.0:
+                    if no_tta_zero_shot_predictor is None:
+                        raise ValueError(
+                            "no_tta_zero_shot_predictor is required when comparing no-TTA deltas "
+                            "with a K0/adapt_mix evaluation path"
+                        )
+                    no_tta_zero_pred = no_tta_zero_shot_predictor.predict(sample)
+                    no_tta_pred = mix_prediction_with_zero_shot(
+                        sample,
+                        no_tta_adapted_pred,
+                        no_tta_zero_pred,
+                        rho=float(adapt_mix_rho),
+                    )
+                else:
+                    no_tta_pred = no_tta_adapted_pred
+                no_tta_delta = prediction_pair_delta_summary(pred, no_tta_pred)
+                no_tta_elem_count = int(
+                    np.asarray(pred["pred_increment_surface"]).size
+                    + np.asarray(pred["pred_increment_rootzone"]).size
+                )
+                no_tta_delta_abs_sum += no_tta_delta["mean_abs"] * no_tta_elem_count
+                no_tta_delta_element_count += no_tta_elem_count
+                no_tta_delta_max_abs = max(no_tta_delta_max_abs, no_tta_delta["max_abs"])
             prediction_payload = _prediction_hash_payload(idx, sample, pred)
             if return_hashes:
                 if zero_pred is not None:
                     _json_hash_update(zero_prediction_hasher, _prediction_hash_payload(idx, sample, zero_pred))
-                    _json_hash_update(adapted_prediction_hasher, _prediction_hash_payload(idx, sample, adapted_pred))
+                    _json_hash_update(
+                        raw_adapted_prediction_hasher,
+                        _prediction_hash_payload(idx, sample, raw_adapted_pred or adapted_pred),
+                    )
+                    _json_hash_update(post_gate_prediction_hasher, _prediction_hash_payload(idx, sample, adapted_pred))
+                if no_tta_pred is not None:
+                    _json_hash_update(no_tta_prediction_hasher, _prediction_hash_payload(idx, sample, no_tta_pred))
                 _json_hash_update(prediction_hasher, prediction_payload)
                 prediction_record_count += 1
             if prediction_record_file is not None:
@@ -649,8 +696,27 @@ def evaluate_split(
             "metric_row_count": len(rows),
             "adapt_mix_rho": float(adapt_mix_rho),
             "zero_shot_prediction_content_hash": zero_prediction_hasher.hexdigest() if mix_delta_element_count else "",
-            "adapted_pre_mix_prediction_content_hash": adapted_prediction_hasher.hexdigest() if mix_delta_element_count else "",
+            "adapted_pre_mix_prediction_content_hash": post_gate_prediction_hasher.hexdigest() if mix_delta_element_count else "",
+            "raw_adapted_prediction_content_hash": raw_adapted_prediction_hasher.hexdigest() if mix_delta_element_count else prediction_hasher.hexdigest(),
+            "post_gate_prediction_content_hash": post_gate_prediction_hasher.hexdigest() if mix_delta_element_count else prediction_hasher.hexdigest(),
             "final_mixed_prediction_content_hash": prediction_hasher.hexdigest(),
+            "no_tta_prediction_content_hash": no_tta_prediction_hasher.hexdigest() if no_tta_delta_element_count else "",
+            "prediction_delta_vs_no_tta": (
+                float(no_tta_delta_abs_sum / no_tta_delta_element_count) if no_tta_delta_element_count else 0.0
+            ),
+            "prediction_max_abs_delta_vs_no_tta": float(no_tta_delta_max_abs),
+            "raw_to_k0_mean_abs_delta": (
+                float(raw_delta_from_zero_abs_sum / mix_delta_element_count) if mix_delta_element_count else 0.0
+            ),
+            "raw_to_k0_max_abs_delta": float(raw_delta_from_zero_max_abs),
+            "post_gate_to_k0_mean_abs_delta": (
+                float(post_gate_delta_from_zero_abs_sum / mix_delta_element_count) if mix_delta_element_count else 0.0
+            ),
+            "post_gate_to_k0_max_abs_delta": float(post_gate_delta_from_zero_max_abs),
+            "final_mix_to_k0_mean_abs_delta": (
+                float(mix_delta_from_zero_abs_sum / mix_delta_element_count) if mix_delta_element_count else 0.0
+            ),
+            "final_mix_to_k0_max_abs_delta": float(mix_delta_from_zero_max_abs),
             "mix_mean_abs_change_from_k0": (
                 float(mix_delta_from_zero_abs_sum / mix_delta_element_count) if mix_delta_element_count else 0.0
             ),
@@ -659,55 +725,6 @@ def evaluate_split(
                 float(mix_delta_from_adapted_abs_sum / mix_delta_element_count) if mix_delta_element_count else 0.0
             ),
             "mix_max_abs_change_from_adapted": float(mix_delta_from_adapted_max_abs),
-            "stage3_k0_context_shrinkage": {
-                "enabled": bool(stage3_k0_context_shrinkage_rhos),
-                "rho_count": len(stage3_k0_context_shrinkage_rhos),
-                "rho_mean": (
-                    float(np.mean(stage3_k0_context_shrinkage_rhos))
-                    if stage3_k0_context_shrinkage_rhos
-                    else 0.0
-                ),
-                "rho_min": (
-                    float(np.min(stage3_k0_context_shrinkage_rhos))
-                    if stage3_k0_context_shrinkage_rhos
-                    else 0.0
-                ),
-                "rho_max": (
-                    float(np.max(stage3_k0_context_shrinkage_rhos))
-                    if stage3_k0_context_shrinkage_rhos
-                    else 0.0
-                ),
-                "rho_surface_mean": (
-                    float(np.mean(stage3_k0_context_shrinkage_surface_rhos))
-                    if stage3_k0_context_shrinkage_surface_rhos
-                    else 0.0
-                ),
-                "rho_surface_min": (
-                    float(np.min(stage3_k0_context_shrinkage_surface_rhos))
-                    if stage3_k0_context_shrinkage_surface_rhos
-                    else 0.0
-                ),
-                "rho_surface_max": (
-                    float(np.max(stage3_k0_context_shrinkage_surface_rhos))
-                    if stage3_k0_context_shrinkage_surface_rhos
-                    else 0.0
-                ),
-                "rho_rootzone_mean": (
-                    float(np.mean(stage3_k0_context_shrinkage_rootzone_rhos))
-                    if stage3_k0_context_shrinkage_rootzone_rhos
-                    else 0.0
-                ),
-                "rho_rootzone_min": (
-                    float(np.min(stage3_k0_context_shrinkage_rootzone_rhos))
-                    if stage3_k0_context_shrinkage_rootzone_rhos
-                    else 0.0
-                ),
-                "rho_rootzone_max": (
-                    float(np.max(stage3_k0_context_shrinkage_rootzone_rhos))
-                    if stage3_k0_context_shrinkage_rootzone_rhos
-                    else 0.0
-                ),
-            },
         }
         return rows, hashes
 

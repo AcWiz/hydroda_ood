@@ -8,9 +8,9 @@
 HydroDA-OOD:
   leakage-controlled cross-continental neural land DA increment emulation protocol.
 
-HyperDA:
-  hydroclimatic spatio-temporal prompt-conditioned, basis-factorized hypernetwork
-  for generating target-specific lightweight neural DA increment operators.
+HyperDA-TRUST:
+  zero-shot target-specific DA increment operator generation with a
+  source-manifold trust-routing regularizer.
 ```
 
 本项目不是 ordinary soil moisture prediction。正确任务是：
@@ -121,9 +121,9 @@ pred_analysis_rootzone = forecast_rootzone + pred_increment_rootzone
 论文主问题固定为：
 
 ```text
-Can hydroclimatic spatio-temporal prompts and source-trained HyperDA priors
-generate target-specific lightweight neural data assimilation increment
-operators under zero/few-shot cross-continental hydroclimatic shift?
+Can source-trained HyperDA priors and source-manifold trust routing generate
+target-specific lightweight neural data assimilation increment operators under
+zero-shot cross-continental hydroclimatic shift without target labels?
 ```
 
 必须围绕以下可证伪比较组织实验：
@@ -132,12 +132,11 @@ operators under zero/few-shot cross-continental hydroclimatic shift?
 1. Forecast-only
 2. Source-only backbone
 3. Prompt-conditioned shared backbone
-4. HyperDA K=0 target-context prompt
-5. HyperDA K=4 lightweight target adaptation
-6. HyperDA K=12 lightweight target adaptation
+4. HyperDA Operator Generator K=0 target-context prompt
+5. HyperDA-TRUST K=0 source-manifold trust routing
 ```
 
-论文主表**不再**包含以下无明确学术定位或容易分散主线的 heuristic baseline：
+论文主表**不再**包含以下无明确学术定位或容易分散主线的 heuristic baseline / frozen diagnostic：
 
 ```text
 source_mean_increment
@@ -149,6 +148,7 @@ prompt-weighted specialist
 kNN parameter interpolation
 linear prompt-to-parameter
 random-prompt HyperDA
+SAFE K=4/K=12 few-shot refinement unless future runs produce accepted updates
 ```
 
 这些方法最多作为 internal sanity check，不进入论文主表，不作为当前工程优先级。
@@ -273,7 +273,11 @@ K = number of labeled target DA analysis cycles from target_train years 2015-202
 K 不是 patches、pixels 或 mini-batches 数。同一天切出多少 spatial patches，都只算一个 DA calibration cycle。
 
 主协议不使用 `target_val=2022` 进行 checkpoint selection、early stopping 或
-gain calibration。论文主表必须按 `adaptation_setting` / K=0/4/12 区分。
+gain calibration。当前论文主结果优先聚焦 K=0 zero-shot；K=4/K=12 保留在
+实验系统中作为 frozen diagnostic / future extension，除非出现 accepted
+few-shot update 证据，否则不得作为主贡献或主表涨点宣称。
+论文中若展示 K-shot 表格，必须明确标注 `rejected_to_k0_anchor` 或
+diagnostic status，不能写成 accepted few-shot adaptation。
 `target_full_train` 仅作为 legacy/internal reproduction 路径，必须显式
 `allow_legacy_full_target_train` opt-in。
 

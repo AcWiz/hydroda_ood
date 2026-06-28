@@ -1118,7 +1118,8 @@ def test_retired_phase5_variant_wrappers_are_not_active_paper_entrypoints():
 
     safe = Path("run/hyperda_safe_us_r1_seed0.sh").read_text()
     zero_few = Path("run/phase5_hyperda_zero_few_shot_eval.sh").read_text()
-    assert "HyperDA-SAFE" in safe
+    assert "SAFE diagnostic" in safe
+    assert "rejected_to_k0_anchor" in safe
     assert "ADAPT_RECIPE=source_anchor" in safe
     assert "phase5_hyperda_zero_few_shot_eval.sh" in safe
     assert 'K_LIST="${K_LIST:-0 4 12}"' in zero_few
@@ -1703,6 +1704,12 @@ def test_evaluation_summary_includes_stage3_protocol_metadata(monkeypatch, tmp_p
         "prediction_record_count": 1,
         "metric_content_hash": "metrichash",
         "metric_values_content_hash": "valuehash",
+        "raw_adapted_prediction_content_hash": "rawhash",
+        "post_gate_prediction_content_hash": "posthash",
+        "final_mixed_prediction_content_hash": "finalhash",
+        "raw_to_k0_mean_abs_delta": 0.25,
+        "post_gate_to_k0_mean_abs_delta": 0.10,
+        "final_mix_to_k0_mean_abs_delta": 0.0,
     }
     summary_metrics = {
         "surface": {
@@ -1732,21 +1739,6 @@ def test_evaluation_summary_includes_stage3_protocol_metadata(monkeypatch, tmp_p
     )
     ckpt = tmp_path / "ckpt.pt"
     ckpt.write_bytes(b"placeholder")
-    policy_json = tmp_path / "m2_4a_policy.json"
-    policy_json.write_text(
-        __import__("json").dumps(
-            {
-                "schema_version": "stage3_k0_m2_4a_source_episode_policy_v1",
-                "policy": "source_episode_calibrated_v1",
-                "policy_source": "source_episode_calibrated_v1",
-                "rho_surface_cap": 0.25,
-                "rho_rootzone_cap": 0.75,
-                "policy_hash": "policyhash",
-                "source_episode_regions": ["US-R2", "US-R3"],
-            }
-        ),
-        encoding="utf-8",
-    )
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -1781,10 +1773,16 @@ def test_evaluation_summary_includes_stage3_protocol_metadata(monkeypatch, tmp_p
     assert summary["stage3_protocol"]["stage3_posterior_policy"] == "conservative_coeff_posterior"
     assert summary["stage3_protocol"]["stage3_posterior_decision"] == "no_update"
     assert summary["stage3_protocol"]["support_gate_status"] == "skipped_k0_no_support"
+    assert summary["raw_adapted_prediction_content_hash"] == "rawhash"
+    assert summary["post_gate_prediction_content_hash"] == "posthash"
+    assert summary["final_mixed_prediction_content_hash"] == "finalhash"
+    assert summary["raw_to_k0_mean_abs_delta"] == pytest.approx(0.25)
+    assert summary["post_gate_to_k0_mean_abs_delta"] == pytest.approx(0.10)
+    assert summary["final_mix_to_k0_mean_abs_delta"] == pytest.approx(0.0)
     assert diagnostics["stage3_protocol"]["target_labels_used_for_adaptation"] is False
 
 
-def test_evaluation_summary_records_stage3_k0_context_shrinkage_metadata(monkeypatch, tmp_path):
+def test_evaluate_checkpoint_compact_output_skips_long_metrics_and_prediction_records(monkeypatch, tmp_path):
     from scripts.eval import evaluate_checkpoint
 
     class DummyDataset:
@@ -1803,45 +1801,11 @@ def test_evaluation_summary_records_stage3_k0_context_shrinkage_metadata(monkeyp
 
     class DummyPredictor:
         method_name = "hyperda_zero_shot_context"
-        stage3_protocol_metadata = {
-            "posterior_state_schema": "hyperda_stage3_target_posterior_state_v1",
-            "source_prior_unchanged": True,
-            "K": 0,
-            "target_labels_used_for_adaptation": False,
-            "stage3_posterior_policy": "conservative_coeff_posterior",
-            "stage3_posterior_decision": "no_update",
-            "support_gate_status": "skipped_k0_no_support",
-        }
-        stage3_k0_context_shrinkage_metadata = {"enabled": False}
+        stage3_protocol_metadata = {"K": 0, "target_labels_used_for_adaptation": False}
         _target_prompt_metadata = {"label_usage": "none"}
 
         def __init__(self, *args, **kwargs):
             return None
-
-        def enable_stage3_k0_context_shrinkage(
-            self,
-            *,
-            source_calibrated_rho_cap,
-            policy,
-            surface_rho_cap,
-            rootzone_rho_cap,
-            policy_json_path="",
-        ):
-            self.stage3_k0_context_shrinkage_metadata = {
-                "enabled": True,
-                "stage3_variant": "M2_4_target_context_conservative_hyperda",
-                "policy": policy,
-                "rho_cap": float(source_calibrated_rho_cap),
-                "rho_surface_cap": float(surface_rho_cap),
-                "rho_rootzone_cap": float(rootzone_rho_cap),
-                "policy_source": "source_episode_calibrated_v1",
-                "policy_hash": "policyhash",
-                "source_episode_regions": ["US-R2", "US-R3"],
-                "target_labels_used_for_adaptation": False,
-                "target_val_usage": "unused_in_main_protocol",
-                "target_eval_usage": "final_eval_only_no_selection",
-                "target_eval_input_stats_used_for_update": False,
-            }
 
     rows = [
         {
@@ -1850,6 +1814,7 @@ def test_evaluation_summary_records_stage3_k0_context_shrinkage_metadata(monkeyp
             "metric": "rmse",
             "value": 1.0,
             "season": "ALL",
+            "query_date": "2023-01-01",
         }
     ]
     eval_hashes = {
@@ -1857,18 +1822,123 @@ def test_evaluation_summary_records_stage3_k0_context_shrinkage_metadata(monkeyp
         "prediction_record_count": 1,
         "metric_content_hash": "metrichash",
         "metric_values_content_hash": "valuehash",
-        "stage3_k0_context_shrinkage": {
-            "enabled": True,
-            "rho_mean": 0.5,
-            "rho_min": 0.5,
-            "rho_max": 0.5,
-            "rho_surface_mean": 0.25,
-            "rho_surface_min": 0.25,
-            "rho_surface_max": 0.25,
-            "rho_rootzone_mean": 0.75,
-            "rho_rootzone_min": 0.75,
-            "rho_rootzone_max": 0.75,
+    }
+    summary_metrics = {
+        "surface": {
+            "skill_primary": 0.0,
+            "skill_latw_primary": 0.0,
+            "skill_median": 0.0,
+            "rmse_latw_mean": 1.0,
+            "corr_latw_mean": 0.0,
         },
+        "rootzone": {
+            "skill_primary": 0.0,
+            "skill_latw_primary": 0.0,
+            "skill_median": 0.0,
+            "rmse_latw_mean": 1.0,
+            "corr_latw_mean": 0.0,
+        },
+    }
+    captured = {}
+
+    def fake_evaluate_split(**kwargs):
+        captured["prediction_record_path"] = kwargs.get("prediction_record_path")
+        return rows, eval_hashes
+
+    monkeypatch.setattr(evaluate_checkpoint, "HydroDADataset", DummyDataset)
+    monkeypatch.setattr(evaluate_checkpoint, "resolve_device", lambda *args, **kwargs: torch.device("cpu"))
+    monkeypatch.setattr(evaluate_checkpoint, "compute_sha256", lambda path: "splitsha")
+    monkeypatch.setattr(evaluate_checkpoint, "evaluate_split", fake_evaluate_split)
+    monkeypatch.setattr(evaluate_checkpoint, "summarize_metric_rows", lambda df: summary_metrics)
+    monkeypatch.setattr(
+        "hydroda.baselines.prompt_conditioned.PromptConditionedBackbonePredictor",
+        DummyPredictor,
+    )
+    ckpt = tmp_path / "ckpt.pt"
+    ckpt.write_bytes(b"placeholder")
+    record_path = tmp_path / "eval" / "US-R1" / "prediction_records.jsonl"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_checkpoint.py",
+            "--checkpoint",
+            str(ckpt),
+            "--target_region",
+            "US-R1",
+            "--adaptation_setting",
+            "zero_shot_context",
+            "--K",
+            "0",
+            "--split_type",
+            "target_eval",
+            "--predictor_type",
+            "hyperda_target_adapt",
+            "--output_dir",
+            str(tmp_path / "eval"),
+            "--max_samples",
+            "1",
+            "--device",
+            "cpu",
+            "--output_level",
+            "compact",
+            "--prediction_record_path",
+            str(record_path),
+        ],
+    )
+
+    evaluate_checkpoint.main()
+
+    out_dir = tmp_path / "eval" / "US-R1"
+    assert captured["prediction_record_path"] is None
+    assert (out_dir / "summary.json").exists()
+    assert (out_dir / "diagnostics.json").exists()
+    assert (out_dir / "metrics_by_region.csv").exists()
+    assert (out_dir / "metrics_by_season.csv").exists()
+    assert not (out_dir / "metrics_long.csv").exists()
+    assert not (out_dir / "metrics_long.csv.gz").exists()
+    assert not record_path.exists()
+
+
+def test_evaluate_checkpoint_long_output_writes_compressed_long_metrics(monkeypatch, tmp_path):
+    from scripts.eval import evaluate_checkpoint
+
+    class DummyDataset:
+        def __init__(self, *args, **kwargs):
+            self._split_entry = {
+                "target_context_dates_hash": "ctxhash",
+                "target_support_dates_hash": "supporthash",
+                "target_eval_dates_hash": "evalhash",
+            }
+
+        def __len__(self):
+            return 1
+
+        def close(self):
+            return None
+
+    class DummyPredictor:
+        method_name = "hyperda_zero_shot_context"
+        stage3_protocol_metadata = {}
+        _target_prompt_metadata = {"label_usage": "none"}
+
+        def __init__(self, *args, **kwargs):
+            return None
+
+    rows = [
+        {
+            "target_region_id": "US-R1",
+            "variable": "surface",
+            "metric": "rmse",
+            "value": 1.0,
+            "season": "ALL",
+            "query_date": "2023-01-01",
+        }
+    ]
+    eval_hashes = {
+        "prediction_content_hash": "predhash",
+        "prediction_record_count": 1,
+        "metric_content_hash": "metrichash",
+        "metric_values_content_hash": "valuehash",
     }
     summary_metrics = {
         "surface": {
@@ -1920,39 +1990,144 @@ def test_evaluation_summary_records_stage3_k0_context_shrinkage_metadata(monkeyp
             "1",
             "--device",
             "cpu",
-            "--stage3_k0_context_shrinkage",
-            "--stage3_k0_context_shrinkage_rho_cap",
-            "0.5",
-            "--stage3_k0_context_shrinkage_policy",
-            "source_episode_calibrated_v1",
-            "--stage3_k0_context_shrinkage_surface_rho_cap",
-            "0.25",
-            "--stage3_k0_context_shrinkage_rootzone_rho_cap",
-            "0.75",
-            "--stage3_k0_context_shrinkage_policy_json",
-            str(policy_json),
+            "--output_level",
+            "long",
         ],
     )
 
     evaluate_checkpoint.main()
 
+    out_dir = tmp_path / "eval" / "US-R1"
+    assert (out_dir / "metrics_long.csv.gz").exists()
+    assert not (out_dir / "metrics_long.csv").exists()
+
+
+def test_hyperda_target_eval_builds_k0_anchor_for_delta_when_rho_is_one(monkeypatch, tmp_path):
+    from scripts.eval import evaluate_checkpoint
+
+    class DummyDataset:
+        def __init__(self, *args, **kwargs):
+            self._split_entry = {
+                "target_context_dates_hash": "ctxhash",
+                "target_support_dates_hash": "supporthash",
+                "target_eval_dates_hash": "evalhash",
+            }
+
+        def __len__(self):
+            return 1
+
+        def close(self):
+            return None
+
+    class DummyPredictor:
+        method_name = "hyperda_safe_few_shot_k12"
+        stage3_protocol_metadata = {
+            "K": 12,
+            "stage3_posterior_decision": "accepted",
+            "paper_facing_run": True,
+        }
+        _target_prompt_metadata = {"label_usage": "none"}
+
+        def __init__(self, *args, **kwargs):
+            self.model = object()
+            return None
+
+    rows = [
+        {
+            "target_region_id": "US-R1",
+            "variable": "surface",
+            "metric": "rmse",
+            "value": 1.0,
+            "season": "ALL",
+        }
+    ]
+    summary_metrics = {
+        "surface": {
+            "skill_primary": 0.0,
+            "skill_latw_primary": 0.0,
+            "skill_median": 0.0,
+            "rmse_latw_mean": 1.0,
+            "corr_latw_mean": 0.0,
+        },
+        "rootzone": {
+            "skill_primary": 0.0,
+            "skill_latw_primary": 0.0,
+            "skill_median": 0.0,
+            "rmse_latw_mean": 1.0,
+            "corr_latw_mean": 0.0,
+        },
+    }
+    captured = {}
+
+    def fake_evaluate_split(**kwargs):
+        captured["zero_shot_predictor"] = kwargs.get("zero_shot_predictor")
+        return rows, {
+            "prediction_content_hash": "finalhash",
+            "prediction_record_count": 1,
+            "metric_content_hash": "metrichash",
+            "metric_values_content_hash": "valuehash",
+            "zero_shot_prediction_content_hash": "zerohash",
+            "raw_adapted_prediction_content_hash": "rawhash",
+            "post_gate_prediction_content_hash": "posthash",
+            "final_mixed_prediction_content_hash": "finalhash",
+            "raw_to_k0_mean_abs_delta": 0.2,
+            "post_gate_to_k0_mean_abs_delta": 0.2,
+            "final_mix_to_k0_mean_abs_delta": 0.2,
+        }
+
+    monkeypatch.setattr(evaluate_checkpoint, "HydroDADataset", DummyDataset)
+    monkeypatch.setattr(evaluate_checkpoint, "resolve_device", lambda *args, **kwargs: torch.device("cpu"))
+    monkeypatch.setattr(evaluate_checkpoint, "compute_sha256", lambda path: "splitsha")
+    monkeypatch.setattr(evaluate_checkpoint, "apply_target_adapter_state", lambda model, state: None)
+    monkeypatch.setattr(evaluate_checkpoint, "evaluate_split", fake_evaluate_split)
+    monkeypatch.setattr(evaluate_checkpoint, "summarize_metric_rows", lambda df: summary_metrics)
+    monkeypatch.setattr(
+        "hydroda.baselines.prompt_conditioned.PromptConditionedBackbonePredictor",
+        DummyPredictor,
+    )
+    ckpt = tmp_path / "ckpt.pt"
+    torch.save(
+        {
+            "target_adapter_anchor_state": {"target_prompt.latent": torch.zeros(1)},
+            "raw_adapted_state_dict": {
+                "target_adapter_state_dict": {"target_prompt.latent": torch.ones(1)}
+            },
+        },
+        ckpt,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_checkpoint.py",
+            "--checkpoint",
+            str(ckpt),
+            "--target_region",
+            "US-R1",
+            "--adaptation_setting",
+            "few_shot_k12",
+            "--K",
+            "12",
+            "--split_type",
+            "target_eval",
+            "--predictor_type",
+            "hyperda_target_adapt",
+            "--output_dir",
+            str(tmp_path / "eval"),
+            "--max_samples",
+            "1",
+            "--device",
+            "cpu",
+            "--adapt_mix_rho",
+            "1.0",
+        ],
+    )
+
+    evaluate_checkpoint.main()
+
+    assert captured["zero_shot_predictor"] is not None
     summary = __import__("json").loads((tmp_path / "eval" / "US-R1" / "summary.json").read_text())
-    diagnostics = __import__("json").loads((tmp_path / "eval" / "US-R1" / "diagnostics.json").read_text())
-    shrinkage = summary["stage3_k0_context_shrinkage"]
-    assert shrinkage["enabled"] is True
-    assert shrinkage["stage3_variant"] == "M2_4_target_context_conservative_hyperda"
-    assert shrinkage["rho_cap"] == 0.5
-    assert shrinkage["rho_surface_cap"] == 0.25
-    assert shrinkage["rho_rootzone_cap"] == 0.75
-    assert shrinkage["rho_mean"] == 0.5
-    assert shrinkage["rho_surface_mean"] == 0.25
-    assert shrinkage["rho_rootzone_mean"] == 0.75
-    assert shrinkage["policy_source"] == "source_episode_calibrated_v1"
-    assert shrinkage["policy_hash"] == "policyhash"
-    assert shrinkage["source_episode_regions"] == ["US-R2", "US-R3"]
-    assert shrinkage["target_labels_used_for_adaptation"] is False
-    assert shrinkage["target_eval_input_stats_used_for_update"] is False
-    assert diagnostics["stage3_k0_context_shrinkage"]["enabled"] is True
+    assert summary["zero_shot_prediction_content_hash"] == "zerohash"
+    assert summary["final_mix_to_k0_mean_abs_delta"] == pytest.approx(0.2)
 
 
 def test_evaluation_rejects_target_context_prompt_hash_mismatch(monkeypatch, tmp_path):

@@ -18,6 +18,22 @@ import torch.nn as nn
 from hydroda.models.resunet import SmallResUNet
 
 
+def _candidate_sidecar_checkpoints(checkpoint_path: Path) -> list[Path]:
+    checkpoint_dir = checkpoint_path.parent
+    return [
+        checkpoint_dir / "checkpoint_best_source_val_safe_score.pt",
+        checkpoint_dir / "best.pt",
+        checkpoint_dir / "last.pt",
+    ]
+
+
+def _infer_width_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> int:
+    first_weight = state_dict.get("enc1.net.0.weight")
+    if isinstance(first_weight, torch.Tensor) and first_weight.ndim >= 1:
+        return int(first_weight.shape[0])
+    return 32
+
+
 class SourceOnlyBackbonePredictor:
     """Neural predictor wrapping a trained SmallResUNet checkpoint.
 
@@ -54,13 +70,33 @@ class SourceOnlyBackbonePredictor:
             weights_only=False,
         )
         saved_config = checkpoint.get("config", {})
+        sidecar_checkpoint: Dict[str, Any] = {}
+        if not saved_config:
+            for candidate in _candidate_sidecar_checkpoints(self.checkpoint_path):
+                if candidate == self.checkpoint_path or not candidate.exists():
+                    continue
+                maybe_sidecar = torch.load(candidate, map_location="cpu", weights_only=False)
+                if isinstance(maybe_sidecar.get("config"), dict) and maybe_sidecar["config"]:
+                    sidecar_checkpoint = maybe_sidecar
+                    saved_config = dict(maybe_sidecar["config"])
+                    break
         self.method_name = str(saved_config.get("method", self.method_name))
+        if self.method_name == self.__class__.method_name and checkpoint.get("method"):
+            self.method_name = str(checkpoint["method"])
         ch_mean = saved_config.get("ch_mean")
         ch_std = saved_config.get("ch_std")
 
         # Init model — read width from checkpoint config
-        width = saved_config.get("width", 32)
-        self.model = SmallResUNet(in_channels=12, out_channels=2, width=width)
+        width = saved_config.get("width") or _infer_width_from_state_dict(checkpoint["model_state_dict"])
+        self.model = SmallResUNet(
+            in_channels=12,
+            out_channels=2,
+            width=width,
+            dg_method=str(saved_config.get("dg_method", "none")),
+            mixstyle_p=float(saved_config.get("mixstyle_p", 0.5) or 0.5),
+            mixstyle_alpha=float(saved_config.get("mixstyle_alpha", 0.1) or 0.1),
+            mixstyle_layers=saved_config.get("mixstyle_layers", "enc1,enc2") or "enc1,enc2",
+        )
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.to(device).eval()
 
@@ -76,8 +112,18 @@ class SourceOnlyBackbonePredictor:
         self._has_inc_norm = self._inc_mean is not None and self._inc_std is not None
 
         # Residual gain alphas (from source_val calibration)
-        self.alpha_surface = float(checkpoint.get("residual_gain_alpha_surface", 1.0))
-        self.alpha_rootzone = float(checkpoint.get("residual_gain_alpha_rootzone", 1.0))
+        self.alpha_surface = float(
+            checkpoint.get(
+                "residual_gain_alpha_surface",
+                sidecar_checkpoint.get("residual_gain_alpha_surface", 1.0),
+            )
+        )
+        self.alpha_rootzone = float(
+            checkpoint.get(
+                "residual_gain_alpha_rootzone",
+                sidecar_checkpoint.get("residual_gain_alpha_rootzone", 1.0),
+            )
+        )
         self.apply_residual_gain = apply_residual_gain
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:

@@ -240,6 +240,82 @@ def test_source_only_predictor_uses_checkpoint_method_metadata(tmp_path):
     assert predictor.method_name == "source_pooled_global_backbone"
 
 
+def test_source_only_predictor_loads_sidecar_config_for_swad_averaged_checkpoint(tmp_path):
+    from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
+
+    model = SmallResUNet(in_channels=12, out_channels=2, width=8)
+    ckpt_dir = tmp_path / "run" / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    swad_path = ckpt_dir / "checkpoint_swad.pt"
+    best_path = ckpt_dir / "checkpoint_best_source_val_safe_score.pt"
+    sidecar_config = {
+        "width": 8,
+        "method": "swad_source_pooled_global_backbone",
+        "ch_mean": [1.0] * 12,
+        "ch_std": [2.0] * 12,
+        "inc_mean": [0.1, -0.1],
+        "inc_std": [0.5, 0.25],
+    }
+    torch.save(
+        {
+            "tag": "swad",
+            "method": "swad_source_pooled_global_backbone",
+            "model_state_dict": model.state_dict(),
+        },
+        swad_path,
+    )
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": sidecar_config,
+        },
+        best_path,
+    )
+
+    predictor = SourceOnlyBackbonePredictor(checkpoint_path=str(swad_path), device="cpu")
+
+    assert predictor.method_name == "swad_source_pooled_global_backbone"
+    assert predictor._ch_mean.tolist() == [1.0] * 12
+    assert predictor._ch_std.tolist() == [2.0] * 12
+    assert predictor._has_inc_norm is True
+
+
+def test_source_only_predictor_restores_dg_model_kwargs_for_mixstyle_checkpoint(tmp_path):
+    from hydroda.baselines.source_only import SourceOnlyBackbonePredictor
+
+    model = SmallResUNet(
+        in_channels=12,
+        out_channels=2,
+        width=8,
+        dg_method="mixstyle",
+        mixstyle_p=0.25,
+        mixstyle_alpha=0.2,
+        mixstyle_layers="enc1,enc2",
+    )
+    ckpt_path = tmp_path / "mixstyle.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": {
+                "width": 8,
+                "method": "mixstyle_source_pooled_global_backbone",
+                "dg_method": "mixstyle",
+                "mixstyle_p": 0.25,
+                "mixstyle_alpha": 0.2,
+                "mixstyle_layers": "enc1,enc2",
+            },
+        },
+        ckpt_path,
+    )
+
+    predictor = SourceOnlyBackbonePredictor(checkpoint_path=str(ckpt_path), device="cpu")
+
+    assert predictor.method_name == "mixstyle_source_pooled_global_backbone"
+    assert predictor.model.dg_method == "mixstyle"
+    assert predictor.model.mixstyle_enc1 is not None
+    assert predictor.model.mixstyle_enc2 is not None
+
+
 def test_checkpoint_every_5_epochs_smoke():
     """Verify Trainer with checkpoint_every_n_epochs saves periodic checkpoints."""
     import tempfile
@@ -376,6 +452,12 @@ def test_source_only_baseline_wrappers_share_strong_recipe_and_protocol():
         assert "--accum_steps 4" in script
         assert "--checkpoint_every 10" in script
         assert "--selection_metric source_val_loss" in script
+
+
+def test_source_only_runner_passes_selection_metric_into_trainer():
+    runner = Path("scripts/train/train_source_only_backbone.py").read_text(encoding="utf-8")
+
+    assert "selection_metric=args.selection_metric" in runner
 
 
 def test_region_specific_wrappers_are_marked_secondary_internal():

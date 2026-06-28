@@ -14,7 +14,7 @@ and calls a Python training/evaluation entry point under `scripts/train/` or `sc
 | `phase4_hyperda_staged.sh` | Train staged HyperDA source prior from a frozen source-only base | `scripts/train/train_prompt_conditioned_shared.py` | 4 |
 | `phase4_hyperda.sh` | Compatibility wrapper that delegates to `phase4_hyperda_staged.sh` | `run/phase4_hyperda_staged.sh` | 4 |
 | `phase4_hyperda_inference.sh` | Evaluate staged HyperDA source-stage checkpoint | `scripts/eval/evaluate_checkpoint.py` | 4 |
-| `hyperda_safe_us_r1_seed0.sh` | Paper-facing HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement for US-R1 seed0 | `run/phase5_hyperda_zero_few_shot_eval.sh` | main |
+| `hyperda_safe_us_r1_seed0.sh` | SAFE diagnostic convenience wrapper for US-R1 seed0 K-shot policy checks | `run/phase5_hyperda_zero_few_shot_eval.sh` | diagnostic |
 | `phase5_hyperda_zero_few_shot.sh` | Main HyperDA zero/few-shot target generalization | `scripts/train/train_hyperda_few_shot_adapt.py` | 5 |
 | `phase5_hyperda_zero_few_shot_eval.sh` | Run HyperDA K=0/4/12 adaptation and target_eval evaluation for one region | `scripts/train/train_hyperda_few_shot_adapt.py` + `scripts/eval/evaluate_checkpoint.py` | 5 |
 
@@ -45,8 +45,7 @@ source_pooled_global_backbone
 prompt_conditioned_shared_backbone
 source_regime_specialist_bank
 hyperda_zero_shot_context
-hyperda_safe_few_shot_k4
-hyperda_safe_few_shot_k12
+hyperda_trust_zero_shot_context
 ```
 
 `source_only_backbone` remains a display alias for `source_pooled_global_backbone`.
@@ -75,7 +74,7 @@ bash run/phase4_source_only_region_specific_finetune.sh \
 bash run/phase4_hyperda_staged.sh auto US-R1 0 1
 bash run/hyperda_safe_us_r1_seed0.sh
 
-# Source-stage mainline: stable rank-gated bounded-DoRA HyperDA prior + SAFE refinement.
+# Source-stage mainline: HyperDA Operator Generator with stable rank-gated bounded-DoRA.
 # M2_1 uses shared_layer_aware_rank_gated_stable, dora_like_gain_bounded,
 # temperature `2.0`, `USE_AMP=0`, and `LR=2e-4`.
 ABLATION_ID=M2_1_rank_gated_dora_stable bash run/phase4_hyperda_staged_ablation.sh auto US-R1 0 1
@@ -116,23 +115,37 @@ ABLATION_ID=M2_3_source_safe_residual_hyperda \
 ABLATION_ID=M2_5a_da_aware_prompt_only \
   bash run/phase4_hyperda_staged_ablation.sh auto US-R1 0 1
 
-# Stage 3 K=0 target-context conservative shrinkage diagnostic:
-# `M2_4_target_context_conservative_hyperda` is not a source-stage ablation.
-# It freezes the M2.1 prior, performs no extra source fine-tune, and may only
-# use target_context input-side reliability with source leave-one-region
-# pseudo-target calibration. No target labels, target_val selection, or
-# target_eval input-stat updates are allowed.
-STAGE3_POSTERIOR_POLICY=conservative_coeff_posterior K_LIST="0" \
-STAGE3_K0_CONTEXT_SHRINKAGE=1 STAGE3_K0_CONTEXT_SHRINKAGE_RHO_CAP=1.0 \
-  bash run/stage3_hyperda_posterior_eval.sh /path/to/M2_1_source_checkpoint.pt US-R1 0 1
+# Source-manifold guarded diagnostic: M2.6 keeps the M2.1 current_mean_std
+# source prior settings, uses source_base_residual_reliability_gated with
+# rho=1.0, and adds only a source_fit/source_val calibrated
+# source_manifold_distance_bounded guard. It is not target_eval-tuned shrinkage.
+ABLATION_ID=M2_6_source_manifold_guarded_prior \
+  bash run/phase4_hyperda_staged_ablation.sh auto US-R1 0 1
 
-# Source-side SAFE policy calibration from the M2.1 source prior, then K0/K4/K12
-# target_eval. The wrapper auto-discovers the latest M2_1_rank_gated_dora_stable
-# US-R1 seed0 checkpoint when SOURCE_CHECKPOINT is not provided.
+# HyperDA-TRUST decision: as of 2026-06-21, M3_1 remains the US-R1 seed0 K=0
+# candidate. M3_1a/b/c are negative_or_neutral_preregistered_ablation and must
+# not replace M3_1; M3_1d should only run as exploratory after US-R1
+# target_eval has been inspected.
+# Evidence: reports/experiments/M3_1_plus_us_r1_seed0_ablation_decision_20260621.md
+#
+# Next strict robustness pair, when GPU memory is available:
+ABLATION_ID=M3_1_hyperda_trust_medium \
+  bash run/phase4_hyperda_staged_ablation.sh auto US-R2 0 0
+ABLATION_ID=M2_1_rank_gated_dora_stable \
+  bash run/phase4_hyperda_staged_ablation.sh auto US-R2 0 0
+
+# Source-side SAFE policy calibration from the M2.1 source prior, then diagnostic
+# K0/K4/K12 target_eval. Current K-shot rows must be interpreted through
+# stage3_posterior_decision; rejected_to_k0_anchor is K0-equivalent fallback.
+# The wrapper auto-discovers the latest M2_1_rank_gated_dora_stable US-R1 seed0
+# checkpoint when SOURCE_CHECKPOINT is not provided.
 bash run/stage3_calibrate_safe_policy_and_eval_us_r1_seed0.sh
 
-# One-click single-region HyperDA K=0/4/12 adaptation and target_eval
-SAFE_POLICY_JSON=artifacts/runs/<source_safe_calibration>/safe_policy.json \
+# One-click paper-safe single-region HyperDA K=0/4/12 adaptation and target_eval.
+# If SAFE_POLICY_JSON is omitted, the wrapper first reuses the cached
+# source-side safe_policy.json keyed by checkpoint/split/region/seed/budget.
+# Set AUTO_GENERATE_SAFE_POLICY=1 once when the cache is missing.
+AUTO_GENERATE_SAFE_POLICY=1 \
   bash run/phase5_hyperda_zero_few_shot_eval.sh \
   /path/to/source_hyperda_checkpoint.pt US-R1 0 1
 
@@ -142,11 +155,11 @@ SAFE_POLICY_JSON=artifacts/runs/<source_safe_calibration>/safe_policy.json \
 #   <output_base>/overview.json
 #   <output_base>/K*/adapt/metadata.json
 
-# Same, using the wrapper's source HyperDA checkpoint auto-discovery
-SAFE_POLICY_JSON=artifacts/runs/<source_safe_calibration>/safe_policy.json \
-  bash run/phase5_hyperda_zero_few_shot_eval.sh "" US-R1 0 1
+# Same, using the wrapper's source HyperDA checkpoint auto-discovery and
+# cached source-side policy reuse.
+bash run/phase5_hyperda_zero_few_shot_eval.sh "" US-R1 0 1
 
-# K=4/K=12 paper-facing runs require source-side SAFE policy calibration.
+# K=4/K=12 SAFE diagnostic runs require source-side SAFE policy calibration.
 # The calibration export must be safe_policy.json with:
 #   policy_source=source_side_episode_calibration
 #   target_val_usage=unused_in_main_protocol
@@ -154,6 +167,10 @@ SAFE_POLICY_JSON=artifacts/runs/<source_safe_calibration>/safe_policy.json \
 # The eval wrapper applies policy adapt_scope/lr/steps/alpha during adaptation
 # and uses policy adapt_mix_rho for target_eval unless ADAPT_MIX_RHO is set.
 # K=0 can run without SAFE_POLICY_JSON because it uses no target labels.
+# Cache controls:
+#   SAFE_POLICY_CACHE_ROOT=artifacts/runs/stage3_source_safe_policy_cache
+#   AUTO_GENERATE_SAFE_POLICY=0|1
+#   SAFE_POLICY_SOURCE_QUERY_MAX_SAMPLES=256
 
 # Diagnostic-only K-shot run without source-side policy calibration. K-shot
 # checkpoints are marked diagnostic and fall back to the K0 anchor state.
@@ -166,7 +183,7 @@ ADAPT_RECIPE=source_anchor ANCHOR_ALPHA_K4=0.75 ANCHOR_ALPHA_K12=0.25 \
 LR_K12=3e-4 MAX_STEPS_K12=80 \
   bash run/phase5_hyperda_zero_few_shot_eval.sh /path/to/source.pt US-R1 0 1
 
-# HyperDA-SAFE: Source-Anchored Few-Shot Operator Refinement fixes these
+# SAFE diagnostic: Source-Anchored Few-Shot Operator Refinement fixes these
 # source-preregistered defaults and delegates to the stable zero/few-shot runner.
 SOURCE_CHECKPOINT=/path/to/source.pt bash run/hyperda_safe_us_r1_seed0.sh
 

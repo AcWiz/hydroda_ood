@@ -113,11 +113,21 @@ def _collate_flat_hydroda_samples(batch: List[Dict[str, Any]]) -> Dict[str, torc
     }
     if "base_valid_mask" in batch[0]:
         result["base_valid_mask"] = _stack_padded(batch, "base_valid_mask", target_shape, 0.0)
+    if "region_mask" in batch[0]:
+        result["region_mask"] = _stack_padded(batch, "region_mask", target_shape, 0.0)
+    if "active_region_mask" in batch[0]:
+        result["active_region_mask"] = _stack_padded(batch, "active_region_mask", target_shape, 0.0)
+    if "region_mask_integer" in batch[0]:
+        result["region_mask_integer"] = _stack_padded(batch, "region_mask_integer", target_shape, 0).long()
     if "latitude_weight" in batch[0]:
         result["latitude_weight"] = _stack_padded(batch, "latitude_weight", target_shape, 0.0)
     for key in ["forecast_surface", "forecast_rootzone"]:
         if key in batch[0]:
             result[key] = _stack_padded(batch, key, target_shape, 0.0)
+    if "sample_region_id" in batch[0]:
+        result["sample_region_id"] = [sample.get("sample_region_id") for sample in batch]
+    if "active_region_ids" in batch[0]:
+        result["active_region_ids"] = [sample.get("active_region_ids", []) for sample in batch]
     return result
 
 

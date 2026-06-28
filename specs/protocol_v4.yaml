@@ -12,7 +12,9 @@ main_change_from_v4_3: >-
   target support budget. Target validation is unused in the main protocol.
   Source validation year 2022 remains the preregistered checkpoint and
   hyperparameter selection source, and final metrics remain restricted to
-  target_eval 2023-2025.
+  target_eval 2023-2025. Current paper-facing claims prioritize K=0 HyperDA
+  Operator Generator and HyperDA-TRUST; K=4/K=12 SAFE rows are diagnostic /
+  future-extension evidence unless accepted updates are explicitly shown.
 
 periods:
   # Backward-compatible alias used by some existing scripts.
@@ -213,9 +215,11 @@ paper_protocol_note: >-
   For each held-out target continent, train source-domain models on source
   years 2015-2021, select checkpoints and hyperparameters only on source-domain
   year 2022, construct target-context monthly prompt prototypes from held-out
-  target 2015-2021 input-side context, optionally tune lightweight target
-  variables on K labeled support cycles for K in {4,12} while using the same
-  monthly context prototype policy, and report final metrics exclusively on
-  target years 2023-2025. Target validation and full-target-train adaptation
-  are unused in the main protocol. Month is a deployment-known month-of-year
-  seasonal phase selector, not an absolute date label or model-selection signal.
+  target 2015-2021 input-side context, generate K=0 target-specific operators,
+  optionally apply source-manifold trust routing without target labels, and
+  report final metrics exclusively on target years 2023-2025. K=4/K=12 SAFE
+  support-cycle runs are diagnostic/future-extension paths and must expose
+  rejected_to_k0_anchor when updates are rejected. Target validation and
+  full-target-train adaptation are unused in the main protocol. Month is a
+  deployment-known month-of-year seasonal phase selector, not an absolute date
+  label or model-selection signal.

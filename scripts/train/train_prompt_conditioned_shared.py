@@ -50,17 +50,54 @@ from hydroda.models.hyper_conditional_unet import (
     SOURCE_SALIENCY_PRIOR_APPLICATIONS,
 )
 from hydroda.models.source_saliency import ADAPTER_LAYER_NAMES, load_source_saliency_prior, tensor_sha256
+from hydroda.models.phys_trust import (
+    PHYS_CONSISTENCY_GUARD_MODES,
+    PHYS_CONSISTENCY_GUARD_MODE,
+    PHYS_CONSISTENCY_GUARD_PRODUCT_MODE,
+    PHYS_CONSISTENCY_GUARD_SCHEMA_VERSION,
+    PHYS_FORMULA_GAIN_SOURCE,
+    PHYS_GAIN_BASIS_BANK_SCHEMA_VERSION,
+    PHYS_FORMULA_MODE,
+    PHYS_FORMULA_OPERATOR_SCHEMA_VERSION,
+    PHYS_FORMULA_SOURCE,
+    PHYS_FORMULA_SOURCES,
+    PHYS_CONSISTENCY_SOURCE,
+    build_phys_gain_source_bank,
+    phys_consistency_guard_from_raw_tensor,
+    phys_consistency_source_state_from_samples,
+    phys_gain_basis_formula_schema,
+    phys_formula_feature_schema_for_source,
+    phys_formula_features_from_raw_tensor,
+)
 from hydroda.baselines.prompt_conditioned import (
+    HYPERDA_SOURCE_TRUST_BANK_SCHEMA_VERSION,
     RELIABILITY_FEATURE_TRANSFORM,
+    SOURCE_MANIFOLD_DISTANCE_KEY,
+    SOURCE_MANIFOLD_DISTANCE_SCHEMA,
+    SOURCE_PROMPT_MANIFOLD_GUARD_SCHEMA_VERSION,
+    SOURCE_TRUST_QUERY_BLEND_LAMBDA,
+    SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA,
+    SOURCE_TRUST_QUERY_MODE_PROMPT,
+    SOURCE_TRUST_QUERY_MODE_RAW_DA,
+    blend_prompt_and_raw_trust_query,
     bounded_reliability_features,
+    bounded_source_manifold_distance,
     build_target_context_prompt_state,
+    compose_prompt_from_input_embedding,
+    hyperda_trust_bank_summary,
+    normalize_hyperda_source_trust_bank_state,
     prompt_channel_11_usage,
     prompt_diagnostic_input_domain,
     prompt_diagnostic_tensor,
     prompt_domain_metadata,
     prompt_input_feature_source,
     prompt_normalized_input_used,
+    raw_da_trust_input_embedding,
     masked_input_embedding_and_coverage,
+    source_trust_query_input_domain,
+    source_trust_query_requires_separate_bank,
+    _masked_input_stats_from_tensor,
+    normalize_source_prompt_manifold_guard_state,
 )
 from hydroda.models.prompt_encoder import RegionPromptEncoder, RobustInputSideDAPromptEncoder
 from hydroda.training.calibration import calibrate_residual_gain, calibrate_residual_gain_region_aware
@@ -87,7 +124,17 @@ CONTEXT_ENCODERS = (
     "robust_input_side_da_diagnostics",
     "robust_input_side_da_diagnostics_raw",
 )
-TRAINABLE_SCOPES = ("all", "source_base_frozen_adapter_film")
+PHYS_CONTEXT_SOURCES = ("raw_input_side_da_diagnostics", *PHYS_FORMULA_SOURCES)
+PHYS_CONSISTENCY_SOURCES = PHYS_FORMULA_SOURCES
+TRAINABLE_SCOPES = (
+    "all",
+    "source_base_frozen_adapter_film",
+    "phys_context_only",
+    "phys_formula_context_only",
+    "phys_coeff_delta_only",
+    "phys_gain_guard_only",
+    "none",
+)
 SOURCE_BASE_FROZEN_MODULES = ("enc1", "enc2", "enc3", "bottleneck", "dec2", "dec1", "head")
 SOURCE_BASE_TRAINABLE_MODULES = (
     "film1",
@@ -101,6 +148,7 @@ SOURCE_BASE_TRAINABLE_MODULES = (
     "reliability_gate",
     "residual_head",
     "source_residual_gate_net",
+    "phys_gain_basis_residual",
 )
 ZERO_SHOT_PRIOR_FORMS = (
     "direct_hyper",
@@ -112,6 +160,18 @@ SOURCE_EPISODE_PROMPT_POLICIES = ("current_region_prompt", "context_monthly_prot
 SOURCE_REGION_EPISODE_POLICY = "per_source_region_active_mask_episode_v1"
 SOURCE_PROTOTYPE_CACHE_MODES = ("off", "read_write", "refresh")
 SOURCE_PROTOTYPE_CACHE_SCHEMA_VERSION = "source_context_monthly_prototype_cache_v1"
+SOURCE_TRUST_BANK_REUSE_SCHEMA_VERSION = "source_trust_bank_checkpoint_reuse_v1"
+SOURCE_TRUST_BANK_CACHE_MODES = ("off", "read_write", "refresh")
+SOURCE_TRUST_BANK_CACHE_SCHEMA_VERSION = "source_trust_bank_cache_v1"
+STABLE_SOURCE_VAL_PLATEAU_POLICY = "source_val_plateau_early"
+STABLE_SOURCE_VAL_PLATEAU_MARGIN = 0.02
+SOURCE_MANIFOLD_GUARD_CALIBRATIONS = ("source_fit_source_val_only", "disabled")
+SOURCE_TRUST_BANK_CALIBRATIONS = ("source_fit_source_val_only", "disabled")
+SOURCE_TRUST_QUERY_MODES = (
+    SOURCE_TRUST_QUERY_MODE_PROMPT,
+    SOURCE_TRUST_QUERY_MODE_RAW_DA,
+    SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA,
+)
 TRAIN_BATCH_SAMPLERS = ("random", "source_region_year_grouped")
 TENSOR_CACHE_LOAD_MODES = ("eager", "mmap")
 
@@ -312,6 +372,18 @@ def _array_sha256(*arrays: Optional[np.ndarray]) -> str:
     return digest.hexdigest()
 
 
+def _tensor_state_sha256(*tensors: Optional[torch.Tensor]) -> str:
+    digest = hashlib.sha256()
+    for tensor in tensors:
+        if tensor is None:
+            digest.update(b"none")
+            continue
+        cpu = tensor.detach().cpu().contiguous().to(dtype=torch.float32)
+        digest.update(str(tuple(cpu.shape)).encode("utf-8"))
+        digest.update(cpu.numpy().tobytes())
+    return digest.hexdigest()
+
+
 def _prompt_input_branch_sha256(prompt_encoder: nn.Module) -> str:
     """Hash the prompt input-summary branch that defines prototype embedding space."""
     digest = hashlib.sha256()
@@ -329,6 +401,79 @@ def _prompt_input_branch_sha256(prompt_encoder: nn.Module) -> str:
             digest.update(str(tuple(arr.shape)).encode("utf-8"))
             digest.update(arr.tobytes())
     return digest.hexdigest()
+
+
+def _model_coefficient_branch_sha256(model: nn.Module) -> str:
+    return _tensor_state_sha256(
+        *[
+            tensor.detach().cpu()
+            for name, tensor in model.state_dict().items()
+            if (
+                "shared_coeff_generator" in name
+                or "coeff_head" in name
+                or "gate_head" in name
+                or "log_temperature" in name
+            )
+        ]
+    )
+
+
+def select_stable_source_val_plateau_checkpoint(
+    records: List[Dict[str, Any]],
+    *,
+    checkpoint_dir: Path,
+    plateau_margin: float = STABLE_SOURCE_VAL_PLATEAU_MARGIN,
+) -> Optional[Dict[str, Any]]:
+    """Select earliest source-val non-degrading checkpoint within best-margin."""
+    scored_records: List[Dict[str, Any]] = []
+    for record in records:
+        if "dual_variable_cvar_score" not in record:
+            continue
+        try:
+            score = float(record["dual_variable_cvar_score"])
+        except Exception:
+            continue
+        if not np.isfinite(score):
+            continue
+        scored = dict(record)
+        scored["dual_variable_cvar_score"] = score
+        scored_records.append(scored)
+    if not scored_records:
+        return None
+    best_score = max(float(record["dual_variable_cvar_score"]) for record in scored_records)
+    threshold = best_score - float(plateau_margin)
+    eligible_records: List[Dict[str, Any]] = []
+    for record in scored_records:
+        if not bool(record.get("dual_variable_non_degradation", False)):
+            continue
+        eligible_records.append(record)
+    if not eligible_records:
+        return None
+    plateau_records = [
+        record
+        for record in eligible_records
+        if float(record["dual_variable_cvar_score"]) >= threshold
+    ]
+    if not plateau_records:
+        return None
+    selected = min(plateau_records, key=lambda record: int(record["epoch"]))
+    epoch = int(selected["epoch"])
+    checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch:03d}.pt"
+    if not checkpoint_path.exists():
+        fallback = checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
+        checkpoint_path = fallback if fallback.exists() else checkpoint_path
+    return {
+        "policy": STABLE_SOURCE_VAL_PLATEAU_POLICY,
+        "selection_source": "source_val_only",
+        "epoch": epoch,
+        "dual_variable_cvar_score": float(selected["dual_variable_cvar_score"]),
+        "best_dual_variable_cvar_score": float(best_score),
+        "plateau_margin": float(plateau_margin),
+        "dual_variable_non_degradation": True,
+        "checkpoint_path": str(checkpoint_path),
+        "target_val_usage": "unused_in_main_protocol",
+        "target_eval_usage": "final_eval_only_no_selection",
+    }
 
 
 def set_training_seed(seed: int) -> None:
@@ -508,6 +653,67 @@ def apply_trainable_scope(
         for param in list(model.parameters()) + list(prompt_encoder.parameters()):
             param.requires_grad_(True)
         frozen_modules: List[str] = []
+    elif trainable_scope in {"none", "phys_gain_guard_only"}:
+        for param in list(model.parameters()) + list(prompt_encoder.parameters()):
+            param.requires_grad_(False)
+        frozen_modules = list(SOURCE_BASE_FROZEN_MODULES) + [
+            "prompt_encoder",
+            "film1",
+            "film2",
+            "film3",
+            "film_b",
+            "hyper_adapter_b",
+            "hyper_adapter_d2",
+            "hyper_adapter_d1",
+            "shared_coeff_generator",
+            "reliability_gate",
+            "residual_head",
+            "source_residual_gate_net",
+            "phys_operator_residual",
+            "formula_phys_context_encoder",
+            "phys_gain_basis_residual",
+        ]
+    elif trainable_scope in {"phys_context_only", "phys_formula_context_only", "phys_coeff_delta_only"}:
+        if not isinstance(model, HyperAdapterConditionalResUNet):
+            raise ValueError(f"trainable_scope={trainable_scope} requires model_type=hyperda_basis_adapter")
+        if not getattr(model, "hyper_phys_context_modulation", False):
+            raise ValueError(f"trainable_scope={trainable_scope} requires hyper_phys_context_modulation=1")
+        module = getattr(model, "phys_operator_residual", None)
+        if module is None:
+            raise ValueError(f"trainable_scope={trainable_scope} requires phys_operator_residual module")
+        formula_module = getattr(model, "formula_phys_context_encoder", None)
+        if trainable_scope == "phys_formula_context_only" and formula_module is None:
+            raise ValueError(
+                "trainable_scope=phys_formula_context_only requires "
+                "phys_context_source=raw_input_side_formula_v2"
+            )
+        if trainable_scope == "phys_coeff_delta_only" and formula_module is None:
+            raise ValueError(
+                "trainable_scope=phys_coeff_delta_only requires a formula physical context encoder"
+            )
+        for param in list(model.parameters()) + list(prompt_encoder.parameters()):
+            param.requires_grad_(False)
+        for param in module.parameters():
+            param.requires_grad_(True)
+        if trainable_scope != "phys_coeff_delta_only" and formula_module is not None:
+            for param in formula_module.parameters():
+                param.requires_grad_(True)
+        frozen_modules = list(SOURCE_BASE_FROZEN_MODULES) + [
+            "prompt_encoder",
+            "film1",
+            "film2",
+            "film3",
+            "film_b",
+            "hyper_adapter_b",
+            "hyper_adapter_d2",
+            "hyper_adapter_d1",
+            "shared_coeff_generator",
+            "reliability_gate",
+            "residual_head",
+            "source_residual_gate_net",
+        ]
+        if trainable_scope == "phys_coeff_delta_only" and formula_module is not None:
+            frozen_modules.append("formula_phys_context_encoder")
     else:
         if not isinstance(model, HyperAdapterConditionalResUNet):
             raise ValueError(
@@ -791,8 +997,43 @@ class PromptConditionedTrainer:
         hyper_source_saliency_prior_metadata: Optional[Dict[str, Any]] = None,
         hyper_prompt_manifold_reliability: bool = False,
         hyper_prompt_manifold_reliability_strength: float = 0.0,
+        hyper_source_manifold_guard: bool = False,
+        hyper_source_manifold_guard_strength: float = 0.25,
+        hyper_source_manifold_guard_distance_key: str = SOURCE_MANIFOLD_DISTANCE_KEY,
+        source_manifold_guard_calibration: str = "disabled",
+        hyper_source_manifold_guard_min_multiplier: float = 0.0,
+        hyper_source_trust_routing: bool = False,
+        hyper_source_trust_strength: float = 0.0,
+        hyper_source_trust_top_m: int = 4,
+        hyper_source_trust_variable_gate: bool = False,
+        source_trust_bank_calibration: str = "disabled",
+        source_trust_query_mode: str = "prompt_embedding",
+        hyper_phys_agreement_guard: bool = False,
+        hyper_phys_agreement_guard_strength: float = 1.0,
+        hyper_phys_agreement_guard_min_multiplier: float = 0.0,
+        hyper_phys_agreement_guard_risk_rule: str = "or",
+        hyper_phys_context_modulation: bool = False,
+        hyper_phys_delta_scale: float = 0.25,
+        hyper_phys_gate_init: float = 0.90,
+        hyper_operator_droppath_p: float = 0.10,
+        phys_context_source: str = "raw_input_side_da_diagnostics",
+        hyper_phys_formula_operator: bool = False,
+        phys_formula_mode: str = PHYS_FORMULA_MODE,
+        phys_formula_source: str = PHYS_FORMULA_SOURCE,
+        hyper_phys_consistency_guard: bool = False,
+        phys_consistency_guard_mode: str = PHYS_CONSISTENCY_GUARD_MODE,
+        phys_consistency_source: str = PHYS_CONSISTENCY_SOURCE,
+        phys_consistency_min_surface: float = 0.95,
+        phys_consistency_min_rootzone: float = 0.90,
+        phys_consistency_strength_surface: float = 0.10,
+        phys_consistency_strength_rootzone: float = 0.15,
+        hyper_phys_gain_basis_residual: bool = False,
+        hyper_phys_gain_basis_coeff_scale: float = 0.05,
+        hyper_phys_gain_basis_residual_clip: float = 0.25,
+        hyper_phys_gain_basis_beta_init: float = 0.50,
         hyper_enable_film: bool = True,
         hyper_enable_adapters: bool = True,
+        hyper_phys_consistency_regularization_weight: float = 0.0,
         hyper_residual_magnitude_penalty: float = 0.0,
         hyper_coeff_entropy_floor: float = 0.0,
         hyper_coeff_entropy_penalty: float = 0.0,
@@ -812,6 +1053,7 @@ class PromptConditionedTrainer:
         dataset_backend: str = "netcdf",
         tensor_cache_load_mode: str = "eager",
         train_batch_sampler: str = "random",
+        source_fit_max_batches_per_epoch: int = 0,
         prefetch_factor: Optional[int] = None,
         pin_memory: Optional[bool] = None,
         amp_init_scale: float = 256.0,
@@ -819,6 +1061,10 @@ class PromptConditionedTrainer:
         amp_skip_abort_threshold: int = 16,
         source_prototype_cache_dir: Optional[str] = None,
         source_prototype_cache_mode: str = "off",
+        source_trust_bank_cache_dir: Optional[str] = None,
+        source_trust_bank_cache_mode: str = "off",
+        initial_source_trust_bank_state: Optional[Dict[str, Any]] = None,
+        initial_source_trust_bank_source: str = "",
         # Resume: optionally inject pre-computed stats to skip recompute
         _resume_ch_mean: Optional[np.ndarray] = None,
         _resume_ch_std: Optional[np.ndarray] = None,
@@ -918,13 +1164,135 @@ class PromptConditionedTrainer:
         )
         self.hyper_prompt_manifold_reliability = bool(hyper_prompt_manifold_reliability)
         self.hyper_prompt_manifold_reliability_strength = float(hyper_prompt_manifold_reliability_strength)
+        self.hyper_source_manifold_guard = bool(hyper_source_manifold_guard)
+        self.hyper_source_manifold_guard_strength = float(hyper_source_manifold_guard_strength)
+        self.hyper_source_manifold_guard_distance_key = str(hyper_source_manifold_guard_distance_key)
+        if self.hyper_source_manifold_guard_distance_key != SOURCE_MANIFOLD_DISTANCE_KEY:
+            raise ValueError(
+                "hyper_source_manifold_guard_distance_key must be "
+                f"{SOURCE_MANIFOLD_DISTANCE_KEY!r}"
+            )
+        if source_manifold_guard_calibration not in SOURCE_MANIFOLD_GUARD_CALIBRATIONS:
+            raise ValueError(
+                f"Unsupported source_manifold_guard_calibration: {source_manifold_guard_calibration}"
+            )
+        self.source_manifold_guard_calibration = str(source_manifold_guard_calibration)
+        self.hyper_source_manifold_guard_min_multiplier = float(hyper_source_manifold_guard_min_multiplier)
+        self.hyper_source_trust_routing = bool(hyper_source_trust_routing)
+        self.hyper_source_trust_strength = float(hyper_source_trust_strength)
+        self.hyper_source_trust_top_m = int(hyper_source_trust_top_m)
+        self.hyper_source_trust_variable_gate = bool(hyper_source_trust_variable_gate)
+        if source_trust_bank_calibration not in SOURCE_TRUST_BANK_CALIBRATIONS:
+            raise ValueError(f"Unsupported source_trust_bank_calibration: {source_trust_bank_calibration}")
+        self.source_trust_bank_calibration = str(source_trust_bank_calibration)
+        if source_trust_query_mode not in SOURCE_TRUST_QUERY_MODES:
+            raise ValueError(f"Unsupported source_trust_query_mode: {source_trust_query_mode}")
+        self.source_trust_query_mode = str(source_trust_query_mode)
+        self.hyper_phys_agreement_guard = bool(hyper_phys_agreement_guard)
+        self.hyper_phys_agreement_guard_strength = float(hyper_phys_agreement_guard_strength)
+        self.hyper_phys_agreement_guard_min_multiplier = float(hyper_phys_agreement_guard_min_multiplier)
+        self.hyper_phys_agreement_guard_risk_rule = str(hyper_phys_agreement_guard_risk_rule)
+        self.hyper_phys_context_modulation = bool(hyper_phys_context_modulation)
+        self.hyper_phys_delta_scale = float(hyper_phys_delta_scale)
+        self.hyper_phys_gate_init = float(hyper_phys_gate_init)
+        self.hyper_operator_droppath_p = float(hyper_operator_droppath_p)
+        if phys_context_source not in PHYS_CONTEXT_SOURCES:
+            raise ValueError(f"Unsupported phys_context_source: {phys_context_source}")
+        self.phys_context_source = str(phys_context_source)
+        self.hyper_phys_formula_operator = bool(
+            hyper_phys_formula_operator or self.phys_context_source in PHYS_FORMULA_SOURCES
+        )
+        self.phys_formula_mode = str(phys_formula_mode)
+        self.phys_formula_source = str(phys_formula_source)
+        if self.hyper_phys_formula_operator:
+            if self.phys_formula_mode != PHYS_FORMULA_MODE:
+                raise ValueError(f"Unsupported phys_formula_mode: {phys_formula_mode}")
+            if self.phys_formula_source not in PHYS_FORMULA_SOURCES:
+                raise ValueError(f"Unsupported phys_formula_source: {phys_formula_source}")
+            if self.phys_context_source != self.phys_formula_source:
+                raise ValueError(
+                    "hyper_phys_formula_operator requires "
+                    "phys_context_source to match phys_formula_source"
+                )
+        self.hyper_phys_consistency_guard = bool(hyper_phys_consistency_guard)
+        if phys_consistency_guard_mode not in PHYS_CONSISTENCY_GUARD_MODES:
+            raise ValueError(f"Unsupported phys_consistency_guard_mode: {phys_consistency_guard_mode}")
+        if phys_consistency_source not in PHYS_CONSISTENCY_SOURCES:
+            raise ValueError(f"Unsupported phys_consistency_source: {phys_consistency_source}")
+        self.phys_consistency_guard_mode = str(phys_consistency_guard_mode)
+        self.phys_consistency_source = str(phys_consistency_source)
+        self.phys_consistency_min_surface = float(phys_consistency_min_surface)
+        self.phys_consistency_min_rootzone = float(phys_consistency_min_rootzone)
+        self.phys_consistency_strength_surface = float(phys_consistency_strength_surface)
+        self.phys_consistency_strength_rootzone = float(phys_consistency_strength_rootzone)
+        self.hyper_phys_gain_basis_residual = bool(hyper_phys_gain_basis_residual)
+        self.hyper_phys_gain_basis_coeff_scale = float(hyper_phys_gain_basis_coeff_scale)
+        self.hyper_phys_gain_basis_residual_clip = float(hyper_phys_gain_basis_residual_clip)
+        self.hyper_phys_gain_basis_beta_init = float(hyper_phys_gain_basis_beta_init)
         self.hyper_enable_film = bool(hyper_enable_film)
         self.hyper_enable_adapters = bool(hyper_enable_adapters)
+        self.hyper_phys_consistency_regularization_weight = float(
+            hyper_phys_consistency_regularization_weight
+        )
         self.hyper_residual_magnitude_penalty = float(hyper_residual_magnitude_penalty)
         self.hyper_coeff_entropy_floor = float(hyper_coeff_entropy_floor)
         self.hyper_coeff_entropy_penalty = float(hyper_coeff_entropy_penalty)
+        if self.hyper_phys_consistency_regularization_weight < 0.0:
+            raise ValueError("hyper_phys_consistency_regularization_weight must be non-negative")
         if self.hyper_residual_magnitude_penalty < 0.0:
             raise ValueError("hyper_residual_magnitude_penalty must be non-negative")
+        if self.hyper_source_manifold_guard_strength < 0.0:
+            raise ValueError("hyper_source_manifold_guard_strength must be non-negative")
+        if not 0.0 <= self.hyper_source_manifold_guard_min_multiplier <= 1.0:
+            raise ValueError("hyper_source_manifold_guard_min_multiplier must be in [0, 1]")
+        if not 0.0 <= self.hyper_source_trust_strength <= 1.0:
+            raise ValueError("hyper_source_trust_strength must be in [0, 1]")
+        if self.hyper_source_trust_top_m < 1:
+            raise ValueError("hyper_source_trust_top_m must be >= 1")
+        if not 0.0 <= self.hyper_phys_agreement_guard_strength <= 1.0:
+            raise ValueError("hyper_phys_agreement_guard_strength must be in [0, 1]")
+        if not 0.0 <= self.hyper_phys_agreement_guard_min_multiplier <= 1.0:
+            raise ValueError("hyper_phys_agreement_guard_min_multiplier must be in [0, 1]")
+        if self.hyper_phys_agreement_guard_risk_rule not in {"or", "and"}:
+            raise ValueError("hyper_phys_agreement_guard_risk_rule must be 'or' or 'and'")
+        if self.hyper_phys_agreement_guard and not self.hyper_source_trust_routing:
+            raise ValueError("hyper_phys_agreement_guard requires hyper_source_trust_routing")
+        if self.hyper_phys_agreement_guard and not source_trust_query_requires_separate_bank(
+            self.source_trust_query_mode
+        ):
+            raise ValueError(
+                "hyper_phys_agreement_guard requires a raw/blended source_trust_query_mode "
+                "for guard-only diagnostics"
+            )
+        if self.hyper_phys_delta_scale < 0.0:
+            raise ValueError("hyper_phys_delta_scale must be non-negative")
+        if not 0.0 < self.hyper_phys_gate_init < 1.0:
+            raise ValueError("hyper_phys_gate_init must be between 0 and 1")
+        if not 0.0 <= self.hyper_operator_droppath_p < 1.0:
+            raise ValueError("hyper_operator_droppath_p must be in [0, 1)")
+        if not 0.0 <= self.phys_consistency_min_surface <= 1.0:
+            raise ValueError("phys_consistency_min_surface must be in [0, 1]")
+        if not 0.0 <= self.phys_consistency_min_rootzone <= 1.0:
+            raise ValueError("phys_consistency_min_rootzone must be in [0, 1]")
+        if self.phys_consistency_strength_surface < 0.0:
+            raise ValueError("phys_consistency_strength_surface must be non-negative")
+        if self.phys_consistency_strength_rootzone < 0.0:
+            raise ValueError("phys_consistency_strength_rootzone must be non-negative")
+        if self.hyper_phys_consistency_guard and not self.hyper_source_trust_variable_gate:
+            raise ValueError("hyper_phys_consistency_guard requires hyper_source_trust_variable_gate=1")
+        if self.hyper_phys_gain_basis_coeff_scale < 0.0:
+            raise ValueError("hyper_phys_gain_basis_coeff_scale must be non-negative")
+        if self.hyper_phys_gain_basis_residual_clip <= 0.0:
+            raise ValueError("hyper_phys_gain_basis_residual_clip must be positive")
+        if not 0.0 < self.hyper_phys_gain_basis_beta_init < 1.0:
+            raise ValueError("hyper_phys_gain_basis_beta_init must be between 0 and 1")
+        if self.hyper_phys_gain_basis_residual:
+            if not isinstance(self.model, HyperAdapterConditionalResUNet):
+                raise ValueError("hyper_phys_gain_basis_residual requires model_type=hyperda_basis_adapter")
+            if not getattr(self.model, "hyper_phys_gain_basis_residual", False):
+                raise ValueError("trainer enabled hyper_phys_gain_basis_residual but model branch is disabled")
+        if str(trainable_scope) in {"none", "phys_gain_guard_only"} and int(self.max_epochs) > 0:
+            raise ValueError(f"trainable_scope={trainable_scope} is eval-only and requires max_epochs <= 0")
         if self.hyper_coeff_entropy_floor < 0.0:
             raise ValueError("hyper_coeff_entropy_floor must be non-negative")
         if self.hyper_coeff_entropy_penalty < 0.0:
@@ -955,6 +1323,12 @@ class PromptConditionedTrainer:
             raise ValueError(f"Unsupported train_batch_sampler: {train_batch_sampler}")
         self.tensor_cache_load_mode = str(tensor_cache_load_mode)
         self.train_batch_sampler = str(train_batch_sampler)
+        self.source_fit_max_batches_per_epoch = int(source_fit_max_batches_per_epoch)
+        if self.source_fit_max_batches_per_epoch < 0:
+            raise ValueError("source_fit_max_batches_per_epoch must be >= 0")
+        self.source_fit_fast_screen_enabled = self.source_fit_max_batches_per_epoch > 0
+        self.source_fit_full_batches_per_epoch = -1
+        self.source_fit_effective_batches_per_epoch = -1
         self.prefetch_factor = int(prefetch_factor) if prefetch_factor is not None else (2 if self.num_workers > 0 else None)
         self.pin_memory = bool(pin_memory) if pin_memory is not None else (self.device == "cuda")
         self.persistent_workers = self.num_workers > 0
@@ -966,10 +1340,25 @@ class PromptConditionedTrainer:
             if source_prototype_cache_dir
             else None
         )
+        if source_trust_bank_cache_mode not in SOURCE_TRUST_BANK_CACHE_MODES:
+            raise ValueError(f"Unsupported source_trust_bank_cache_mode: {source_trust_bank_cache_mode}")
+        self.source_trust_bank_cache_mode = str(source_trust_bank_cache_mode)
+        self.source_trust_bank_cache_dir = (
+            Path(source_trust_bank_cache_dir)
+            if source_trust_bank_cache_dir
+            else None
+        )
         self.source_prototype_cache_hit = False
         self.source_prototype_cache_path = ""
         self.source_prototype_cache_key = ""
         self.source_prototype_cache_metadata: Dict[str, Any] = {}
+        self.source_trust_bank_cache_hit = False
+        self.source_trust_bank_cache_path = ""
+        self.source_trust_bank_cache_key = ""
+        self.source_trust_bank_cache_metadata: Dict[str, Any] = {}
+        self.source_trust_bank_reuse_metadata: Dict[str, Any] = {}
+        self._source_trust_bank_reuse_attempted = bool(initial_source_trust_bank_state)
+        self._source_trust_bank_reuse_source = str(initial_source_trust_bank_source or "")
         self._source_region_global_indices = sorted(global_to_source_lookup.keys()) if global_to_source_lookup else []
         self.leakage_policy = {
             "train_split": "source_fit",
@@ -1010,6 +1399,10 @@ class PromptConditionedTrainer:
             trainable_scope=self.trainable_scope,
         )
         optimizer_params = trainable_parameters(self.model, self.prompt_encoder)
+        self._dummy_eval_only_param: Optional[nn.Parameter] = None
+        if not optimizer_params and self.trainable_scope in {"none", "phys_gain_guard_only"}:
+            self._dummy_eval_only_param = nn.Parameter(torch.zeros((), device=self.device))
+            optimizer_params = [self._dummy_eval_only_param]
         if not optimizer_params:
             raise ValueError(f"trainable_scope={self.trainable_scope!r} produced no trainable parameters")
         self.optimizer = torch.optim.AdamW(optimizer_params, lr=lr, weight_decay=weight_decay)
@@ -1047,12 +1440,40 @@ class PromptConditionedTrainer:
                 self._compute_increment_stats()
 
         self._source_context_monthly_prototypes: Optional[Dict[str, Any]] = None
+        self._source_prompt_manifold_guard_state: Optional[Dict[str, Any]] = None
+        self._source_trust_bank_state: Optional[Dict[str, Any]] = None
+        self._phys_consistency_source_state: Optional[Dict[str, Any]] = None
+        self._phys_gain_source_bank: Optional[Dict[str, Any]] = None
+        self._last_phys_consistency_guard_summary: Dict[str, Any] = {"enabled": False}
+        self._last_phys_formula_feature_summary: Dict[str, Any] = {"enabled": False}
         needs_source_reliability = (
             isinstance(self.model, HyperAdapterConditionalResUNet)
             and getattr(self.model, "uses_source_residual_prior", False)
         )
-        if self.source_episode_prompt_policy == "context_monthly_prototype" or needs_source_reliability:
+        needs_trust_bank = (
+            isinstance(self.model, HyperAdapterConditionalResUNet)
+            and self.hyper_source_trust_routing
+        )
+        if self.source_episode_prompt_policy == "context_monthly_prototype" or needs_source_reliability or needs_trust_bank:
             self._load_or_build_source_context_monthly_prototypes()
+        if self.hyper_source_manifold_guard:
+            if not self._source_context_monthly_prototypes:
+                self._load_or_build_source_context_monthly_prototypes()
+            self._build_source_prompt_manifold_guard_state()
+        if self.hyper_source_trust_routing and initial_source_trust_bank_state:
+            self._try_reuse_source_trust_bank_state(
+                initial_source_trust_bank_state,
+                source=initial_source_trust_bank_source,
+            )
+        if self.hyper_source_trust_routing:
+            if not self._source_context_monthly_prototypes:
+                self._load_or_build_source_context_monthly_prototypes()
+            if self._source_trust_bank_state is None:
+                self._build_source_trust_bank_state()
+        if self.hyper_phys_consistency_guard or self.hyper_phys_formula_operator:
+            self._build_phys_consistency_source_state()
+        if self.hyper_phys_gain_basis_residual:
+            self._build_phys_gain_source_bank()
 
         # Zero-raw-init applies only to scratch training. A staged source-base
         # checkpoint already contains the trained frozen head.
@@ -1080,7 +1501,10 @@ class PromptConditionedTrainer:
         self.best_selection_metric = self.selection_metric
         self.best_selection_value = (
             float("-inf")
-            if self.selection_metric == "source_val_transfer_safe_score"
+            if self.selection_metric in {
+                "source_val_transfer_safe_score",
+                "source_val_dual_variable_cvar_safe_score",
+            }
             else float("inf")
         )
         self._skipped_steps = 0
@@ -1120,6 +1544,10 @@ class PromptConditionedTrainer:
             if not gain_results or "selection_score" not in gain_results:
                 return float("-inf"), True
             return float(gain_results["selection_score"]), True
+        if self.selection_metric == "source_val_dual_variable_cvar_safe_score":
+            if not gain_results or "dual_variable_cvar_score" not in gain_results:
+                return float("-inf"), True
+            return float(gain_results["dual_variable_cvar_score"]), True
         if self.selection_metric == "source_val_loss":
             if not source_val_metrics or "source_val_loss" not in source_val_metrics:
                 return float("inf"), False
@@ -1163,8 +1591,99 @@ class PromptConditionedTrainer:
             ),
             "hyper_prompt_manifold_reliability": self.hyper_prompt_manifold_reliability,
             "hyper_prompt_manifold_reliability_strength": self.hyper_prompt_manifold_reliability_strength,
+            "hyper_source_manifold_guard": self.hyper_source_manifold_guard,
+            "hyper_source_manifold_guard_strength": self.hyper_source_manifold_guard_strength,
+            "hyper_source_manifold_guard_distance_key": self.hyper_source_manifold_guard_distance_key,
+            "hyper_source_manifold_guard_min_multiplier": self.hyper_source_manifold_guard_min_multiplier,
+            "source_manifold_guard_calibration": self.source_manifold_guard_calibration,
+            "source_prompt_manifold_guard_summary": self._source_prompt_manifold_guard_summary(),
+            "hyper_source_trust_routing": self.hyper_source_trust_routing,
+            "hyper_source_trust_strength": self.hyper_source_trust_strength,
+            "hyper_source_trust_top_m": self.hyper_source_trust_top_m,
+            "hyper_source_trust_variable_gate": self.hyper_source_trust_variable_gate,
+            "source_trust_bank_calibration": self.source_trust_bank_calibration,
+            "source_trust_query_mode": self.source_trust_query_mode,
+            "source_trust_bank_summary": self._source_trust_bank_summary(),
+            "source_trust_bank_reuse_metadata": dict(self.source_trust_bank_reuse_metadata),
+            "source_trust_bank_cache_mode": self.source_trust_bank_cache_mode,
+            "source_trust_bank_cache_hit": self.source_trust_bank_cache_hit,
+            "source_trust_bank_cache_path": self.source_trust_bank_cache_path,
+            "source_trust_bank_cache_key": self.source_trust_bank_cache_key,
+            "trust_bank_hash": self._source_trust_bank_summary().get("trust_bank_hash", ""),
+            "source_neighbor_top_m": self._source_trust_bank_summary().get("source_neighbor_top_m", 0),
+            "trust_strength": self._source_trust_bank_summary().get("trust_strength", 0.0),
+            "hyper_phys_agreement_guard": self.hyper_phys_agreement_guard,
+            "hyper_phys_agreement_guard_strength": self.hyper_phys_agreement_guard_strength,
+            "hyper_phys_agreement_guard_min_multiplier": self.hyper_phys_agreement_guard_min_multiplier,
+            "hyper_phys_agreement_guard_risk_rule": self.hyper_phys_agreement_guard_risk_rule,
+            "phys_agreement_guard_summary": self._phys_agreement_guard_summary(),
+            "hyper_phys_context_modulation": self.hyper_phys_context_modulation,
+            "phys_context_source": self.phys_context_source,
+            "hyper_phys_formula_operator": self.hyper_phys_formula_operator,
+            "phys_formula_mode": self.phys_formula_mode if self.hyper_phys_formula_operator else "",
+            "phys_formula_source": self.phys_formula_source if self.hyper_phys_formula_operator else "",
+            "phys_formula_feature_schema": (
+                list(phys_formula_feature_schema_for_source(self.phys_formula_source))
+                if self.hyper_phys_formula_operator
+                else []
+            ),
+            "hyper_phys_delta_scale": self.hyper_phys_delta_scale,
+            "hyper_phys_gate_init": self.hyper_phys_gate_init,
+            "hyper_operator_droppath_p": self.hyper_operator_droppath_p,
+            "phys_operator_summary": self._phys_operator_summary(),
+            "phys_formula_feature_summary": dict(self._last_phys_formula_feature_summary),
+            "phys_coeff_delta_method_id": (
+                "M3_15_m31_anchored_source_safe_phys_coeff_delta"
+                if self.trainable_scope == "phys_coeff_delta_only"
+                else ""
+            ),
+            "phys_coeff_delta_source_gate": (
+                {
+                    "anchor_method": "M3_1_hyperda_trust_medium",
+                    "selection_source": "source_val_only",
+                    "eta_grid": [0.0, 0.1, 0.25, 0.5, 1.0],
+                    "min_dual_cvar_delta": 0.001,
+                    "min_best_variable_rmse_relative_improve": 0.001,
+                    "max_other_variable_rmse_relative_degrade": 0.0005,
+                    "max_region_rmse_relative_degrade": 0.003,
+                    "max_season_rmse_relative_degrade": 0.003,
+                    "identity_diagnostic_refuses_target_eval": True,
+                    "target_eval_usage": "final_eval_only_no_selection_after_source_gate_passes",
+                    "prediction_interpolation": "pred_v=(1-eta_v)*pred_m3_1_v+eta_v*pred_phys_coeff_v",
+                }
+                if self.trainable_scope == "phys_coeff_delta_only"
+                else {}
+            ),
+            "hyper_phys_consistency_guard": self.hyper_phys_consistency_guard,
+            "phys_consistency_guard_mode": self.phys_consistency_guard_mode,
+            "phys_consistency_source": self.phys_consistency_source,
+            "phys_consistency_min_surface": self.phys_consistency_min_surface,
+            "phys_consistency_min_rootzone": self.phys_consistency_min_rootzone,
+            "phys_consistency_strength_surface": self.phys_consistency_strength_surface,
+            "phys_consistency_strength_rootzone": self.phys_consistency_strength_rootzone,
+            "phys_consistency_guard_summary": self._phys_consistency_guard_summary(),
+            "hyper_phys_gain_basis_residual": self.hyper_phys_gain_basis_residual,
+            "hyper_phys_gain_basis_coeff_scale": self.hyper_phys_gain_basis_coeff_scale,
+            "hyper_phys_gain_basis_residual_clip": self.hyper_phys_gain_basis_residual_clip,
+            "hyper_phys_gain_basis_beta_init": self.hyper_phys_gain_basis_beta_init,
+            "phys_gain_basis_summary": self._phys_gain_basis_summary(),
+            "phys_gain_source_bank_summary": self._phys_gain_source_bank_summary(),
+            "hyper_phys_consistency_regularization_weight": self.hyper_phys_consistency_regularization_weight,
+            "trust_routing_geometry": "prompt_embedding",
+            "source_trust_query_used_as_neighbor_geometry": bool(
+                self._source_trust_bank_state is not None
+                and source_trust_query_requires_separate_bank(self.source_trust_query_mode)
+                and not self.hyper_phys_agreement_guard
+            ),
+            "source_manifold_distance_schema": dict(SOURCE_MANIFOLD_DISTANCE_SCHEMA),
+            "source_manifold_guard_source": (
+                "source_fit_source_val_only"
+                if self.hyper_source_manifold_guard
+                else "disabled_or_old_checkpoint"
+            ),
             "hyper_enable_film": self.hyper_enable_film,
             "hyper_enable_adapters": self.hyper_enable_adapters,
+            "hyper_phys_consistency_regularization_weight": self.hyper_phys_consistency_regularization_weight,
             "hyper_residual_magnitude_penalty": self.hyper_residual_magnitude_penalty,
             "hyper_coeff_entropy_floor": self.hyper_coeff_entropy_floor,
             "hyper_coeff_entropy_penalty": self.hyper_coeff_entropy_penalty,
@@ -1196,6 +1715,11 @@ class PromptConditionedTrainer:
             ),
             "reliability_feature_schema": getattr(self.model, "reliability_feature_schema", []),
             "reliability_feature_transform": RELIABILITY_FEATURE_TRANSFORM,
+            "per_variable_trust_gate_summary": getattr(
+                self.model,
+                "last_variable_trust_gate_summary",
+                {},
+            ),
             "target_labels_used_for_adaptation": False,
             "target_val_usage": "unused_in_main_protocol",
             "target_eval_usage": "final_eval_only_no_selection",
@@ -1207,6 +1731,10 @@ class PromptConditionedTrainer:
             "source_prototype_cache_hit": self.source_prototype_cache_hit,
             "source_prototype_cache_path": self.source_prototype_cache_path,
             "source_prototype_cache_key": self.source_prototype_cache_key,
+            "source_trust_bank_cache_mode": self.source_trust_bank_cache_mode,
+            "source_trust_bank_cache_hit": self.source_trust_bank_cache_hit,
+            "source_trust_bank_cache_path": self.source_trust_bank_cache_path,
+            "source_trust_bank_cache_key": self.source_trust_bank_cache_key,
             "source_anchor_blend_calibration": self.source_anchor_blend_calibration,
             "hyper_output_head_residual": self.hyper_output_head_residual,
             "trainable_parameter_count": self._trainable_scope_metadata["trainable_parameter_count"],
@@ -1220,6 +1748,8 @@ class PromptConditionedTrainer:
             "lr": self.lr,
             "weight_decay": self.weight_decay,
             "selection_metric": self.selection_metric,
+            "stable_source_val_plateau_policy": STABLE_SOURCE_VAL_PLATEAU_POLICY,
+            "stable_source_val_plateau_margin": STABLE_SOURCE_VAL_PLATEAU_MARGIN,
             "source_val_residual_gain": self.source_val_residual_gain,
             "source_regions": self.source_regions,
             "source_region_global_indices": self._source_region_global_indices,
@@ -1232,6 +1762,10 @@ class PromptConditionedTrainer:
             "pin_memory": self.pin_memory,
             "tensor_cache_load_mode": self.tensor_cache_load_mode,
             "train_batch_sampler": self.train_batch_sampler,
+            "source_fit_max_batches_per_epoch": self.source_fit_max_batches_per_epoch,
+            "source_fit_fast_screen_enabled": self.source_fit_fast_screen_enabled,
+            "source_fit_full_batches_per_epoch": self.source_fit_full_batches_per_epoch,
+            "source_fit_effective_batches_per_epoch": self.source_fit_effective_batches_per_epoch,
             "eval_every_epochs": self.eval_every_epochs,
             "use_amp": self.use_amp,
             "amp_init_scale": self.amp_init_scale,
@@ -1266,6 +1800,19 @@ class PromptConditionedTrainer:
             "prompt_encoder_input_branch_hash": _prompt_input_branch_sha256(self.prompt_encoder),
             "source_episode_prompt_policy": self.source_episode_prompt_policy,
             "episode_policy": SOURCE_REGION_EPISODE_POLICY,
+            "source_trust_query_mode": self.source_trust_query_mode,
+            "raw_trust_query_required": source_trust_query_requires_separate_bank(
+                self.source_trust_query_mode
+            ),
+            "source_trust_query_input_domain": source_trust_query_input_domain(
+                self.source_trust_query_mode,
+                self.context_encoder,
+            ),
+            "source_trust_query_blend_lambda": (
+                SOURCE_TRUST_QUERY_BLEND_LAMBDA
+                if self.source_trust_query_mode == SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA
+                else 0.0
+            ),
         }
 
     def _source_prototype_cache_path_for_key(self, key_payload: Dict[str, Any]) -> Optional[Path]:
@@ -1275,28 +1822,109 @@ class PromptConditionedTrainer:
         self.source_prototype_cache_key = cache_key
         return self.source_prototype_cache_dir / f"{cache_key}.pt"
 
+    def _source_prototype_cache_key_payload_matches(
+        self,
+        cached_payload: Dict[str, Any],
+        expected_payload: Dict[str, Any],
+    ) -> bool:
+        if cached_payload == expected_payload:
+            return True
+        if expected_payload.get("source_trust_query_mode") != SOURCE_TRUST_QUERY_MODE_PROMPT:
+            return False
+        compatible = dict(cached_payload)
+        compatible.setdefault("source_trust_query_mode", SOURCE_TRUST_QUERY_MODE_PROMPT)
+        compatible.setdefault("raw_trust_query_required", False)
+        compatible.setdefault(
+            "source_trust_query_input_domain",
+            source_trust_query_input_domain(
+                SOURCE_TRUST_QUERY_MODE_PROMPT,
+                self.context_encoder,
+            ),
+        )
+        compatible.setdefault("source_trust_query_blend_lambda", 0.0)
+        return compatible == expected_payload
+
+    def _source_prototype_cache_candidates(self, key_payload: Dict[str, Any]) -> List[Path]:
+        primary = self._source_prototype_cache_path_for_key(key_payload)
+        if self.source_prototype_cache_dir is None or primary is None:
+            return []
+        candidates = [primary]
+        if self.source_prototype_cache_mode == "refresh":
+            return candidates
+        if key_payload.get("source_trust_query_mode") == SOURCE_TRUST_QUERY_MODE_PROMPT:
+            legacy_payload = dict(key_payload)
+            legacy_payload.pop("source_trust_query_mode", None)
+            legacy_payload.pop("raw_trust_query_required", None)
+            legacy_payload.pop("source_trust_query_input_domain", None)
+            legacy_payload.pop("source_trust_query_blend_lambda", None)
+            legacy = self.source_prototype_cache_dir / f"{_json_sha256(legacy_payload)}.pt"
+            if legacy != primary:
+                candidates.append(legacy)
+        return candidates
+
+    def _validate_source_context_monthly_prototypes(self, cache: Dict[str, Any]) -> None:
+        if not cache:
+            raise ValueError("source context monthly prototype cache is empty")
+        required_keys = {
+            "monthly_input_emb",
+            "monthly_counts",
+            "region_input_emb",
+            "region_counts",
+            "global_input_emb",
+            "global_count",
+        }
+        missing = sorted(key for key in required_keys if key not in cache)
+        if missing:
+            raise ValueError(f"source context monthly prototype cache missing required keys: {missing}")
+        source_trust_query_mode = getattr(
+            self,
+            "source_trust_query_mode",
+            SOURCE_TRUST_QUERY_MODE_PROMPT,
+        )
+        if source_trust_query_requires_separate_bank(source_trust_query_mode):
+            raw_required = [
+                "monthly_raw_trust_query_input_emb",
+                "region_raw_trust_query_input_emb",
+                "global_raw_trust_query_input_emb",
+            ]
+            missing_raw = sorted(key for key in raw_required if key not in cache)
+            if missing_raw:
+                raise ValueError(
+                    f"source_trust_query_mode={source_trust_query_mode} requires "
+                    f"{', '.join(missing_raw)} in source prototype cache; refresh/rebuild the cache"
+                )
+
     def _load_or_build_source_context_monthly_prototypes(self) -> None:
         key_payload = self._source_prototype_cache_key_payload()
-        cache_path = self._source_prototype_cache_path_for_key(key_payload)
+        cache_candidates = self._source_prototype_cache_candidates(key_payload)
+        cache_path = cache_candidates[0] if cache_candidates else None
         if self.source_prototype_cache_mode != "off" and cache_path is not None:
             self.source_prototype_cache_path = str(cache_path)
-            if self.source_prototype_cache_mode != "refresh" and cache_path.exists():
-                payload = torch.load(cache_path, map_location="cpu", weights_only=False)
-                metadata = dict(payload.get("metadata", {}))
-                if metadata.get("key_payload") != key_payload:
-                    raise ValueError(
-                        f"source prototype cache key payload mismatch in {cache_path}; "
-                        "refusing to load stale cache"
+            if self.source_prototype_cache_mode != "refresh":
+                for candidate in cache_candidates:
+                    if not candidate.exists():
+                        continue
+                    payload = torch.load(candidate, map_location="cpu", weights_only=False)
+                    metadata = dict(payload.get("metadata", {}))
+                    cached_payload = metadata.get("key_payload", {})
+                    if not self._source_prototype_cache_key_payload_matches(cached_payload, key_payload):
+                        continue
+                    self._source_context_monthly_prototypes = payload["prototypes"]
+                    self._validate_source_context_monthly_prototypes(self._source_context_monthly_prototypes)
+                    metadata["key_payload"] = key_payload
+                    metadata["source_trust_query_mode"] = self.source_trust_query_mode
+                    metadata["raw_trust_query_required"] = source_trust_query_requires_separate_bank(
+                        self.source_trust_query_mode
                     )
-                self._source_context_monthly_prototypes = payload["prototypes"]
-                self.source_prototype_cache_metadata = metadata
-                self.source_prototype_cache_hit = True
-                print(
-                    "  source_context_monthly_prototype_cache: "
-                    f"hit path={cache_path}",
-                    flush=True,
-                )
-                return
+                    self.source_prototype_cache_metadata = metadata
+                    self.source_prototype_cache_hit = True
+                    self.source_prototype_cache_path = str(candidate)
+                    print(
+                        "  source_context_monthly_prototype_cache: "
+                        f"hit path={candidate}",
+                        flush=True,
+                    )
+                    return
 
         self.source_prototype_cache_hit = False
         self._build_source_context_monthly_prototypes()
@@ -1314,6 +1942,19 @@ class PromptConditionedTrainer:
                 "global_count": summary.get("global_count", 0),
                 "region_month_prototype_count": summary.get("region_month_prototype_count", 0),
                 "source": "source_fit_input_side_only_no_labels",
+                "source_trust_query_mode": self.source_trust_query_mode,
+                "raw_trust_query_required": source_trust_query_requires_separate_bank(
+                    self.source_trust_query_mode
+                ),
+                "source_trust_query_input_domain": source_trust_query_input_domain(
+                    self.source_trust_query_mode,
+                    self.context_encoder,
+                ),
+                "source_trust_query_blend_lambda": (
+                    SOURCE_TRUST_QUERY_BLEND_LAMBDA
+                    if self.source_trust_query_mode == SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA
+                    else 0.0
+                ),
                 **prompt_domain_metadata(self.context_encoder),
                 "forbidden_fields_not_read": [
                     "target",
@@ -1366,14 +2007,22 @@ class PromptConditionedTrainer:
         num_regions = int(self.prompt_encoder.num_regions)
         input_emb_dim = int(self.prompt_encoder.input_proj.out_features)
         monthly_sums = torch.zeros(num_regions, 13, input_emb_dim, dtype=torch.float64)
+        monthly_raw_trust_query_sums = torch.zeros(num_regions, 13, input_emb_dim, dtype=torch.float64)
         monthly_counts = torch.zeros(num_regions, 13, dtype=torch.long)
         monthly_coverage_sums = torch.zeros(num_regions, 13, dtype=torch.float64)
         region_sums = torch.zeros(num_regions, input_emb_dim, dtype=torch.float64)
+        region_raw_trust_query_sums = torch.zeros(num_regions, input_emb_dim, dtype=torch.float64)
         region_coverage_sums = torch.zeros(num_regions, dtype=torch.float64)
         region_counts = torch.zeros(num_regions, dtype=torch.long)
         global_sum = torch.zeros(input_emb_dim, dtype=torch.float64)
+        global_raw_trust_query_sum = torch.zeros(input_emb_dim, dtype=torch.float64)
         global_count = 0
         global_coverage_sum = 0.0
+        raw_da_encoder = RobustInputSideDAPromptEncoder(
+            num_regions=num_regions,
+            input_channels=12,
+            hidden_dim=int(self.prompt_encoder.hidden_dim),
+        ).to(device=self.device)
 
         was_training = self.prompt_encoder.training
         self.prompt_encoder.eval()
@@ -1424,20 +2073,27 @@ class PromptConditionedTrainer:
                     x_prompt,
                     region_mask,
                 )
+                raw_input_stats = _masked_input_stats_from_tensor(raw_da_encoder, x, region_mask)
+                raw_trust_input_emb = self.prompt_encoder.input_proj(raw_input_stats)
                 stats = input_emb.detach().float().cpu().squeeze(0)
+                raw_trust_stats = raw_trust_input_emb.detach().float().cpu().squeeze(0)
                 if int(stats.numel()) != input_emb_dim:
                     raise ValueError(
                         "source context prototype input embedding dimension mismatch: "
                         f"got {int(stats.numel())}, expected {input_emb_dim}"
                     )
                 stats64 = stats.to(torch.float64)
+                raw_trust_stats64 = raw_trust_stats.to(torch.float64)
                 monthly_sums[src_rid, month] += stats64
+                monthly_raw_trust_query_sums[src_rid, month] += raw_trust_stats64
                 monthly_counts[src_rid, month] += 1
                 monthly_coverage_sums[src_rid, month] += float(finite_coverage)
                 region_sums[src_rid] += stats64
+                region_raw_trust_query_sums[src_rid] += raw_trust_stats64
                 region_counts[src_rid] += 1
                 region_coverage_sums[src_rid] += float(finite_coverage)
                 global_sum += stats64
+                global_raw_trust_query_sum += raw_trust_stats64
                 global_coverage_sum += float(finite_coverage)
                 global_count += 1
 
@@ -1445,23 +2101,32 @@ class PromptConditionedTrainer:
             self.prompt_encoder.train()
 
         monthly_stats = torch.zeros_like(monthly_sums, dtype=torch.float32)
+        monthly_raw_trust_query_stats = torch.zeros_like(monthly_raw_trust_query_sums, dtype=torch.float32)
         region_stats = torch.zeros_like(region_sums, dtype=torch.float32)
+        region_raw_trust_query_stats = torch.zeros_like(region_raw_trust_query_sums, dtype=torch.float32)
         monthly_coverage = torch.zeros_like(monthly_coverage_sums, dtype=torch.float32)
         region_coverage = torch.zeros_like(region_coverage_sums, dtype=torch.float32)
         for rid in range(num_regions):
             if int(region_counts[rid]) > 0:
                 region_stats[rid] = (region_sums[rid] / float(region_counts[rid])).float()
+                region_raw_trust_query_stats[rid] = (
+                    region_raw_trust_query_sums[rid] / float(region_counts[rid])
+                ).float()
                 region_coverage[rid] = float(region_coverage_sums[rid] / float(region_counts[rid]))
             for month in range(1, 13):
                 if int(monthly_counts[rid, month]) > 0:
                     monthly_stats[rid, month] = (
                         monthly_sums[rid, month] / float(monthly_counts[rid, month])
                     ).float()
+                    monthly_raw_trust_query_stats[rid, month] = (
+                        monthly_raw_trust_query_sums[rid, month] / float(monthly_counts[rid, month])
+                    ).float()
                     monthly_coverage[rid, month] = float(
                         monthly_coverage_sums[rid, month] / float(monthly_counts[rid, month])
                     )
                 else:
                     monthly_stats[rid, month] = region_stats[rid]
+                    monthly_raw_trust_query_stats[rid, month] = region_raw_trust_query_stats[rid]
                     monthly_coverage[rid, month] = region_coverage[rid]
 
         global_stats = (
@@ -1469,15 +2134,23 @@ class PromptConditionedTrainer:
             if global_count > 0
             else torch.zeros(input_emb_dim, dtype=torch.float32)
         )
+        global_raw_trust_query_stats = (
+            (global_raw_trust_query_sum / float(global_count)).float()
+            if global_count > 0
+            else torch.zeros(input_emb_dim, dtype=torch.float32)
+        )
         global_coverage = float(global_coverage_sum / float(global_count)) if global_count > 0 else 0.0
         self._source_context_monthly_prototypes = {
             "monthly_input_emb": monthly_stats,
+            "monthly_raw_trust_query_input_emb": monthly_raw_trust_query_stats,
             "monthly_counts": monthly_counts,
             "monthly_coverage": monthly_coverage,
             "region_input_emb": region_stats,
+            "region_raw_trust_query_input_emb": region_raw_trust_query_stats,
             "region_counts": region_counts,
             "region_coverage": region_coverage,
             "global_input_emb": global_stats,
+            "global_raw_trust_query_input_emb": global_raw_trust_query_stats,
             "global_count": int(global_count),
             "global_coverage": global_coverage,
             "input_emb_dim": input_emb_dim,
@@ -1487,6 +2160,7 @@ class PromptConditionedTrainer:
             "reliability_feature_transform": RELIABILITY_FEATURE_TRANSFORM,
             **prompt_domain_metadata(self.context_encoder),
         }
+        self._validate_source_context_monthly_prototypes(self._source_context_monthly_prototypes)
         print(
             "  source_context_monthly_prototype: "
             f"built {int((monthly_counts[:, 1:] > 0).sum().item())} region-month prototypes "
@@ -1532,6 +2206,950 @@ class PromptConditionedTrainer:
             "region_month_prototype_count": int((monthly_counts[:, 1:] > 0).sum().item()),
             "monthly_counts_by_region": counts_by_region,
         }
+
+    def _source_manifold_embeddings_from_cache(self) -> torch.Tensor:
+        cache = self._source_context_monthly_prototypes
+        if not cache:
+            return torch.empty(0, 0, dtype=torch.float32)
+        monthly = cache["monthly_input_emb"]
+        counts = cache["monthly_counts"]
+        rows: List[torch.Tensor] = []
+        for rid in range(monthly.shape[0]):
+            for month in range(1, 13):
+                if int(counts[rid, month].item()) > 0:
+                    rows.append(monthly[rid, month].detach().cpu().to(dtype=torch.float32))
+        if not rows:
+            global_emb = cache.get("global_input_emb")
+            if global_emb is None:
+                return torch.empty(0, 0, dtype=torch.float32)
+            rows.append(global_emb.detach().cpu().to(dtype=torch.float32))
+        return torch.stack(rows, dim=0)
+
+    def _source_val_input_embeddings_for_guard(self) -> torch.Tensor:
+        if self.source_val_dataset is None:
+            return torch.empty(0, 0, dtype=torch.float32)
+        rows: List[torch.Tensor] = []
+        was_training = self.prompt_encoder.training
+        self.prompt_encoder.eval()
+        input_side_getter = getattr(self.source_val_dataset, "get_input_side_sample", None)
+        with torch.no_grad():
+            for idx in range(len(self.source_val_dataset)):
+                sample = input_side_getter(idx) if callable(input_side_getter) else self.source_val_dataset[idx]
+                x = torch.as_tensor(sample["x"], dtype=torch.float32, device=self.device).unsqueeze(0)
+                x_norm = self._normalize(x)
+                x_prompt = prompt_diagnostic_tensor(
+                    self.prompt_encoder,
+                    context_encoder=self.context_encoder,
+                    x_norm=x_norm,
+                    x_raw=x,
+                )
+                region_mask_value = sample.get("region_mask", sample.get("active_region_mask"))
+                region_mask = (
+                    torch.as_tensor(
+                        np.asarray(region_mask_value) > 0.5,
+                        dtype=torch.bool,
+                        device=self.device,
+                    )
+                    if region_mask_value is not None
+                    else None
+                )
+                input_emb, _ = masked_input_embedding_and_coverage(
+                    self.prompt_encoder,
+                    x_prompt,
+                    region_mask,
+                )
+                rows.append(input_emb.detach().cpu().squeeze(0).to(dtype=torch.float32))
+        if was_training:
+            self.prompt_encoder.train()
+        if not rows:
+            return torch.empty(0, 0, dtype=torch.float32)
+        return torch.stack(rows, dim=0)
+
+    def _source_trust_bank_prompt_rows(self) -> Tuple[torch.Tensor, List[Dict[str, int]]]:
+        cache = self._source_context_monthly_prototypes
+        if not cache:
+            return torch.empty(0, 0, dtype=torch.float32), []
+        monthly = cache["monthly_input_emb"]
+        counts = cache["monthly_counts"]
+        rows: List[torch.Tensor] = []
+        metadata: List[Dict[str, int]] = []
+        was_training = self.prompt_encoder.training
+        self.prompt_encoder.eval()
+        with torch.no_grad():
+            for rid in range(monthly.shape[0]):
+                for month in range(1, 13):
+                    if int(counts[rid, month].item()) <= 0:
+                        continue
+                    input_emb = monthly[rid, month].to(device=self.device, dtype=torch.float32).view(1, -1)
+                    region_ids = torch.tensor([rid], dtype=torch.long, device=self.device)
+                    months = torch.tensor([month], dtype=torch.long, device=self.device)
+                    z = self._encode_prompt_from_input_stats(input_emb, region_ids, months)
+                    rows.append(z.detach().cpu().squeeze(0).to(dtype=torch.float32))
+                    metadata.append(
+                        {
+                            "source_region_compact_id": int(rid),
+                            "month": int(month),
+                            "count": int(counts[rid, month].item()),
+                        }
+                    )
+        if was_training:
+            self.prompt_encoder.train()
+        if not rows:
+            return torch.empty(0, 0, dtype=torch.float32), []
+        return torch.stack(rows, dim=0), metadata
+
+    def _raw_da_trust_query_from_input_embedding(
+        self,
+        input_emb: torch.Tensor,
+        region_ids: torch.Tensor,
+        months: torch.Tensor,
+    ) -> torch.Tensor:
+        return compose_prompt_from_input_embedding(
+            self.prompt_encoder,
+            region_embedding=self.prompt_encoder.region_embed(region_ids),
+            input_embedding=input_emb,
+            month=months,
+        )
+
+    def _raw_da_trust_query_from_tensor(
+        self,
+        x_raw: torch.Tensor,
+        region_ids: torch.Tensor,
+        months: torch.Tensor,
+        region_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        input_emb = raw_da_trust_input_embedding(self.prompt_encoder, x_raw, region_mask)
+        return self._raw_da_trust_query_from_input_embedding(input_emb, region_ids, months)
+
+    def _phys_context_token_from_tensor(
+        self,
+        x_raw: torch.Tensor,
+        region_ids: torch.Tensor,
+        months: torch.Tensor,
+        region_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.phys_context_source in PHYS_FORMULA_SOURCES:
+            if not isinstance(self.model, HyperAdapterConditionalResUNet):
+                raise ValueError("formula physical context requires HyperDA model")
+            formula_encoder = getattr(self.model, "formula_phys_context_encoder", None)
+            if formula_encoder is None:
+                raise ValueError(
+                    "formula phys_context_source requires "
+                    "model.formula_phys_context_encoder"
+                )
+            features, summary = phys_formula_features_from_raw_tensor(
+                x_raw,
+                region_mask=region_mask,
+                month=months,
+                source_state=self._phys_consistency_source_state,
+                mode=PHYS_FORMULA_MODE,
+                source=self.phys_context_source,
+            )
+            self._last_phys_formula_feature_summary = summary
+            return formula_encoder(features.to(device=x_raw.device, dtype=x_raw.dtype))
+        if self.phys_context_source != "raw_input_side_da_diagnostics":
+            raise ValueError(f"Unsupported phys_context_source: {self.phys_context_source}")
+        self._last_phys_formula_feature_summary = {"enabled": False}
+        input_emb = raw_da_trust_input_embedding(self.prompt_encoder, x_raw, region_mask)
+        return self._raw_da_trust_query_from_input_embedding(input_emb, region_ids, months)
+
+    def _source_trust_query_rows_for_prompt_metadata(
+        self,
+        prompt_rows: torch.Tensor,
+        row_metadata: List[Dict[str, int]],
+    ) -> torch.Tensor:
+        if self.source_trust_query_mode == SOURCE_TRUST_QUERY_MODE_PROMPT:
+            return torch.empty(0, 0, dtype=torch.float32)
+        if not source_trust_query_requires_separate_bank(self.source_trust_query_mode):
+            raise ValueError(f"Unsupported source_trust_query_mode: {self.source_trust_query_mode}")
+        cache = self._source_context_monthly_prototypes
+        if not cache or not row_metadata:
+            return torch.empty(0, 0, dtype=torch.float32)
+        monthly = cache.get("monthly_raw_trust_query_input_emb")
+        if monthly is None:
+            raise ValueError(
+                f"source_trust_query_mode={self.source_trust_query_mode} requires "
+                "monthly_raw_trust_query_input_emb in source prototype cache; refresh/rebuild the cache"
+            )
+        rows: List[torch.Tensor] = []
+        was_training = self.prompt_encoder.training
+        self.prompt_encoder.eval()
+        with torch.no_grad():
+            for row_idx, meta in enumerate(row_metadata):
+                rid = int(meta["source_region_compact_id"])
+                month = int(meta["month"])
+                input_emb = monthly[rid, month].to(device=self.device, dtype=torch.float32).view(1, -1)
+                region_ids = torch.tensor([rid], dtype=torch.long, device=self.device)
+                months = torch.tensor([month], dtype=torch.long, device=self.device)
+                query = self._raw_da_trust_query_from_input_embedding(input_emb, region_ids, months)
+                if self.source_trust_query_mode == SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA:
+                    prompt = prompt_rows[row_idx : row_idx + 1].to(device=self.device, dtype=query.dtype)
+                    query = blend_prompt_and_raw_trust_query(prompt, query)
+                rows.append(query.detach().cpu().squeeze(0).to(dtype=torch.float32))
+        if was_training:
+            self.prompt_encoder.train()
+        return torch.stack(rows, dim=0) if rows else torch.empty(0, 0, dtype=torch.float32)
+
+    def _current_source_trust_bank_compatibility(self) -> Dict[str, Any]:
+        return {
+            "schema_version": SOURCE_TRUST_BANK_REUSE_SCHEMA_VERSION,
+            "source": "source_fit_source_val_only",
+            "calibration_source": self.source_trust_bank_calibration,
+            "context_encoder": self.context_encoder,
+            "source_trust_query_mode": self.source_trust_query_mode,
+            "source_neighbor_top_m": int(self.hyper_source_trust_top_m),
+            "trust_strength": float(self.hyper_source_trust_strength),
+            "prompt_encoder_input_branch_hash": _prompt_input_branch_sha256(self.prompt_encoder),
+            "model_coefficient_branch_hash": _model_coefficient_branch_sha256(self.model),
+        }
+
+    def _source_trust_bank_cache_key_payload(self) -> Dict[str, Any]:
+        dataset_split_sha = getattr(self.train_dataset, "split_manifest_sha256", "") or self.split_manifest_sha256
+        payload = dict(self._current_source_trust_bank_compatibility())
+        payload.update(
+            {
+                "schema_version": SOURCE_TRUST_BANK_CACHE_SCHEMA_VERSION,
+                "target_region": self.target_region,
+                "source_regions": list(self.source_regions),
+                "source_region_global_indices": list(self._source_region_global_indices),
+                "split_manifest_sha256": dataset_split_sha,
+                "protocol_freeze_id": self.protocol_freeze_id,
+                "dataset_backend": self.dataset_backend,
+                "normalization_stats_hash": _array_sha256(self._ch_mean, self._ch_std),
+                "source_episode_prompt_policy": self.source_episode_prompt_policy,
+                "episode_policy": SOURCE_REGION_EPISODE_POLICY,
+                "hyper_source_trust_variable_gate": bool(self.hyper_source_trust_variable_gate),
+                "source_val_calibration_split": "source_val",
+            }
+        )
+        return payload
+
+    def _source_trust_bank_cache_path_for_key(self, key_payload: Dict[str, Any]) -> Optional[Path]:
+        if self.source_trust_bank_cache_dir is None:
+            return None
+        cache_key = _json_sha256(key_payload)
+        self.source_trust_bank_cache_key = cache_key
+        return self.source_trust_bank_cache_dir / f"{cache_key}.pt"
+
+    def _load_source_trust_bank_from_cache(self) -> bool:
+        if (
+            self.source_trust_bank_cache_mode == "off"
+            or self.source_trust_bank_cache_dir is None
+            or self.source_trust_bank_cache_mode == "refresh"
+        ):
+            return False
+        key_payload = self._source_trust_bank_cache_key_payload()
+        cache_path = self._source_trust_bank_cache_path_for_key(key_payload)
+        if cache_path is None:
+            return False
+        self.source_trust_bank_cache_path = str(cache_path)
+        if not cache_path.exists():
+            return False
+        payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+        metadata = dict(payload.get("metadata", {}))
+        if metadata.get("key_payload") != key_payload:
+            raise ValueError(
+                f"source trust bank cache key payload mismatch in {cache_path}; refusing to load stale cache"
+            )
+        state = normalize_hyperda_source_trust_bank_state(payload.get("source_trust_bank_state"))
+        if not state:
+            raise ValueError(f"source trust bank cache missing valid state: {cache_path}")
+        mismatches = self._source_trust_bank_reuse_mismatch_reasons(state)
+        if mismatches:
+            raise ValueError(
+                f"source trust bank cache compatibility mismatch in {cache_path}: {mismatches[:3]}"
+            )
+        self._source_trust_bank_state = state
+        self.source_trust_bank_cache_hit = True
+        self.source_trust_bank_cache_metadata = metadata
+        summary = hyperda_trust_bank_summary(state)
+        print(
+            "  source_trust_bank_cache: "
+            f"hit path={cache_path} hash={str(summary.get('trust_bank_hash', ''))[:12]}",
+            flush=True,
+        )
+        return True
+
+    def _write_source_trust_bank_cache(self) -> None:
+        if (
+            self.source_trust_bank_cache_mode == "off"
+            or self.source_trust_bank_cache_dir is None
+            or self._source_trust_bank_state is None
+        ):
+            return
+        key_payload = self._source_trust_bank_cache_key_payload()
+        cache_path = self._source_trust_bank_cache_path_for_key(key_payload)
+        if cache_path is None:
+            return
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        summary = hyperda_trust_bank_summary(self._source_trust_bank_state)
+        metadata = {
+            "schema_version": SOURCE_TRUST_BANK_CACHE_SCHEMA_VERSION,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "key": self.source_trust_bank_cache_key,
+            "key_payload": key_payload,
+            "target_region": self.target_region,
+            "source_regions": list(self.source_regions),
+            "source": "source_fit_source_val_only",
+            "label_usage": "none",
+            "target_val_usage": "unused_in_main_protocol",
+            "target_eval_usage": "final_eval_only_no_selection",
+            "trust_bank_hash": summary.get("trust_bank_hash", ""),
+            "source_region_month_count": summary.get("source_region_month_count", 0),
+            "source_val_calibration_count": self._source_trust_bank_state.get("source_val_calibration_count", 0),
+        }
+        torch.save(
+            {
+                "metadata": metadata,
+                "source_trust_bank_state": self._source_trust_bank_state,
+            },
+            cache_path,
+        )
+        self.source_trust_bank_cache_path = str(cache_path)
+        self.source_trust_bank_cache_metadata = metadata
+        print(
+            "  source_trust_bank_cache: "
+            f"wrote path={cache_path} hash={str(summary.get('trust_bank_hash', ''))[:12]}",
+            flush=True,
+        )
+
+    def _source_trust_bank_reuse_mismatch_reasons(self, state: Dict[str, Any]) -> List[str]:
+        expected = self._current_source_trust_bank_compatibility()
+        checks = {
+            "source": state.get("source"),
+            "calibration_source": state.get("calibration_source"),
+            "context_encoder": state.get("context_encoder"),
+            "source_trust_query_mode": state.get("source_trust_query_mode"),
+            "source_neighbor_top_m": int(state.get("source_neighbor_top_m", 0) or 0),
+            "trust_strength": float(state.get("trust_strength", 0.0) or 0.0),
+            "prompt_encoder_input_branch_hash": state.get("prompt_encoder_input_branch_hash"),
+            "model_coefficient_branch_hash": state.get("model_coefficient_branch_hash"),
+        }
+        mismatches: List[str] = []
+        for key, actual in checks.items():
+            expected_value = expected[key]
+            if isinstance(expected_value, float):
+                if abs(float(actual) - expected_value) > 1e-8:
+                    mismatches.append(f"{key}: checkpoint={actual!r} current={expected_value!r}")
+            elif actual != expected_value:
+                mismatches.append(f"{key}: checkpoint={actual!r} current={expected_value!r}")
+        return mismatches
+
+    def _try_reuse_source_trust_bank_state(
+        self,
+        state: Dict[str, Any],
+        *,
+        source: str = "",
+    ) -> bool:
+        normalized = normalize_hyperda_source_trust_bank_state(state)
+        if not normalized:
+            self.source_trust_bank_reuse_metadata = {
+                "attempted": True,
+                "reused": False,
+                "source": str(source or ""),
+                "reason": "empty_or_invalid_state",
+            }
+            return False
+        mismatches = self._source_trust_bank_reuse_mismatch_reasons(normalized)
+        if mismatches:
+            self.source_trust_bank_reuse_metadata = {
+                "attempted": True,
+                "reused": False,
+                "source": str(source or ""),
+                "reason": "compatibility_mismatch",
+                "mismatches": mismatches,
+            }
+            print(
+                "  source_trust_bank_checkpoint_reuse: skipped "
+                f"reason=compatibility_mismatch mismatches={mismatches[:3]}",
+                flush=True,
+            )
+            return False
+        self._source_trust_bank_state = normalized
+        summary = hyperda_trust_bank_summary(self._source_trust_bank_state)
+        self.source_trust_bank_reuse_metadata = {
+            "attempted": True,
+            "reused": True,
+            "source": str(source or ""),
+            "trust_bank_hash": summary.get("trust_bank_hash", ""),
+            "source_region_month_count": summary.get("source_region_month_count", 0),
+            "source_val_calibration_count": normalized.get("source_val_calibration_count", 0),
+            "compatibility": self._current_source_trust_bank_compatibility(),
+        }
+        print(
+            "  source_trust_bank_checkpoint_reuse: "
+            f"hit hash={str(summary.get('trust_bank_hash', ''))[:12]} "
+            f"rows={summary.get('source_region_month_count', 0)}",
+            flush=True,
+        )
+        self._write_source_trust_bank_cache()
+        return True
+
+    def _build_source_trust_bank_state(self) -> None:
+        if not self.hyper_source_trust_routing:
+            self._source_trust_bank_state = None
+            return
+        if not isinstance(self.model, HyperAdapterConditionalResUNet):
+            self._source_trust_bank_state = None
+            return
+        if self._load_source_trust_bank_from_cache():
+            return
+        prompt_rows, row_metadata = self._source_trust_bank_prompt_rows()
+        if prompt_rows.numel() == 0:
+            self._source_trust_bank_state = None
+            return
+        was_training = self.model.training
+        phys_was_enabled = bool(getattr(self.model, "hyper_phys_context_modulation", False))
+        self.model.eval()
+        layer_consensus: Dict[str, torch.Tensor] = {}
+        with torch.no_grad():
+            try:
+                if phys_was_enabled:
+                    self.model.hyper_phys_context_modulation = False
+                z_device = prompt_rows.to(device=self.device)
+                for layer_name in ("bottleneck", "dec2", "dec1"):
+                    layer_consensus[layer_name] = self.model.adapter_coefficient_logits(
+                        z_device,
+                        layer_name,
+                        source_trust_bank=None,
+                    ).detach().cpu().to(dtype=torch.float32)
+            finally:
+                if phys_was_enabled:
+                    self.model.hyper_phys_context_modulation = True
+        if was_training:
+            self.model.train()
+        trust_query_rows = self._source_trust_query_rows_for_prompt_metadata(prompt_rows, row_metadata)
+        if trust_query_rows.numel() > 0 and tuple(trust_query_rows.shape) != tuple(prompt_rows.shape):
+            raise ValueError(
+                "source trust query embedding shape must match source prompt embedding shape: "
+                f"query={tuple(trust_query_rows.shape)} prompt={tuple(prompt_rows.shape)}"
+            )
+        source_lookup_rows = trust_query_rows if trust_query_rows.numel() > 0 else prompt_rows
+        source_val_lookup_rows = self._source_val_embeddings_for_trust_bank()
+        calibration_rows = source_val_lookup_rows if source_val_lookup_rows.numel() > 0 else source_lookup_rows
+        distances = self._nearest_source_distances(calibration_rows, source_lookup_rows)
+        quantiles = self._distance_quantiles(distances)
+        source_val_prompt_rows = (
+            self._source_val_embeddings_for_trust_bank(force_prompt_geometry=True)
+            if trust_query_rows.numel() > 0
+            else source_val_lookup_rows
+        )
+        prompt_calibration_rows = source_val_prompt_rows if source_val_prompt_rows.numel() > 0 else prompt_rows
+        prompt_distances = self._nearest_source_distances(prompt_calibration_rows, prompt_rows)
+        prompt_quantiles = self._distance_quantiles(prompt_distances)
+        trust_query_quantiles = quantiles if trust_query_rows.numel() > 0 else {}
+        distance_temperature = self._distance_temperature_from_quantiles(quantiles)
+        state = {
+            "schema_version": HYPERDA_SOURCE_TRUST_BANK_SCHEMA_VERSION,
+            "source": "source_fit_source_val_only",
+            "calibration_source": self.source_trust_bank_calibration,
+            "label_usage": "none",
+            "target_val_usage": "unused_in_main_protocol",
+            "target_eval_usage": "final_eval_only_no_selection",
+            "coefficient_source": "source_neighborhood_consensus",
+            "source_neighbor_top_m": int(self.hyper_source_trust_top_m),
+            "trust_strength": float(self.hyper_source_trust_strength),
+            "distance_quantiles": quantiles,
+            "prompt_distance_quantiles": prompt_quantiles,
+            "source_trust_query_distance_quantiles": trust_query_quantiles,
+            "distance_temperature": distance_temperature,
+            "source_prompt_embeddings": prompt_rows,
+            "source_trust_query_embeddings": trust_query_rows if trust_query_rows.numel() > 0 else None,
+            "source_trust_query_mode": self.source_trust_query_mode,
+            "layer_consensus_logits": layer_consensus,
+            "source_region_month_metadata": row_metadata,
+            "source_region_month_count": int(prompt_rows.shape[0]),
+            "source_val_calibration_count": int(calibration_rows.shape[0]) if calibration_rows.numel() else 0,
+            "prompt_encoder_input_branch_hash": _prompt_input_branch_sha256(self.prompt_encoder),
+            "model_coefficient_branch_hash": _model_coefficient_branch_sha256(self.model),
+            "context_encoder": self.context_encoder,
+            "main_prompt_context_encoder": self.context_encoder,
+            "trust_query_input_domain": source_trust_query_input_domain(
+                self.source_trust_query_mode,
+                self.context_encoder,
+            ),
+            "source_trust_query_blend_lambda": (
+                SOURCE_TRUST_QUERY_BLEND_LAMBDA
+                if self.source_trust_query_mode == SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA
+                else 0.0
+            ),
+            "main_prompt_unchanged_by_blended_query": bool(
+                self.source_trust_query_mode == SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA
+            ),
+            **prompt_domain_metadata(self.context_encoder),
+        }
+        self._source_trust_bank_state = normalize_hyperda_source_trust_bank_state(state)
+        summary = hyperda_trust_bank_summary(self._source_trust_bank_state)
+        print(
+            "  hyperda_source_trust_bank: "
+            f"built {summary.get('source_region_month_count', 0)} source prompt rows, "
+            f"top_m={summary.get('source_neighbor_top_m', 0)}, "
+            f"strength={summary.get('trust_strength', 0.0):.3f}, "
+            f"hash={str(summary.get('trust_bank_hash', ''))[:12]}",
+            flush=True,
+        )
+        self._write_source_trust_bank_cache()
+
+    def _refresh_source_trust_bank_if_enabled(self) -> None:
+        if not self.hyper_source_trust_routing:
+            return
+        if not self._source_context_monthly_prototypes:
+            self._load_or_build_source_context_monthly_prototypes()
+        if self._source_trust_bank_state is not None:
+            mismatches = self._source_trust_bank_reuse_mismatch_reasons(self._source_trust_bank_state)
+            if not mismatches:
+                return
+        self._build_source_trust_bank_state()
+
+    def _source_val_embeddings_for_trust_bank(self, *, force_prompt_geometry: bool = False) -> torch.Tensor:
+        if self.source_val_dataset is None:
+            return torch.empty(0, 0, dtype=torch.float32)
+        rows: List[torch.Tensor] = []
+        was_training = self.prompt_encoder.training
+        self.prompt_encoder.eval()
+        input_side_getter = getattr(self.source_val_dataset, "get_input_side_sample", None)
+        with torch.no_grad():
+            for idx in range(len(self.source_val_dataset)):
+                sample = input_side_getter(idx) if callable(input_side_getter) else self.source_val_dataset[idx]
+                sample_region_id = sample.get("sample_region_id")
+                if sample_region_id:
+                    global_rid = _GLOBAL_REGION_IDX_MAP[str(sample_region_id)]
+                else:
+                    active_ids = sample.get("active_region_ids") or []
+                    if len(active_ids) != 1:
+                        continue
+                    global_rid = _GLOBAL_REGION_IDX_MAP[str(active_ids[0])]
+                if int(global_rid) not in self.global_to_source_lookup:
+                    continue
+                src_rid = int(self.global_to_source_lookup[global_rid])
+                month = min(12, max(1, int(sample.get("month", 6))))
+                x = torch.as_tensor(sample["x"], dtype=torch.float32, device=self.device).unsqueeze(0)
+                x_norm = self._normalize(x)
+                x_prompt = prompt_diagnostic_tensor(
+                    self.prompt_encoder,
+                    context_encoder=self.context_encoder,
+                    x_norm=x_norm,
+                    x_raw=x,
+                )
+                region_mask_value = sample.get("region_mask", sample.get("active_region_mask"))
+                region_mask = (
+                    torch.as_tensor(
+                        np.asarray(region_mask_value) > 0.5,
+                        dtype=torch.bool,
+                        device=self.device,
+                    )
+                    if region_mask_value is not None
+                    else None
+                )
+                input_emb, _ = masked_input_embedding_and_coverage(
+                    self.prompt_encoder,
+                    x_prompt,
+                    region_mask,
+                )
+                region_ids = torch.tensor([src_rid], dtype=torch.long, device=self.device)
+                months = torch.tensor([month], dtype=torch.long, device=self.device)
+                if (
+                    source_trust_query_requires_separate_bank(self.source_trust_query_mode)
+                    and not force_prompt_geometry
+                ):
+                    raw_z = self._raw_da_trust_query_from_tensor(
+                        x,
+                        region_ids,
+                        months,
+                        region_mask=region_mask,
+                    )
+                    if self.source_trust_query_mode == SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA:
+                        prompt_z = self._encode_prompt_from_input_stats(input_emb, region_ids, months)
+                        z = blend_prompt_and_raw_trust_query(prompt_z, raw_z)
+                    else:
+                        z = raw_z
+                else:
+                    z = self._encode_prompt_from_input_stats(input_emb, region_ids, months)
+                rows.append(z.detach().cpu().squeeze(0).to(dtype=torch.float32))
+        if was_training:
+            self.prompt_encoder.train()
+        if not rows:
+            return torch.empty(0, 0, dtype=torch.float32)
+        return torch.stack(rows, dim=0)
+
+    @staticmethod
+    def _nearest_source_distances(query: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
+        if query.numel() == 0 or source.numel() == 0:
+            return torch.empty(0, dtype=torch.float32)
+        if query.ndim == 1:
+            query = query.unsqueeze(0)
+        if source.ndim == 1:
+            source = source.unsqueeze(0)
+        distances = torch.cdist(query.to(dtype=torch.float32), source.to(dtype=torch.float32), p=2)
+        return distances.min(dim=1).values.detach().cpu()
+
+    @staticmethod
+    def _distance_quantiles(distances: torch.Tensor) -> Dict[str, float]:
+        if distances.numel() == 0:
+            return {"q50": 1.0, "q75": 1.0, "q90": 1.0, "q95": 1.0, "max": 1.0}
+        q = torch.quantile(
+            distances.to(dtype=torch.float32),
+            torch.tensor([0.50, 0.75, 0.90, 0.95], dtype=torch.float32),
+        )
+        return {
+            "q50": float(q[0].item()),
+            "q75": float(q[1].item()),
+            "q90": float(q[2].item()),
+            "q95": float(q[3].item()),
+            "max": float(distances.max().item()),
+        }
+
+    @staticmethod
+    def _distance_temperature_from_quantiles(quantiles: Dict[str, float]) -> float:
+        distance_temperature = float(quantiles.get("q75", 1.0))
+        if not np.isfinite(distance_temperature) or distance_temperature <= 0.0:
+            distance_temperature = float(quantiles.get("q90", 1.0))
+        if not np.isfinite(distance_temperature) or distance_temperature <= 0.0:
+            distance_temperature = float(quantiles.get("max", 1.0))
+        if not np.isfinite(distance_temperature) or distance_temperature <= 0.0:
+            distance_temperature = 1.0
+        return float(distance_temperature)
+
+    def _build_source_prompt_manifold_guard_state(self) -> None:
+        if not self.hyper_source_manifold_guard:
+            self._source_prompt_manifold_guard_state = None
+            return
+        source_emb = self._source_manifold_embeddings_from_cache()
+        if source_emb.numel() == 0:
+            self._source_prompt_manifold_guard_state = None
+            return
+        val_emb = self._source_val_input_embeddings_for_guard()
+        calibration_emb = val_emb if val_emb.numel() > 0 else source_emb
+        distances = self._nearest_source_distances(calibration_emb, source_emb)
+        if distances.numel() == 0:
+            quantiles = {"q50": 1.0, "q75": 1.0, "q90": 1.0, "q95": 1.0, "max": 1.0}
+        else:
+            q = torch.quantile(
+                distances.to(dtype=torch.float32),
+                torch.tensor([0.50, 0.75, 0.90, 0.95], dtype=torch.float32),
+            )
+            quantiles = {
+                "q50": float(q[0].item()),
+                "q75": float(q[1].item()),
+                "q90": float(q[2].item()),
+                "q95": float(q[3].item()),
+                "max": float(distances.max().item()),
+            }
+        distance_scale = quantiles.get("q90", 1.0)
+        if not np.isfinite(distance_scale) or distance_scale <= 0.0:
+            distance_scale = quantiles.get("max", 1.0)
+        if not np.isfinite(distance_scale) or distance_scale <= 0.0:
+            distance_scale = 1.0
+        cache = self._source_context_monthly_prototypes or {}
+        global_emb = cache.get("global_input_emb", source_emb.mean(dim=0))
+        state = {
+            "schema_version": SOURCE_PROMPT_MANIFOLD_GUARD_SCHEMA_VERSION,
+            "source": "source_fit_source_val_only",
+            "calibration_source": self.source_manifold_guard_calibration,
+            "target_eval_usage": "final_eval_only_no_selection",
+            "target_val_usage": "unused_in_main_protocol",
+            "distance_key": SOURCE_MANIFOLD_DISTANCE_KEY,
+            "distance_schema": dict(SOURCE_MANIFOLD_DISTANCE_SCHEMA),
+            "distance_quantiles": quantiles,
+            "distance_scale": float(distance_scale),
+            "guard_strength": float(self.hyper_source_manifold_guard_strength),
+            "min_multiplier": float(self.hyper_source_manifold_guard_min_multiplier),
+            "source_region_month_input_embeddings": source_emb,
+            "global_input_embedding": global_emb.detach().cpu().to(dtype=torch.float32),
+            "source_region_month_count": int(source_emb.shape[0]),
+            "source_val_calibration_count": int(calibration_emb.shape[0]) if calibration_emb.numel() else 0,
+            "context_encoder": self.context_encoder,
+            "reliability_feature_schema": list(getattr(self.model, "reliability_feature_schema", [])),
+            **prompt_domain_metadata(self.context_encoder),
+        }
+        self._source_prompt_manifold_guard_state = normalize_source_prompt_manifold_guard_state(state)
+        print(
+            "  source_prompt_manifold_guard: "
+            f"built {int(source_emb.shape[0])} source region-month embeddings, "
+            f"calibration_count={int(calibration_emb.shape[0]) if calibration_emb.numel() else 0}, "
+            f"distance_q90={float(distance_scale):.6f}",
+            flush=True,
+        )
+
+    def _source_prompt_manifold_guard_summary(self) -> Dict[str, Any]:
+        state = normalize_source_prompt_manifold_guard_state(self._source_prompt_manifold_guard_state)
+        if not state:
+            return {
+                "enabled": False,
+                "source": "disabled_or_old_checkpoint",
+                "distance_key": SOURCE_MANIFOLD_DISTANCE_KEY,
+            }
+        return {
+            "enabled": True,
+            "schema_version": state.get("schema_version", SOURCE_PROMPT_MANIFOLD_GUARD_SCHEMA_VERSION),
+            "source": state.get("source", "source_fit_source_val_only"),
+            "calibration_source": state.get("calibration_source", "source_fit_source_val_only"),
+            "distance_key": state.get("distance_key", SOURCE_MANIFOLD_DISTANCE_KEY),
+            "distance_schema": dict(state.get("distance_schema", SOURCE_MANIFOLD_DISTANCE_SCHEMA)),
+            "distance_quantiles": dict(state.get("distance_quantiles", {})),
+            "distance_scale": float(state.get("distance_scale", 1.0)),
+            "guard_strength": float(state.get("guard_strength", self.hyper_source_manifold_guard_strength)),
+            "min_multiplier": float(state.get("min_multiplier", self.hyper_source_manifold_guard_min_multiplier)),
+            "source_region_month_count": int(state.get("source_region_month_count", 0)),
+            "source_val_calibration_count": int(state.get("source_val_calibration_count", 0)),
+            "target_eval_usage": state.get("target_eval_usage", "final_eval_only_no_selection"),
+            "target_val_usage": state.get("target_val_usage", "unused_in_main_protocol"),
+        }
+
+    def _source_trust_bank_summary(self) -> Dict[str, Any]:
+        return hyperda_trust_bank_summary(self._source_trust_bank_state)
+
+    def _phys_agreement_guard_summary(self) -> Dict[str, Any]:
+        model_summary = {}
+        if isinstance(self.model, HyperAdapterConditionalResUNet):
+            model_summary = dict(getattr(self.model, "last_phys_agreement_guard_summary", {}) or {})
+        base = {
+            "enabled": bool(self.hyper_phys_agreement_guard),
+            "source": "x_x_raw_month_region_mask_only",
+            "label_usage": "none",
+            "target_val_usage": "unused_in_main_protocol",
+            "target_eval_usage": "final_eval_only_no_selection",
+            "model_selection_usage": "forbidden_diagnostic_and_guard_only",
+            "trust_routing_geometry": "prompt_embedding",
+            "phys_query_usage": "guard_only_not_neighbor_geometry",
+            "guard_action": "shrink_only_no_enhance",
+            "base_valid_mask_usage": "bounded_diagnostic_coverage_only_not_loss_metric_obs_or_region_mask",
+            "source_trust_query_mode": self.source_trust_query_mode,
+            "source_trust_query_input_domain": source_trust_query_input_domain(
+                self.source_trust_query_mode,
+                self.context_encoder,
+            ),
+            "source_neighbor_top_m": int(self.hyper_source_trust_top_m),
+            "trust_strength": float(self.hyper_source_trust_strength),
+            "guard_strength": float(self.hyper_phys_agreement_guard_strength),
+            "min_multiplier": float(self.hyper_phys_agreement_guard_min_multiplier),
+            "risk_rule": self.hyper_phys_agreement_guard_risk_rule,
+            "source_side_calibration": self.source_trust_bank_calibration,
+        }
+        if model_summary:
+            base.update(model_summary)
+        return base
+
+    def _phys_operator_summary(self) -> Dict[str, Any]:
+        model_summary = {}
+        if isinstance(self.model, HyperAdapterConditionalResUNet):
+            model_summary = dict(getattr(self.model, "last_phys_operator_summary", {}) or {})
+        base = {
+            "enabled": bool(self.hyper_phys_context_modulation),
+            "phys_context_source": self.phys_context_source,
+            "hyper_phys_formula_operator": bool(self.hyper_phys_formula_operator),
+            "phys_formula_mode": self.phys_formula_mode if self.hyper_phys_formula_operator else "",
+            "phys_formula_source": self.phys_formula_source if self.hyper_phys_formula_operator else "",
+            "phys_formula_feature_schema": (
+                list(phys_formula_feature_schema_for_source(self.phys_formula_source))
+                if self.hyper_phys_formula_operator
+                else []
+            ),
+            "phys_delta_scale": float(self.hyper_phys_delta_scale),
+            "phys_gate_init": float(self.hyper_phys_gate_init),
+            "operator_droppath_p": float(self.hyper_operator_droppath_p),
+            "operator_droppath_training_only": True,
+            "trust_routing_geometry": "prompt_embedding",
+            "main_prompt_context_encoder": self.context_encoder,
+            "source": (
+                "x_raw_month_region_mask_formula_features_only"
+                if self.hyper_phys_formula_operator
+                else "x_x_raw_month_region_mask_only"
+            ),
+            "label_usage": "none",
+            "target_val_usage": "unused_in_main_protocol",
+            "target_eval_usage": "final_eval_only_no_selection",
+            "base_valid_mask_usage": "bounded_diagnostic_coverage_only_not_loss_metric_obs_or_region_mask",
+        }
+        if model_summary:
+            base.update(model_summary)
+        return base
+
+    def _phys_gain_basis_summary(self) -> Dict[str, Any]:
+        model_summary = {}
+        if isinstance(self.model, HyperAdapterConditionalResUNet):
+            model_summary = dict(getattr(self.model, "last_phys_gain_basis_summary", {}) or {})
+        base = {
+            "enabled": bool(self.hyper_phys_gain_basis_residual),
+            "formula_schema": phys_gain_basis_formula_schema() if self.hyper_phys_gain_basis_residual else {},
+            "coefficient_scale": float(self.hyper_phys_gain_basis_coeff_scale),
+            "residual_clip": float(self.hyper_phys_gain_basis_residual_clip),
+            "beta_init": float(self.hyper_phys_gain_basis_beta_init),
+            "branch_role": (
+                "performance_candidate_or_interpretability_diagnostic"
+                if self.hyper_phys_gain_basis_residual
+                else "disabled"
+            ),
+            "source": "raw_input_side_formula_basis_maps_and_source_fit_gain_metadata",
+            "label_usage": "none_for_forward_source_fit_labels_for_gain_prior_metadata_only",
+            "target_val_usage": "unused_in_main_protocol",
+            "target_eval_usage": "final_eval_only_no_selection",
+            "base_valid_mask_usage": "diagnostic_only_not_loss_metric_obs_region_mask_or_gate_mask",
+            "source_gain_bank_hash": self._phys_gain_source_bank_summary().get("source_gain_bank_hash", ""),
+            "source_gain_bank_used_for_forward": False,
+        }
+        if model_summary:
+            base.update(model_summary)
+        return base
+
+    def _phys_gain_source_bank_summary(self) -> Dict[str, Any]:
+        bank = self._phys_gain_source_bank
+        if not bank:
+            return {
+                "enabled": False,
+                "schema_version": PHYS_GAIN_BASIS_BANK_SCHEMA_VERSION,
+                "source_gain_bank_hash": "",
+                "n_samples": 0,
+                "source_split_roles": {"bank": ["source_fit"]},
+                "target_val_usage": "unused_in_main_protocol",
+                "target_eval_usage": "final_eval_only_no_selection",
+            }
+        group_priors = bank.get("group_priors", {})
+        return {
+            "enabled": True,
+            "schema_version": bank.get("schema_version", PHYS_GAIN_BASIS_BANK_SCHEMA_VERSION),
+            "source_gain_bank_hash": bank.get("source_gain_bank_hash", ""),
+            "source": bank.get("source", "source_fit_labels_only"),
+            "source_split_roles": bank.get("source_split_roles", {"bank": ["source_fit"]}),
+            "label_usage": bank.get("label_usage", "source_fit_increments_for_gain_prior_only"),
+            "target_val_usage": bank.get("target_val_usage", "unused_in_main_protocol"),
+            "target_eval_usage": bank.get("target_eval_usage", "final_eval_only_no_selection"),
+            "n_samples": int(bank.get("n_samples", 0)),
+            "source_region_month_count": len(group_priors) if isinstance(group_priors, dict) else 0,
+            "sign_agreement_summary": bank.get("sign_agreement_summary", {}),
+            "formula_schema": bank.get("formula_schema", phys_gain_basis_formula_schema()),
+            "base_valid_mask_usage": bank.get(
+                "base_valid_mask_usage",
+                "diagnostic_only_not_loss_metric_obs_region_mask_or_gate_mask",
+            ),
+        }
+
+    def _build_phys_gain_source_bank(self) -> None:
+        """Build M3.12 source-only gain priors from source_fit labels for metadata."""
+        if not self.hyper_phys_gain_basis_residual:
+            self._phys_gain_source_bank = None
+            return
+
+        def iter_source_fit_samples():
+            for idx in range(len(self.train_dataset)):
+                sample = dict(self.train_dataset[idx])
+                sample.setdefault("split_role", "source_fit")
+                yield sample
+
+        self._phys_gain_source_bank = build_phys_gain_source_bank(
+            iter_source_fit_samples(),
+            source_split_roles=("source_fit",),
+        )
+        summary = self._phys_gain_source_bank_summary()
+        print(
+            "  phys_gain_source_bank: "
+            f"built {summary.get('source_region_month_count', 0)} source region-month priors "
+            f"from {summary.get('n_samples', 0)} source_fit samples "
+            f"hash={str(summary.get('source_gain_bank_hash', ''))[:12]}",
+            flush=True,
+        )
+
+    def _build_phys_consistency_source_state(self) -> None:
+        """Build source-side vertical-decoupling quantiles from inputs only."""
+        if not (self.hyper_phys_consistency_guard or self.hyper_phys_formula_operator):
+            self._phys_consistency_source_state = None
+            return
+        input_side_getter = getattr(self.train_dataset, "get_input_side_sample", None)
+
+        def iter_input_side_samples():
+            for idx in range(len(self.train_dataset)):
+                yield input_side_getter(idx) if callable(input_side_getter) else self.train_dataset[idx]
+
+        self._phys_consistency_source_state = phys_consistency_source_state_from_samples(
+            iter_input_side_samples(),
+            mode=self.phys_consistency_guard_mode,
+            source=self.phys_consistency_source,
+        )
+        overall = self._phys_consistency_source_state.get("global_vertical_decoupling_quantiles", {})
+        print(
+            "  phys_consistency_guard_source_state: "
+            f"built source_fit input-side vertical quantiles "
+            f"count={overall.get('count', 0)} q90={float(overall.get('q90', 0.0) or 0.0):.6f}",
+            flush=True,
+        )
+
+    def _phys_consistency_guard_summary(self) -> Dict[str, Any]:
+        source_state = self._phys_consistency_source_state if isinstance(self._phys_consistency_source_state, dict) else {}
+        base = {
+            "enabled": bool(self.hyper_phys_consistency_guard),
+            "schema_version": PHYS_CONSISTENCY_GUARD_SCHEMA_VERSION,
+            "mode": self.phys_consistency_guard_mode,
+            "phys_consistency_source": self.phys_consistency_source,
+            "phys_formula_source": (
+                self.phys_formula_source
+                if self.phys_consistency_source in PHYS_FORMULA_SOURCES
+                and self.phys_consistency_source != PHYS_CONSISTENCY_SOURCE
+                else ""
+            ),
+            "source": self.phys_consistency_source,
+            "source_state_source": (
+                f"source_fit_input_side_{self.phys_consistency_source}"
+                if self._phys_consistency_source_state is not None
+                else "disabled_or_not_built"
+            ),
+            "label_usage": "none",
+            "target_val_usage": "unused_in_main_protocol",
+            "target_eval_usage": "final_eval_only_no_selection",
+            "model_selection_usage": "source_val_gate_only_no_target_eval",
+            "guard_action": (
+                "surface_primary_product_shrink_or_identity_variable_trust_gate"
+                if self.phys_consistency_guard_mode == PHYS_CONSISTENCY_GUARD_PRODUCT_MODE
+                else "shrink_or_identity_variable_trust_gate"
+            ),
+            "base_valid_mask_usage": "diagnostic_only_not_loss_metric_obs_region_mask_or_gate_mask",
+            "min_surface": float(self.phys_consistency_min_surface),
+            "min_rootzone": float(self.phys_consistency_min_rootzone),
+            "strength_surface": float(self.phys_consistency_strength_surface),
+            "strength_rootzone": float(self.phys_consistency_strength_rootzone),
+            "source_state_summary": {
+                "schema_version": PHYS_CONSISTENCY_GUARD_SCHEMA_VERSION,
+                "global_vertical_decoupling_quantiles": dict(
+                    source_state.get("global_vertical_decoupling_quantiles", {})
+                ),
+                "monthly_vertical_decoupling_quantiles": {
+                    str(month): dict(source_state.get("monthly_vertical_decoupling_quantiles", {}).get(str(month), {}))
+                    for month in range(1, 13)
+                },
+                "count": int(
+                    source_state.get("global_vertical_decoupling_quantiles", {}).get("count", 0)
+                    if source_state
+                    else 0
+                ),
+            },
+        }
+        if self._last_phys_consistency_guard_summary:
+            base["last_batch_summary"] = dict(self._last_phys_consistency_guard_summary)
+        return base
+
+    def _phys_consistency_variable_gate(
+        self,
+        x_raw: torch.Tensor,
+        *,
+        region_mask: torch.Tensor | None,
+        months: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if not self.hyper_phys_consistency_guard:
+            self._last_phys_consistency_guard_summary = {"enabled": False}
+            return None
+        gate, summary = phys_consistency_guard_from_raw_tensor(
+            x_raw,
+            region_mask=region_mask,
+            month=months,
+            source_state=self._phys_consistency_source_state,
+            source=self.phys_consistency_source,
+            mode=self.phys_consistency_guard_mode,
+            min_surface=self.phys_consistency_min_surface,
+            min_rootzone=self.phys_consistency_min_rootzone,
+            strength_surface=self.phys_consistency_strength_surface,
+            strength_rootzone=self.phys_consistency_strength_rootzone,
+        )
+        self._last_phys_consistency_guard_summary = summary
+        return gate.to(device=x_raw.device, dtype=x_raw.dtype)
 
     def _lookup_source_context_input_stats(
         self,
@@ -1581,21 +3199,31 @@ class PromptConditionedTrainer:
         global_coverage = float(cache.get("global_coverage", 0.0))
         monthly_stats = cache["monthly_input_emb"]
         region_stats = cache["region_input_emb"]
-        global_stats = cache["global_input_emb"]
+        guard_state = normalize_source_prompt_manifold_guard_state(self._source_prompt_manifold_guard_state)
         rows: List[List[float]] = []
         for rid_tensor, month_tensor in zip(region_ids.detach().cpu(), months.detach().cpu()):
             rid = int(rid_tensor.item())
             month = min(12, max(1, int(month_tensor.item())))
             monthly_count = 0
             finite_coverage = global_coverage
-            distance = 0.0
+            distance_bounded = 0.0
+            input_stats_for_distance: Optional[torch.Tensor] = None
             if 0 <= rid < monthly_counts.shape[0] and int(monthly_counts[rid, month].item()) > 0:
                 monthly_count = int(monthly_counts[rid, month].item())
                 finite_coverage = float(monthly_coverage[rid, month].item())
-                distance = float(torch.linalg.vector_norm(monthly_stats[rid, month] - global_stats).item())
+                input_stats_for_distance = monthly_stats[rid, month]
             elif 0 <= rid < region_counts.shape[0] and int(region_counts[rid].item()) > 0:
                 finite_coverage = float(region_coverage[rid].item())
-                distance = float(torch.linalg.vector_norm(region_stats[rid] - global_stats).item())
+                input_stats_for_distance = region_stats[rid]
+            if input_stats_for_distance is not None and guard_state is not None:
+                source_embeddings = guard_state["source_region_month_input_embeddings"]
+                raw_distance = float(
+                    torch.linalg.vector_norm(
+                        source_embeddings - input_stats_for_distance.detach().cpu().view(1, -1),
+                        dim=1,
+                    ).min().item()
+                )
+                distance_bounded = bounded_source_manifold_distance(raw_distance, guard_state)
             rows.append(
                 (
                     bounded_reliability_features(
@@ -1603,7 +3231,7 @@ class PromptConditionedTrainer:
                     has_monthly_prototype=1.0 if monthly_count > 0 else 0.0,
                     global_context_count=float(global_count),
                     finite_input_coverage=finite_coverage,
-                    prompt_to_source_manifold_distance=distance,
+                    source_manifold_distance_bounded=distance_bounded,
                     )
                     + [0.0] * schema_len
                 )[:schema_len]
@@ -1650,9 +3278,12 @@ class PromptConditionedTrainer:
         region_ids: torch.Tensor,
         months: torch.Tensor,
         x_raw: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        region_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         z = self._source_stage_prompt(x_norm, region_ids, months, x_raw=x_raw)
         reliability_features: Optional[torch.Tensor] = None
+        source_trust_query: Optional[torch.Tensor] = None
+        z_phys: Optional[torch.Tensor] = None
         if (
             isinstance(self.model, HyperAdapterConditionalResUNet)
             and getattr(self.model, "uses_source_residual_prior", False)
@@ -1663,7 +3294,27 @@ class PromptConditionedTrainer:
                 device=x_norm.device,
                 dtype=x_norm.dtype,
             )
-        return z, reliability_features
+        if (
+            isinstance(self.model, HyperAdapterConditionalResUNet)
+            and self._source_trust_bank_state is not None
+            and source_trust_query_requires_separate_bank(self.source_trust_query_mode)
+        ):
+            raw = x_raw if x_raw is not None else x_norm
+            raw_query = self._raw_da_trust_query_from_tensor(raw, region_ids, months)
+            if self.source_trust_query_mode == SOURCE_TRUST_QUERY_MODE_BLENDED_RAW_DA:
+                source_trust_query = blend_prompt_and_raw_trust_query(z, raw_query)
+            else:
+                source_trust_query = raw_query
+            if self.hyper_phys_agreement_guard:
+                self.model.last_phys_agreement_guard_query_source = self.source_trust_query_mode
+                self.model.last_phys_agreement_guard_query = source_trust_query
+        if (
+            isinstance(self.model, HyperAdapterConditionalResUNet)
+            and self.hyper_phys_context_modulation
+        ):
+            raw = x_raw if x_raw is not None else x_norm
+            z_phys = self._phys_context_token_from_tensor(raw, region_ids, months, region_mask=region_mask)
+        return z, reliability_features, source_trust_query, z_phys
 
     def refresh_source_context_monthly_prototypes(self) -> None:
         """Rebuild source-fit prompt prototypes after restored normalization stats."""
@@ -1673,6 +3324,10 @@ class PromptConditionedTrainer:
         )
         if self.source_episode_prompt_policy == "context_monthly_prototype" or needs_source_reliability:
             self._load_or_build_source_context_monthly_prototypes()
+        if self.hyper_source_manifold_guard:
+            self._build_source_prompt_manifold_guard_state()
+        if self.hyper_source_trust_routing:
+            self._build_source_trust_bank_state()
 
     def _compute_increment_stats(self) -> None:
         print(f"Computing increment stats from training dataset (n={len(self.train_dataset)})...")
@@ -1808,12 +3463,67 @@ class PromptConditionedTrainer:
         denom = mask.sum().clamp_min(1.0)
         return residual.square().mul(mask).sum().div(denom) * float(self.hyper_residual_magnitude_penalty)
 
+    def _prediction_increment_for_physical_sign(self, pred: torch.Tensor) -> torch.Tensor:
+        """Return prediction in physical increment units before sign checks."""
+        if not self.target_increment_normalization:
+            return pred
+        if self._inc_mean is None or self._inc_std is None:
+            return pred
+        mean = torch.as_tensor(self._inc_mean, device=pred.device, dtype=pred.dtype).view(1, -1, 1, 1)
+        std = torch.as_tensor(self._inc_std, device=pred.device, dtype=pred.dtype).view(1, -1, 1, 1)
+        return pred * std + mean
+
+    def _phys_formula_gain_sign_consistency_penalty(
+        self,
+        pred: torch.Tensor,
+        x_raw: Optional[torch.Tensor],
+        loss_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Weakly discourage high-confidence TB innovations from opposing increments.
+
+        L-band TB has a negative soil-moisture sensitivity in this design:
+        d_p > 0 is dry-direction support, so wet_support = -tanh(d_p). Predicted
+        physical increments should not strongly oppose that support.
+        """
+        zero = pred.new_zeros(())
+        weight = float(self.hyper_phys_consistency_regularization_weight)
+        if weight <= 0.0:
+            return zero
+        if self.phys_context_source != PHYS_FORMULA_GAIN_SOURCE:
+            return zero
+        if x_raw is None:
+            return zero
+        if x_raw.ndim != 4 or x_raw.shape[1] < 11:
+            return zero
+        raw = x_raw.to(device=pred.device, dtype=pred.dtype)
+        eps = pred.new_tensor(1e-6)
+        d_h = (raw[:, 5] - raw[:, 9]) / (raw[:, 7].abs() + eps)
+        d_v = (raw[:, 6] - raw[:, 10]) / (raw[:, 8].abs() + eps)
+        wet_support = -torch.tanh(0.5 * (d_h + d_v))
+        confidence = torch.maximum(torch.tanh(d_h.abs()), torch.tanh(d_v.abs())).detach()
+        finite = torch.isfinite(wet_support) & torch.isfinite(confidence)
+        pred_phys = self._prediction_increment_for_physical_sign(pred)
+        pred_surface = pred_phys[:, 0]
+        pred_rootzone = pred_phys[:, 1] if pred_phys.shape[1] > 1 else pred_surface
+        surface_conflict = torch.relu(-(pred_surface * wet_support))
+        rootzone_conflict = torch.relu(-(pred_rootzone * wet_support))
+        conflict = surface_conflict + 0.5 * rootzone_conflict
+        mask = loss_mask
+        if mask.ndim == 4:
+            mask = mask[:, 0]
+        mask = mask.to(device=pred.device, dtype=torch.bool)
+        valid = finite & mask
+        denom = valid.float().sum().clamp_min(1.0)
+        weighted = conflict * confidence * valid.to(dtype=pred.dtype)
+        return weighted.sum().div(denom) * weight
+
     def _apply_hyperda_regularization(
         self,
         losses: Dict[str, torch.Tensor],
         *,
         pred: torch.Tensor,
         x_norm: torch.Tensor,
+        x_raw: Optional[torch.Tensor],
         z: torch.Tensor,
         reliability_features: Optional[torch.Tensor],
         loss_mask: torch.Tensor,
@@ -1826,16 +3536,23 @@ class PromptConditionedTrainer:
             loss_mask,
         )
         entropy_penalty = self._coefficient_entropy_penalty(z)
-        total_extra = residual_penalty + entropy_penalty
+        phys_sign_penalty = self._phys_formula_gain_sign_consistency_penalty(
+            pred,
+            x_raw,
+            loss_mask,
+        )
+        total_extra = residual_penalty + entropy_penalty + phys_sign_penalty
         if torch.is_tensor(total_extra) and total_extra.requires_grad:
             losses = dict(losses)
             losses["hyper_residual_magnitude_loss"] = residual_penalty
             losses["hyper_coeff_entropy_floor_loss"] = entropy_penalty
+            losses["hyper_phys_formula_sign_consistency_loss"] = phys_sign_penalty
             losses["total_loss"] = losses["total_loss"] + total_extra
         else:
             losses = dict(losses)
             losses["hyper_residual_magnitude_loss"] = residual_penalty.detach()
             losses["hyper_coeff_entropy_floor_loss"] = entropy_penalty.detach()
+            losses["hyper_phys_formula_sign_consistency_loss"] = phys_sign_penalty.detach()
         return losses
 
     def _abort_amp_failure(
@@ -1896,6 +3613,7 @@ class PromptConditionedTrainer:
         latitude_weight: Optional[torch.Tensor] = None,
         *,
         x_raw: Optional[torch.Tensor] = None,
+        region_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Forward pass + loss for prompt-conditioned model.
 
@@ -1904,29 +3622,68 @@ class PromptConditionedTrainer:
         if x_raw is None:
             x_raw = x_norm
 
+        def model_forward_with_optional_trust(
+            reliability_features_arg: Optional[torch.Tensor],
+            source_trust_query_arg: Optional[torch.Tensor],
+            z_phys_arg: Optional[torch.Tensor],
+            variable_trust_gate_arg: Optional[torch.Tensor],
+        ) -> torch.Tensor:
+            kwargs: Dict[str, Any] = {}
+            if isinstance(self.model, HyperAdapterConditionalResUNet) and reliability_features_arg is not None:
+                kwargs["reliability_features"] = reliability_features_arg
+            if isinstance(self.model, HyperAdapterConditionalResUNet) and self._source_trust_bank_state is not None:
+                kwargs["source_trust_bank"] = self._source_trust_bank_state
+                if source_trust_query_arg is not None:
+                    kwargs["source_trust_query"] = source_trust_query_arg
+            if isinstance(self.model, HyperAdapterConditionalResUNet) and z_phys_arg is not None:
+                kwargs["z_phys"] = z_phys_arg
+            if isinstance(self.model, HyperAdapterConditionalResUNet) and variable_trust_gate_arg is not None:
+                kwargs["variable_trust_gate"] = variable_trust_gate_arg
+            if isinstance(self.model, HyperAdapterConditionalResUNet):
+                kwargs["x_raw"] = x_raw
+            if isinstance(self.model, HyperAdapterConditionalResUNet) and self._phys_gain_source_bank is not None:
+                kwargs["phys_gain_bank"] = self._phys_gain_source_bank
+            return self.model(x_norm, z, **kwargs)
+
         if self.use_amp:
             with autocast('cuda'):
-                z, reliability_features = self._source_stage_prompt_and_reliability(
+                z, reliability_features, source_trust_query, z_phys = self._source_stage_prompt_and_reliability(
                     x_norm,
                     region_ids,
                     months,
                     x_raw=x_raw,
+                    region_mask=region_mask,
                 )
-                if reliability_features is not None:
-                    pred = self.model(x_norm, z, reliability_features=reliability_features)
-                else:
-                    pred = self.model(x_norm, z)
+                variable_trust_gate = self._phys_consistency_variable_gate(
+                    x_raw,
+                    region_mask=region_mask,
+                    months=months,
+                )
+                pred = model_forward_with_optional_trust(
+                    reliability_features,
+                    source_trust_query,
+                    z_phys,
+                    variable_trust_gate,
+                )
         else:
-            z, reliability_features = self._source_stage_prompt_and_reliability(
+            z, reliability_features, source_trust_query, z_phys = self._source_stage_prompt_and_reliability(
                 x_norm,
                 region_ids,
                 months,
                 x_raw=x_raw,
+                region_mask=region_mask,
             )
-            if reliability_features is not None:
-                pred = self.model(x_norm, z, reliability_features=reliability_features)
-            else:
-                pred = self.model(x_norm, z)
+            variable_trust_gate = self._phys_consistency_variable_gate(
+                x_raw,
+                region_mask=region_mask,
+                months=months,
+            )
+            pred = model_forward_with_optional_trust(
+                reliability_features,
+                source_trust_query,
+                z_phys,
+                variable_trust_gate,
+            )
 
         # Cast to fp32 for numerical stability in loss
         pred = pred.float()
@@ -1936,6 +3693,7 @@ class PromptConditionedTrainer:
             losses,
             pred=pred,
             x_norm=x_norm,
+            x_raw=x_raw,
             z=z,
             reliability_features=reliability_features,
             loss_mask=loss_mask,
@@ -2008,6 +3766,9 @@ class PromptConditionedTrainer:
                 loss_mask = batch["loss_mask"].to(self.device)
                 region_ids = batch["region_ids"].to(self.device)
                 months = batch["months"].to(self.device)
+                region_mask = batch.get("region_mask", batch.get("active_region_mask"))
+                if region_mask is not None:
+                    region_mask = region_mask.to(self.device)
                 latitude_weight = batch.get("latitude_weight")
                 if latitude_weight is not None:
                     latitude_weight = latitude_weight.to(self.device)
@@ -2019,23 +3780,41 @@ class PromptConditionedTrainer:
                     inc_std_t = torch.from_numpy(self._inc_std).to(x.device).view(1, 2, 1, 1)
                     target = (target - inc_mean_t) / inc_std_t
 
-                z, reliability_features = self._source_stage_prompt_and_reliability(
+                z, reliability_features, source_trust_query, z_phys = self._source_stage_prompt_and_reliability(
                     x_norm,
                     region_ids,
                     months,
                     x_raw=x,
+                    region_mask=region_mask,
+                )
+                variable_trust_gate = self._phys_consistency_variable_gate(
+                    x,
+                    region_mask=region_mask,
+                    months=months,
                 )
                 source_base_pred = self.model(
                     x_norm,
                     z,
                     rho=0.0,
                     reliability_features=reliability_features,
+                    source_trust_bank=self._source_trust_bank_state,
+                    source_trust_query=source_trust_query,
+                    z_phys=z_phys,
+                    variable_trust_gate=variable_trust_gate,
+                    x_raw=x,
+                    phys_gain_bank=self._phys_gain_source_bank,
                 )
                 full_residual_pred = self.model(
                     x_norm,
                     z,
                     rho=1.0,
                     reliability_features=reliability_features,
+                    source_trust_bank=self._source_trust_bank_state,
+                    source_trust_query=source_trust_query,
+                    z_phys=z_phys,
+                    variable_trust_gate=variable_trust_gate,
+                    x_raw=x,
+                    phys_gain_bank=self._phys_gain_source_bank,
                 )
                 residual_delta = full_residual_pred - source_base_pred
                 for rho_candidate in self.source_val_gain_grid:
@@ -2165,6 +3944,7 @@ class PromptConditionedTrainer:
         if self.source_val_dataset is None:
             return {}
 
+        self._refresh_source_trust_bank_if_enabled()
         self.model.eval()
         self.prompt_encoder.eval()
         loader = self._build_dataloader(self.source_val_dataset)
@@ -2195,6 +3975,9 @@ class PromptConditionedTrainer:
                 loss_mask = batch["loss_mask"].to(self.device)
                 region_ids = batch["region_ids"].to(self.device)
                 months = batch["months"].to(self.device)
+                region_mask = batch.get("region_mask", batch.get("active_region_mask"))
+                if region_mask is not None:
+                    region_mask = region_mask.to(self.device)
                 latitude_weight = batch.get("latitude_weight")
                 if latitude_weight is not None:
                     latitude_weight = latitude_weight.to(self.device)
@@ -2212,14 +3995,34 @@ class PromptConditionedTrainer:
                     inc_std_t = torch.from_numpy(self._inc_std).to(x.device).view(1, 2, 1, 1)
                     target = (target - inc_mean_t) / inc_std_t
 
-                z, reliability_features = self._source_stage_prompt_and_reliability(
+                z, reliability_features, source_trust_query, z_phys = self._source_stage_prompt_and_reliability(
                     x_norm,
                     region_ids,
                     months,
                     x_raw=x,
+                    region_mask=region_mask,
                 )
-                if reliability_features is not None:
-                    pred = self.model(x_norm, z, reliability_features=reliability_features)
+                if isinstance(self.model, HyperAdapterConditionalResUNet):
+                    kwargs: Dict[str, Any] = {}
+                    if reliability_features is not None:
+                        kwargs["reliability_features"] = reliability_features
+                    if self._source_trust_bank_state is not None:
+                        kwargs["source_trust_bank"] = self._source_trust_bank_state
+                        if source_trust_query is not None:
+                            kwargs["source_trust_query"] = source_trust_query
+                    if z_phys is not None:
+                        kwargs["z_phys"] = z_phys
+                    variable_trust_gate = self._phys_consistency_variable_gate(
+                        x,
+                        region_mask=region_mask,
+                        months=months,
+                    )
+                    if variable_trust_gate is not None:
+                        kwargs["variable_trust_gate"] = variable_trust_gate
+                    kwargs["x_raw"] = x
+                    if self._phys_gain_source_bank is not None:
+                        kwargs["phys_gain_bank"] = self._phys_gain_source_bank
+                    pred = self.model(x_norm, z, **kwargs)
                 else:
                     pred = self.model(x_norm, z)
 
@@ -2301,6 +4104,11 @@ class PromptConditionedTrainer:
                 alpha_grid=alphas,
                 prompt_quality_metrics=prompt_quality,
                 trace_path=trace_path,
+                alpha_selection_objective=(
+                    "dual_variable_cvar_safe_score"
+                    if self.selection_metric == "source_val_dual_variable_cvar_safe_score"
+                    else "transfer_safe_score"
+                ),
             )
             gain_results["prompt_quality"] = prompt_quality
             gain_results["source_val_loss"] = total_loss / max(n_batches, 1)
@@ -2326,6 +4134,116 @@ class PromptConditionedTrainer:
             gain_results.update(rho_selection)
             return gain_results
 
+    def _run_eval_only_source_val(self, *, verbose: bool = True) -> None:
+        """Evaluate and checkpoint a deterministic source-stage configuration."""
+        epoch = 0
+        train_loss = float("nan")
+        gain_results = self._calibrate_source_val_residual_gain()
+        source_val_metrics = self._make_source_val_metrics(gain_results) if gain_results else {}
+        selected_value, maximize_selection = self._selection_value(
+            train_loss=train_loss,
+            source_val_metrics=source_val_metrics,
+            gain_results=gain_results,
+        )
+        if not np.isfinite(selected_value):
+            selected_value = float("-inf") if maximize_selection else float("inf")
+        self.best_selection_metric = self.selection_metric
+        self.best_selection_value = selected_value
+        if maximize_selection:
+            self.best_safe_score = selected_value
+        else:
+            self.best_loss = selected_value
+        record: Dict[str, Any] = {
+            "epoch": epoch,
+            "eval_only": True,
+            "trainable_scope": self.trainable_scope,
+            "total_loss": train_loss,
+            "surface_loss": float("nan"),
+            "rootzone_loss": float("nan"),
+            "valid_pixel_count": 0,
+            "lr": float(self.optimizer.param_groups[0]["lr"]),
+            "elapsed_s": 0.0,
+            "skipped_steps": self._skipped_steps,
+        }
+        record.update(source_val_metrics)
+        if gain_results:
+            record["alpha_selection_objective"] = gain_results.get(
+                "alpha_selection_objective",
+                "transfer_safe_score",
+            )
+            record["selection_score"] = gain_results.get("selection_score", float("nan"))
+            record["dual_variable_cvar_score"] = gain_results.get("dual_variable_cvar_score", float("nan"))
+            record["dual_variable_non_degradation"] = gain_results.get(
+                "dual_variable_non_degradation",
+                False,
+            )
+            record["best_alpha_surface"] = gain_results.get("best_alpha_surface", 1.0)
+            record["best_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
+        self.train_history.append(record)
+        if source_val_metrics:
+            self.val_history.append({"epoch": epoch, **source_val_metrics, **{
+                "selection_score": gain_results.get("selection_score", float("nan")) if gain_results else float("nan"),
+                "dual_variable_cvar_score": gain_results.get("dual_variable_cvar_score", float("nan")) if gain_results else float("nan"),
+                "dual_variable_non_degradation": gain_results.get("dual_variable_non_degradation", False) if gain_results else False,
+                "alpha_selection_objective": gain_results.get("alpha_selection_objective", "transfer_safe_score") if gain_results else "transfer_safe_score",
+            }})
+        self.save_checkpoint(
+            self.checkpoint_dir / "best.pt",
+            epoch,
+            selected_value,
+            "best_eval_only_source_val",
+            gain_results=gain_results,
+            selection_value=selected_value,
+        )
+        self.save_checkpoint(
+            self.checkpoint_dir / "checkpoint_best_source_val_transfer_safe_score.pt",
+            epoch,
+            selected_value,
+            "best_source_val_transfer_safe_score",
+            gain_results=gain_results,
+            selection_value=selected_value,
+        )
+        self.save_checkpoint(
+            self.checkpoint_dir / "last.pt",
+            epoch,
+            selected_value,
+            "last_eval_only_source_val",
+            gain_results=gain_results,
+            selection_value=selected_value,
+        )
+        self.save_checkpoint(
+            self.checkpoint_dir / "checkpoint_latest.pt",
+            epoch,
+            selected_value,
+            "latest_eval_only_source_val",
+            gain_results=gain_results,
+            selection_value=selected_value,
+        )
+        self.save_checkpoint(
+            self.checkpoint_dir / f"checkpoint_epoch_{epoch:03d}.pt",
+            epoch,
+            selected_value,
+            f"epoch_{epoch:03d}_eval_only_source_val",
+            gain_results=gain_results,
+            selection_value=selected_value,
+        )
+        self.current_epoch = 0
+        if self._jsonl_logger is not None:
+            self._jsonl_logger.log_epoch(record)
+            if source_val_metrics:
+                self._jsonl_logger.log_eval({"epoch": epoch, **source_val_metrics})
+        if verbose:
+            line = (
+                "Eval-only source_val complete | "
+                f"{self.best_selection_metric}={self.best_selection_value:.6f} "
+                f"safe={self.best_safe_score:.6f} "
+                f"trainable_scope={self.trainable_scope}"
+            )
+            if self.run_manager is not None:
+                self.run_manager.log_console(line)
+            else:
+                print(line, flush=True)
+
     def train(self, verbose: bool = True) -> List[Dict[str, float]]:
         dataloader = self._build_dataloader()
         self.model.train()
@@ -2333,6 +4251,13 @@ class PromptConditionedTrainer:
         global_step = 0
         train_start_time = time.time()
         total_steps_per_epoch = len(dataloader)
+        effective_steps_per_epoch = (
+            min(total_steps_per_epoch, self.source_fit_max_batches_per_epoch)
+            if self.source_fit_fast_screen_enabled
+            else total_steps_per_epoch
+        )
+        self.source_fit_full_batches_per_epoch = int(total_steps_per_epoch)
+        self.source_fit_effective_batches_per_epoch = int(effective_steps_per_epoch)
 
         # Training start header
         num_model_params = sum(p.numel() for p in self.model.parameters())
@@ -2361,8 +4286,11 @@ class PromptConditionedTrainer:
             f"  Hyper rel init:  {self.hyper_reliability_init}",
             f"  Hyper saliency:  beta={self.hyper_source_saliency_prior_beta} application={self.hyper_source_saliency_prior_application} path={self.hyper_source_saliency_prior_path or 'none'}",
             f"  Hyper manifold:  enabled={self.hyper_prompt_manifold_reliability} strength={self.hyper_prompt_manifold_reliability_strength}",
+            f"  Source manifold guard: enabled={self.hyper_source_manifold_guard} strength={self.hyper_source_manifold_guard_strength}",
+            f"  Phys consistency guard: enabled={self.hyper_phys_consistency_guard} mode={self.phys_consistency_guard_mode}",
             f"  Hyper FiLM:      {self.hyper_enable_film}",
             f"  Hyper adapters:  {self.hyper_enable_adapters}",
+            f"  Hyper phys consistency reg: {self.hyper_phys_consistency_regularization_weight}",
             f"  Hyper residual penalty: {self.hyper_residual_magnitude_penalty}",
             f"  Hyper coeff entropy: floor={self.hyper_coeff_entropy_floor} penalty={self.hyper_coeff_entropy_penalty}",
             f"  Prior form:      {self.zero_shot_prior_form}",
@@ -2393,6 +4321,8 @@ class PromptConditionedTrainer:
             f"  Train samples:   {len(self.train_dataset)}",
             f"  Source regions:  {self.source_regions}",
             f"  Steps/epoch:     {total_steps_per_epoch}",
+            f"  Effective steps: {effective_steps_per_epoch}",
+            f"  Source fit cap:  {self.source_fit_max_batches_per_epoch}",
         ]
         if self.init_from_source_base_checkpoint:
             header_lines.append(f"  Source base ckpt:{self.init_from_source_base_checkpoint}")
@@ -2415,6 +4345,20 @@ class PromptConditionedTrainer:
                     "The device may be in an error state. Try rebooting or using a different GPU."
                 )
 
+        if self.max_epochs <= 0:
+            if verbose:
+                line = "  max_epochs=0: running eval-only source_val checkpoint path"
+                if self.run_manager is not None:
+                    self.run_manager.log_console(line)
+                else:
+                    print(line, flush=True)
+            self._run_eval_only_source_val(verbose=verbose)
+            self._save_output_csvs()
+            self._save_stable_source_val_plateau_checkpoint()
+            if self.run_manager is not None:
+                self.run_manager.close_console_log()
+            return self.train_history
+
         for epoch in range(self.current_epoch, self.max_epochs):
             epoch_losses = []
             epoch_surface_losses = []
@@ -2426,7 +4370,13 @@ class PromptConditionedTrainer:
             self.optimizer.zero_grad()
 
             next_batch_start = time.time()
+            epoch_batches_seen = 0
             for batch_idx, batch in enumerate(dataloader):
+                if (
+                    self.source_fit_fast_screen_enabled
+                    and epoch_batches_seen >= self.source_fit_max_batches_per_epoch
+                ):
+                    break
                 iter_start = time.time()
                 data_wait_sec = iter_start - next_batch_start
                 x = batch["x"].to(self.device)
@@ -2435,6 +4385,9 @@ class PromptConditionedTrainer:
                 loss_mask = batch["loss_mask"].to(self.device)
                 region_ids = batch["region_ids"].to(self.device)
                 months = batch["months"].to(self.device)
+                region_mask = batch.get("region_mask", batch.get("active_region_mask"))
+                if region_mask is not None:
+                    region_mask = region_mask.to(self.device)
                 latitude_weight = batch.get("latitude_weight")
                 if latitude_weight is not None:
                     latitude_weight = latitude_weight.to(self.device)
@@ -2465,6 +4418,7 @@ class PromptConditionedTrainer:
                     x_norm, target, loss_mask, region_ids, months,
                     latitude_weight=latitude_weight,
                     x_raw=x,
+                    region_mask=region_mask,
                 )
 
                 # Optional CUDA sync for precise error attribution (debug only)
@@ -2543,6 +4497,7 @@ class PromptConditionedTrainer:
                     losses.get("valid_pixel_count", losses.get("valid_weight_sum", 0)).item()
                 )
                 epoch_valid_counts.append(valid_count)
+                epoch_batches_seen += 1
 
                 # Per-step logging
                 if batch_idx % self.log_every_steps == 0:
@@ -2650,6 +4605,8 @@ class PromptConditionedTrainer:
                 global_step += 1
                 next_batch_start = time.time()
 
+            if not epoch_losses:
+                raise RuntimeError("No valid source_fit batches were processed in this epoch")
             avg_loss = float(np.mean(epoch_losses))
             avg_surface = float(np.mean(epoch_surface_losses))
             avg_rootzone = float(np.mean(epoch_rootzone_losses))
@@ -2697,7 +4654,19 @@ class PromptConditionedTrainer:
                     log_data = {"epoch": epoch}
                     log_data.update(source_val_metrics)
                     if gain_results:
+                        log_data["alpha_selection_objective"] = gain_results.get(
+                            "alpha_selection_objective",
+                            "transfer_safe_score",
+                        )
                         log_data["selection_score"] = gain_results.get("selection_score", float("nan"))
+                        log_data["dual_variable_cvar_score"] = gain_results.get(
+                            "dual_variable_cvar_score",
+                            float("nan"),
+                        )
+                        log_data["dual_variable_non_degradation"] = gain_results.get(
+                            "dual_variable_non_degradation",
+                            False,
+                        )
                         log_data["best_alpha_surface"] = gain_results.get("best_alpha_surface", 1.0)
                         log_data["best_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
                     self._jsonl_logger.log_eval(log_data)
@@ -2721,8 +4690,24 @@ class PromptConditionedTrainer:
                     else selected_value < current_best
                 )
             safe_score = (
-                float(gain_results["selection_score"])
-                if gain_results and "selection_score" in gain_results
+                float(
+                    gain_results[
+                        "dual_variable_cvar_score"
+                        if self.selection_metric == "source_val_dual_variable_cvar_safe_score"
+                        else "selection_score"
+                    ]
+                )
+                if gain_results
+                and (
+                    (
+                        self.selection_metric == "source_val_dual_variable_cvar_safe_score"
+                        and "dual_variable_cvar_score" in gain_results
+                    )
+                    or (
+                        self.selection_metric != "source_val_dual_variable_cvar_safe_score"
+                        and "selection_score" in gain_results
+                    )
+                )
                 else float("-inf")
             )
             is_best_safe_score = ran_source_val_eval and safe_score > self.best_safe_score
@@ -2787,15 +4772,43 @@ class PromptConditionedTrainer:
                 "lr": float(self.optimizer.param_groups[0]["lr"]),
                 "elapsed_s": elapsed,
                 "skipped_steps": self._skipped_steps,
+                "source_fit_batches_seen": int(epoch_batches_seen),
+                "source_fit_full_batches_per_epoch": int(self.source_fit_full_batches_per_epoch),
+                "source_fit_effective_batches_per_epoch": int(self.source_fit_effective_batches_per_epoch),
+                "source_fit_fast_screen_enabled": bool(self.source_fit_fast_screen_enabled),
             }
             record.update(source_val_metrics)
             if gain_results:
+                record["alpha_selection_objective"] = gain_results.get(
+                    "alpha_selection_objective",
+                    "transfer_safe_score",
+                )
                 record["selection_score"] = gain_results.get("selection_score", float("nan"))
+                record["dual_variable_cvar_score"] = gain_results.get("dual_variable_cvar_score", float("nan"))
+                record["dual_variable_non_degradation"] = gain_results.get(
+                    "dual_variable_non_degradation",
+                    False,
+                )
                 record["best_alpha_surface"] = gain_results.get("best_alpha_surface", 1.0)
                 record["best_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
             self.train_history.append(record)
             if source_val_metrics:
-                self.val_history.append({"epoch": epoch, **source_val_metrics})
+                val_record = {"epoch": epoch, **source_val_metrics}
+                if gain_results:
+                    val_record["dual_variable_cvar_score"] = gain_results.get(
+                        "dual_variable_cvar_score",
+                        float("nan"),
+                    )
+                    val_record["dual_variable_non_degradation"] = gain_results.get(
+                        "dual_variable_non_degradation",
+                        False,
+                    )
+                    val_record["selection_score"] = gain_results.get("selection_score", float("nan"))
+                    val_record["alpha_selection_objective"] = gain_results.get(
+                        "alpha_selection_objective",
+                        "transfer_safe_score",
+                    )
+                self.val_history.append(val_record)
             self.current_epoch = epoch + 1
 
             # JSONL epoch log
@@ -2863,12 +4876,47 @@ class PromptConditionedTrainer:
 
         # Save CSV output files
         self._save_output_csvs()
+        self._save_stable_source_val_plateau_checkpoint()
 
         # Close console.log if opened
         if self.run_manager is not None:
             self.run_manager.close_console_log()
 
         return self.train_history
+
+    def _save_stable_source_val_plateau_checkpoint(self) -> Optional[Dict[str, Any]]:
+        """Save the earliest source-val plateau checkpoint under a stable alias."""
+        selected = select_stable_source_val_plateau_checkpoint(
+            self.val_history,
+            checkpoint_dir=self.checkpoint_dir,
+        )
+        if not selected:
+            return None
+        source_path = Path(selected["checkpoint_path"])
+        if not source_path.exists():
+            return None
+        checkpoint = torch.load(source_path, map_location="cpu", weights_only=False)
+        checkpoint["stable_source_val_plateau_policy"] = dict(selected)
+        checkpoint["tag"] = "best_source_val_plateau_early"
+        checkpoint["selection_policy"] = STABLE_SOURCE_VAL_PLATEAU_POLICY
+        checkpoint["selection_source"] = "source_val_only"
+        checkpoint["target_val_usage"] = "unused_in_main_protocol"
+        checkpoint["target_eval_usage"] = "final_eval_only_no_selection"
+        config = dict(checkpoint.get("config", {}))
+        config["stable_source_val_plateau_policy"] = dict(selected)
+        config["checkpoint_selection_policy"] = STABLE_SOURCE_VAL_PLATEAU_POLICY
+        config["checkpoint_selection_source"] = "source_val_only"
+        checkpoint["config"] = config
+        target_path = self.checkpoint_dir / "checkpoint_best_source_val_plateau_early.pt"
+        torch.save(checkpoint, target_path)
+        selected["checkpoint_path"] = str(target_path)
+        if self.run_manager is not None:
+            self.run_manager.log_console(
+                "  stable_source_val_plateau_checkpoint="
+                f"{target_path} epoch={selected['epoch']} "
+                f"score={selected['dual_variable_cvar_score']:.6f}"
+            )
+        return selected
 
     def _save_output_csvs(self) -> None:
         """Save all CSV output files to checkpoint_dir."""
@@ -2906,6 +4954,7 @@ class PromptConditionedTrainer:
 
     def _save_readme(self) -> None:
         """Save a human-readable README with training summary."""
+        self._refresh_source_trust_bank_if_enabled()
         num_model_params = sum(p.numel() for p in self.model.parameters())
         num_pe_params = sum(p.numel() for p in self.prompt_encoder.parameters())
         trainable_count = self._trainable_scope_metadata["trainable_parameter_count"]
@@ -2936,8 +4985,24 @@ class PromptConditionedTrainer:
             f"- **Hyper source saliency prior path**: {self.hyper_source_saliency_prior_path or 'none'}",
             f"- **Hyper prompt manifold reliability**: {self.hyper_prompt_manifold_reliability}",
             f"- **Hyper prompt manifold reliability strength**: {self.hyper_prompt_manifold_reliability_strength}",
+            f"- **Hyper source manifold guard**: {self.hyper_source_manifold_guard}",
+            f"- **Hyper source manifold guard strength**: {self.hyper_source_manifold_guard_strength}",
+            f"- **Source manifold guard calibration**: {self.source_manifold_guard_calibration}",
+            f"- **Hyper source trust routing**: {self.hyper_source_trust_routing}",
+            f"- **Hyper source trust strength**: {self.hyper_source_trust_strength}",
+            f"- **Hyper source trust top-m**: {self.hyper_source_trust_top_m}",
+            f"- **Hyper source trust variable gate**: {self.hyper_source_trust_variable_gate}",
+            f"- **Source trust bank calibration**: {self.source_trust_bank_calibration}",
+            f"- **Source trust query mode**: {self.source_trust_query_mode}",
+            f"- **Trust bank hash**: {self._source_trust_bank_summary().get('trust_bank_hash', 'none') or 'none'}",
+            f"- **Hyper phys consistency guard**: {self.hyper_phys_consistency_guard}",
+            f"- **Phys consistency guard mode**: {self.phys_consistency_guard_mode}",
+            f"- **Phys consistency source**: {self.phys_consistency_source}",
+            f"- **Phys consistency min surface/rootzone**: {self.phys_consistency_min_surface}/{self.phys_consistency_min_rootzone}",
+            f"- **Phys consistency strength surface/rootzone**: {self.phys_consistency_strength_surface}/{self.phys_consistency_strength_rootzone}",
             f"- **Hyper FiLM enabled**: {self.hyper_enable_film}",
             f"- **Hyper adapters enabled**: {self.hyper_enable_adapters}",
+            f"- **Hyper phys consistency regularization weight**: {self.hyper_phys_consistency_regularization_weight}",
             f"- **Hyper residual magnitude penalty**: {self.hyper_residual_magnitude_penalty}",
             f"- **Hyper coefficient entropy floor**: {self.hyper_coeff_entropy_floor}",
             f"- **Hyper coefficient entropy penalty**: {self.hyper_coeff_entropy_penalty}",
@@ -2955,6 +5020,10 @@ class PromptConditionedTrainer:
             f"- **Dataset backend**: {self.dataset_backend}",
             f"- **Tensor cache load mode**: {self.tensor_cache_load_mode}",
             f"- **Train batch sampler**: {self.train_batch_sampler}",
+            f"- **Source fit max batches per epoch**: {self.source_fit_max_batches_per_epoch}",
+            f"- **Source fit fast-screen enabled**: {self.source_fit_fast_screen_enabled}",
+            f"- **Source fit full batches per epoch**: {self.source_fit_full_batches_per_epoch}",
+            f"- **Source fit effective batches per epoch**: {self.source_fit_effective_batches_per_epoch}",
             f"- **Num workers**: {self.num_workers}",
             f"- **Persistent workers**: {self.persistent_workers}",
             f"- **Prefetch factor**: {self.prefetch_factor if self.prefetch_factor is not None else 'none'}",
@@ -2981,6 +5050,8 @@ class PromptConditionedTrainer:
             f"- **Inc normalization**: {self.target_increment_normalization}",
             f"- **Zero raw init**: {self.zero_raw_increment_init}",
             f"- **Selection metric**: {self.selection_metric}",
+            f"- **Stable source-val plateau policy**: {STABLE_SOURCE_VAL_PLATEAU_POLICY}",
+            f"- **Stable source-val plateau margin**: {STABLE_SOURCE_VAL_PLATEAU_MARGIN}",
             f"- **Residual gain**: {self.source_val_residual_gain}",
             f"- **Source regions**: {self.source_regions}",
             f"- **Train samples**: {len(self.train_dataset)}",
@@ -3011,6 +5082,7 @@ class PromptConditionedTrainer:
             f"- `summary.json` — training summary",
             f"- `checkpoint_latest.pt` — latest epoch checkpoint",
             f"- `checkpoint_best_source_val_transfer_safe_score.pt` — best transfer-safe checkpoint",
+            f"- `checkpoint_best_source_val_plateau_early.pt` — earliest non-degrading source-val plateau checkpoint",
             f"",
         ]
         readme_path = self.checkpoint_dir / "README_training_summary.md"
@@ -3027,6 +5099,7 @@ class PromptConditionedTrainer:
         selection_value: Optional[float] = None,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._refresh_source_trust_bank_if_enabled()
         resolved_selection_value = float(loss if selection_value is None else selection_value)
         checkpoint: Dict[str, Any] = {
             "tag": tag,
@@ -3045,6 +5118,10 @@ class PromptConditionedTrainer:
             "timestamp": get_timestamp(),
             "model_state_dict": self.model.state_dict(),
             "prompt_encoder_state_dict": self.prompt_encoder.state_dict(),
+            "source_prompt_manifold_guard_state": self._source_prompt_manifold_guard_state,
+            "source_trust_bank_state": self._source_trust_bank_state,
+            "phys_consistency_source_state": self._phys_consistency_source_state,
+            "phys_gain_source_bank_state": self._phys_gain_source_bank,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "train_history": self.train_history,
@@ -3080,8 +5157,73 @@ class PromptConditionedTrainer:
                 ),
                 "hyper_prompt_manifold_reliability": self.hyper_prompt_manifold_reliability,
                 "hyper_prompt_manifold_reliability_strength": self.hyper_prompt_manifold_reliability_strength,
+                "hyper_source_manifold_guard": self.hyper_source_manifold_guard,
+                "hyper_source_manifold_guard_strength": self.hyper_source_manifold_guard_strength,
+                "hyper_source_manifold_guard_distance_key": self.hyper_source_manifold_guard_distance_key,
+                "hyper_source_manifold_guard_min_multiplier": self.hyper_source_manifold_guard_min_multiplier,
+                "source_manifold_guard_calibration": self.source_manifold_guard_calibration,
+                "source_prompt_manifold_guard_summary": self._source_prompt_manifold_guard_summary(),
+                "hyper_source_trust_routing": self.hyper_source_trust_routing,
+                "hyper_source_trust_strength": self.hyper_source_trust_strength,
+                "hyper_source_trust_top_m": self.hyper_source_trust_top_m,
+                "hyper_source_trust_variable_gate": self.hyper_source_trust_variable_gate,
+                "source_trust_bank_calibration": self.source_trust_bank_calibration,
+                "source_trust_query_mode": self.source_trust_query_mode,
+                "source_trust_bank_summary": self._source_trust_bank_summary(),
+                "source_trust_bank_reuse_metadata": dict(self.source_trust_bank_reuse_metadata),
+                "source_trust_bank_cache_mode": self.source_trust_bank_cache_mode,
+                "source_trust_bank_cache_hit": self.source_trust_bank_cache_hit,
+                "source_trust_bank_cache_path": self.source_trust_bank_cache_path,
+                "source_trust_bank_cache_key": self.source_trust_bank_cache_key,
+                "trust_bank_hash": self._source_trust_bank_summary().get("trust_bank_hash", ""),
+                "source_neighbor_top_m": self._source_trust_bank_summary().get("source_neighbor_top_m", 0),
+                "trust_strength": self._source_trust_bank_summary().get("trust_strength", 0.0),
+                "hyper_phys_agreement_guard": self.hyper_phys_agreement_guard,
+                "hyper_phys_agreement_guard_strength": self.hyper_phys_agreement_guard_strength,
+                "hyper_phys_agreement_guard_min_multiplier": self.hyper_phys_agreement_guard_min_multiplier,
+                "hyper_phys_agreement_guard_risk_rule": self.hyper_phys_agreement_guard_risk_rule,
+                "phys_agreement_guard_summary": self._phys_agreement_guard_summary(),
+                "hyper_phys_context_modulation": self.hyper_phys_context_modulation,
+                "phys_context_source": self.phys_context_source,
+                "hyper_phys_formula_operator": self.hyper_phys_formula_operator,
+                "phys_formula_mode": self.phys_formula_mode if self.hyper_phys_formula_operator else "",
+                "phys_formula_source": self.phys_formula_source if self.hyper_phys_formula_operator else "",
+                "phys_formula_feature_schema": (
+                    list(phys_formula_feature_schema_for_source(self.phys_formula_source))
+                    if self.hyper_phys_formula_operator
+                    else []
+                ),
+                "hyper_phys_delta_scale": self.hyper_phys_delta_scale,
+                "hyper_phys_gate_init": self.hyper_phys_gate_init,
+                "hyper_operator_droppath_p": self.hyper_operator_droppath_p,
+                "phys_operator_summary": self._phys_operator_summary(),
+                "phys_formula_feature_summary": dict(self._last_phys_formula_feature_summary),
+                "hyper_phys_consistency_guard": self.hyper_phys_consistency_guard,
+                "phys_consistency_guard_mode": self.phys_consistency_guard_mode,
+                "phys_consistency_source": self.phys_consistency_source,
+                "phys_consistency_min_surface": self.phys_consistency_min_surface,
+                "phys_consistency_min_rootzone": self.phys_consistency_min_rootzone,
+                "phys_consistency_strength_surface": self.phys_consistency_strength_surface,
+                "phys_consistency_strength_rootzone": self.phys_consistency_strength_rootzone,
+                "phys_consistency_guard_summary": self._phys_consistency_guard_summary(),
+                "phys_consistency_source_state": self._phys_consistency_source_state,
+                "hyper_phys_gain_basis_residual": self.hyper_phys_gain_basis_residual,
+                "hyper_phys_gain_basis_coeff_scale": self.hyper_phys_gain_basis_coeff_scale,
+                "hyper_phys_gain_basis_residual_clip": self.hyper_phys_gain_basis_residual_clip,
+                "hyper_phys_gain_basis_beta_init": self.hyper_phys_gain_basis_beta_init,
+                "phys_gain_basis_summary": self._phys_gain_basis_summary(),
+                "phys_gain_source_bank_summary": self._phys_gain_source_bank_summary(),
+                "hyper_phys_consistency_regularization_weight": self.hyper_phys_consistency_regularization_weight,
+                "trust_routing_geometry": "prompt_embedding",
+                "source_trust_query_used_as_neighbor_geometry": bool(
+                    self._source_trust_bank_state is not None
+                    and source_trust_query_requires_separate_bank(self.source_trust_query_mode)
+                    and not self.hyper_phys_agreement_guard
+                ),
+                "source_manifold_distance_schema": dict(SOURCE_MANIFOLD_DISTANCE_SCHEMA),
                 "hyper_enable_film": self.hyper_enable_film,
                 "hyper_enable_adapters": self.hyper_enable_adapters,
+                "hyper_phys_consistency_regularization_weight": self.hyper_phys_consistency_regularization_weight,
                 "hyper_residual_magnitude_penalty": self.hyper_residual_magnitude_penalty,
                 "hyper_coeff_entropy_floor": self.hyper_coeff_entropy_floor,
                 "hyper_coeff_entropy_penalty": self.hyper_coeff_entropy_penalty,
@@ -3113,6 +5255,11 @@ class PromptConditionedTrainer:
                 ),
                 "reliability_feature_schema": getattr(self.model, "reliability_feature_schema", []),
                 "reliability_feature_transform": RELIABILITY_FEATURE_TRANSFORM,
+                "per_variable_trust_gate_summary": getattr(
+                    self.model,
+                    "last_variable_trust_gate_summary",
+                    {},
+                ),
                 "target_labels_used_for_adaptation": False,
                 "target_val_usage": "unused_in_main_protocol",
                 "target_eval_usage": "final_eval_only_no_selection",
@@ -3146,6 +5293,10 @@ class PromptConditionedTrainer:
                 "pin_memory": self.pin_memory,
                 "tensor_cache_load_mode": self.tensor_cache_load_mode,
                 "train_batch_sampler": self.train_batch_sampler,
+                "source_fit_max_batches_per_epoch": self.source_fit_max_batches_per_epoch,
+                "source_fit_fast_screen_enabled": self.source_fit_fast_screen_enabled,
+                "source_fit_full_batches_per_epoch": self.source_fit_full_batches_per_epoch,
+                "source_fit_effective_batches_per_epoch": self.source_fit_effective_batches_per_epoch,
                 "target_increment_normalization": self.target_increment_normalization,
                 "zero_raw_increment_init": self.zero_raw_increment_init,
                 "use_amp": self.use_amp,
@@ -3159,6 +5310,8 @@ class PromptConditionedTrainer:
                 "checkpoint_every_n_epochs": self.checkpoint_every_n_epochs,
                 "lambda_amp": self.lambda_amp,
                 "selection_metric": self.selection_metric,
+                "stable_source_val_plateau_policy": STABLE_SOURCE_VAL_PLATEAU_POLICY,
+                "stable_source_val_plateau_margin": STABLE_SOURCE_VAL_PLATEAU_MARGIN,
                 "source_val_residual_gain": self.source_val_residual_gain,
                 "target_region": self.target_region,
                 "adaptation_setting": self.adaptation_setting,
@@ -3186,7 +5339,24 @@ class PromptConditionedTrainer:
             checkpoint["residual_gain_alpha_rootzone"] = gain_results.get("best_alpha_rootzone", 1.0)
             checkpoint["source_val_safe_metrics"] = gain_results
             checkpoint["source_val_gain_grid"] = gain_results.get("alpha_grid", self.source_val_gain_grid)
+            checkpoint["alpha_selection_objective"] = gain_results.get(
+                "alpha_selection_objective",
+                "transfer_safe_score",
+            )
             checkpoint["selection_score"] = gain_results.get("selection_score", float("nan"))
+            checkpoint["dual_variable_cvar_score"] = gain_results.get("dual_variable_cvar_score", float("nan"))
+            checkpoint["dual_variable_non_degradation"] = gain_results.get(
+                "dual_variable_non_degradation",
+                False,
+            )
+            checkpoint["selected_surface_region_skills"] = gain_results.get(
+                "selected_surface_region_skills",
+                {},
+            )
+            checkpoint["selected_rootzone_region_skills"] = gain_results.get(
+                "selected_rootzone_region_skills",
+                {},
+            )
             checkpoint["min_skill"] = gain_results.get("min_skill", float("nan"))
             checkpoint["mean_skill"] = gain_results.get("mean_skill", float("nan"))
         torch.save(checkpoint, path)
@@ -3205,7 +5375,10 @@ class PromptConditionedTrainer:
         self.best_selection_metric = checkpoint.get("best_selection_metric", self.selection_metric)
         if "best_selection_value" in checkpoint:
             self.best_selection_value = float(checkpoint["best_selection_value"])
-        elif self.best_selection_metric == "source_val_transfer_safe_score":
+        elif self.best_selection_metric in {
+            "source_val_transfer_safe_score",
+            "source_val_dual_variable_cvar_safe_score",
+        }:
             self.best_selection_value = float(self.best_safe_score)
         else:
             self.best_selection_value = float(self.best_loss)
@@ -3215,6 +5388,18 @@ class PromptConditionedTrainer:
         self.train_history = checkpoint.get("train_history", [])
         self.val_history = checkpoint.get("val_history", [])
         self.prompt_quality_history = checkpoint.get("prompt_quality_history", [])
+        source_state = checkpoint.get("phys_consistency_source_state")
+        if isinstance(source_state, dict):
+            self._phys_consistency_source_state = source_state
+        elif self.hyper_phys_consistency_guard or self.hyper_phys_formula_operator:
+            config_state = checkpoint.get("config", {}).get("phys_consistency_source_state")
+            if isinstance(config_state, dict):
+                self._phys_consistency_source_state = config_state
+        phys_gain_bank = checkpoint.get("phys_gain_source_bank_state")
+        if isinstance(phys_gain_bank, dict):
+            self._phys_gain_source_bank = phys_gain_bank
+        elif self.hyper_phys_gain_basis_residual and self._phys_gain_source_bank is None:
+            self._build_phys_gain_source_bank()
         resumed_epoch = checkpoint["epoch"] + 1
         self.current_epoch = resumed_epoch
 
@@ -3231,6 +5416,7 @@ class PromptConditionedTrainer:
         return resumed_epoch
 
     def save_summary_json(self, path: Optional[Path] = None) -> None:
+        self._refresh_source_trust_bank_if_enabled()
         has_source_val = self.source_val_dataset is not None
         trainable_count = self._trainable_scope_metadata["trainable_parameter_count"]
         summary: Dict[str, Any] = {
@@ -3270,8 +5456,72 @@ class PromptConditionedTrainer:
             ),
             "hyper_prompt_manifold_reliability": self.hyper_prompt_manifold_reliability,
             "hyper_prompt_manifold_reliability_strength": self.hyper_prompt_manifold_reliability_strength,
+            "hyper_source_manifold_guard": self.hyper_source_manifold_guard,
+            "hyper_source_manifold_guard_strength": self.hyper_source_manifold_guard_strength,
+            "hyper_source_manifold_guard_distance_key": self.hyper_source_manifold_guard_distance_key,
+            "hyper_source_manifold_guard_min_multiplier": self.hyper_source_manifold_guard_min_multiplier,
+            "source_manifold_guard_calibration": self.source_manifold_guard_calibration,
+            "source_prompt_manifold_guard_summary": self._source_prompt_manifold_guard_summary(),
+            "hyper_source_trust_routing": self.hyper_source_trust_routing,
+            "hyper_source_trust_strength": self.hyper_source_trust_strength,
+            "hyper_source_trust_top_m": self.hyper_source_trust_top_m,
+            "hyper_source_trust_variable_gate": self.hyper_source_trust_variable_gate,
+            "source_trust_bank_calibration": self.source_trust_bank_calibration,
+            "source_trust_query_mode": self.source_trust_query_mode,
+            "source_trust_bank_summary": self._source_trust_bank_summary(),
+            "source_trust_bank_reuse_metadata": dict(self.source_trust_bank_reuse_metadata),
+            "source_trust_bank_cache_mode": self.source_trust_bank_cache_mode,
+            "source_trust_bank_cache_hit": self.source_trust_bank_cache_hit,
+            "source_trust_bank_cache_path": self.source_trust_bank_cache_path,
+            "source_trust_bank_cache_key": self.source_trust_bank_cache_key,
+            "trust_bank_hash": self._source_trust_bank_summary().get("trust_bank_hash", ""),
+            "source_neighbor_top_m": self._source_trust_bank_summary().get("source_neighbor_top_m", 0),
+            "trust_strength": self._source_trust_bank_summary().get("trust_strength", 0.0),
+            "hyper_phys_agreement_guard": self.hyper_phys_agreement_guard,
+            "hyper_phys_agreement_guard_strength": self.hyper_phys_agreement_guard_strength,
+            "hyper_phys_agreement_guard_min_multiplier": self.hyper_phys_agreement_guard_min_multiplier,
+            "hyper_phys_agreement_guard_risk_rule": self.hyper_phys_agreement_guard_risk_rule,
+            "phys_agreement_guard_summary": self._phys_agreement_guard_summary(),
+            "hyper_phys_context_modulation": self.hyper_phys_context_modulation,
+            "phys_context_source": self.phys_context_source,
+            "hyper_phys_formula_operator": self.hyper_phys_formula_operator,
+            "phys_formula_mode": self.phys_formula_mode if self.hyper_phys_formula_operator else "",
+            "phys_formula_source": self.phys_formula_source if self.hyper_phys_formula_operator else "",
+            "phys_formula_feature_schema": (
+                list(phys_formula_feature_schema_for_source(self.phys_formula_source))
+                if self.hyper_phys_formula_operator
+                else []
+            ),
+            "hyper_phys_delta_scale": self.hyper_phys_delta_scale,
+            "hyper_phys_gate_init": self.hyper_phys_gate_init,
+            "hyper_operator_droppath_p": self.hyper_operator_droppath_p,
+            "phys_operator_summary": self._phys_operator_summary(),
+            "phys_formula_feature_summary": dict(self._last_phys_formula_feature_summary),
+            "hyper_phys_consistency_guard": self.hyper_phys_consistency_guard,
+            "phys_consistency_guard_mode": self.phys_consistency_guard_mode,
+            "phys_consistency_source": self.phys_consistency_source,
+            "phys_consistency_min_surface": self.phys_consistency_min_surface,
+            "phys_consistency_min_rootzone": self.phys_consistency_min_rootzone,
+            "phys_consistency_strength_surface": self.phys_consistency_strength_surface,
+            "phys_consistency_strength_rootzone": self.phys_consistency_strength_rootzone,
+            "phys_consistency_guard_summary": self._phys_consistency_guard_summary(),
+            "hyper_phys_gain_basis_residual": self.hyper_phys_gain_basis_residual,
+            "hyper_phys_gain_basis_coeff_scale": self.hyper_phys_gain_basis_coeff_scale,
+            "hyper_phys_gain_basis_residual_clip": self.hyper_phys_gain_basis_residual_clip,
+            "hyper_phys_gain_basis_beta_init": self.hyper_phys_gain_basis_beta_init,
+            "phys_gain_basis_summary": self._phys_gain_basis_summary(),
+            "phys_gain_source_bank_summary": self._phys_gain_source_bank_summary(),
+            "hyper_phys_consistency_regularization_weight": self.hyper_phys_consistency_regularization_weight,
+            "trust_routing_geometry": "prompt_embedding",
+            "source_trust_query_used_as_neighbor_geometry": bool(
+                self._source_trust_bank_state is not None
+                and source_trust_query_requires_separate_bank(self.source_trust_query_mode)
+                and not self.hyper_phys_agreement_guard
+            ),
+            "source_manifold_distance_schema": dict(SOURCE_MANIFOLD_DISTANCE_SCHEMA),
             "hyper_enable_film": self.hyper_enable_film,
             "hyper_enable_adapters": self.hyper_enable_adapters,
+            "hyper_phys_consistency_regularization_weight": self.hyper_phys_consistency_regularization_weight,
             "hyper_residual_magnitude_penalty": self.hyper_residual_magnitude_penalty,
             "hyper_coeff_entropy_floor": self.hyper_coeff_entropy_floor,
             "hyper_coeff_entropy_penalty": self.hyper_coeff_entropy_penalty,
@@ -3311,6 +5561,11 @@ class PromptConditionedTrainer:
             "source_prototype_cache_path": self.source_prototype_cache_path,
             "source_prototype_cache_key": self.source_prototype_cache_key,
             "source_prototype_cache_metadata": self.source_prototype_cache_metadata,
+            "source_trust_bank_cache_mode": self.source_trust_bank_cache_mode,
+            "source_trust_bank_cache_hit": self.source_trust_bank_cache_hit,
+            "source_trust_bank_cache_path": self.source_trust_bank_cache_path,
+            "source_trust_bank_cache_key": self.source_trust_bank_cache_key,
+            "source_trust_bank_cache_metadata": self.source_trust_bank_cache_metadata,
             "source_anchor_blend_calibration": self.source_anchor_blend_calibration,
             "hyper_output_head_residual": self.hyper_output_head_residual,
             "trainable_parameters": trainable_count,
@@ -3328,6 +5583,10 @@ class PromptConditionedTrainer:
             "pin_memory": self.pin_memory,
             "tensor_cache_load_mode": self.tensor_cache_load_mode,
             "train_batch_sampler": self.train_batch_sampler,
+            "source_fit_max_batches_per_epoch": self.source_fit_max_batches_per_epoch,
+            "source_fit_fast_screen_enabled": self.source_fit_fast_screen_enabled,
+            "source_fit_full_batches_per_epoch": self.source_fit_full_batches_per_epoch,
+            "source_fit_effective_batches_per_epoch": self.source_fit_effective_batches_per_epoch,
             "eval_every_epochs": self.eval_every_epochs,
             "dataset_backend": self.dataset_backend,
             "source_val_available": has_source_val,
@@ -3335,6 +5594,8 @@ class PromptConditionedTrainer:
             "loss_function": type(self.loss_fn).__name__,
             "lambda_amp": self.lambda_amp,
             "selection_metric": self.selection_metric,
+            "stable_source_val_plateau_policy": STABLE_SOURCE_VAL_PLATEAU_POLICY,
+            "stable_source_val_plateau_margin": STABLE_SOURCE_VAL_PLATEAU_MARGIN,
             "source_val_residual_gain": self.source_val_residual_gain,
             "source_regions": self.source_regions,
             "split_manifest_sha256": self.split_manifest_sha256,
@@ -3422,12 +5683,100 @@ def parse_args():
         help="Conservatively scale adapter residuals by input-side prompt-manifold reliability")
     parser.add_argument("--hyper_prompt_manifold_reliability_strength", type=float, default=0.0,
         help="Strength for prompt-manifold reliability scaling; 0 preserves existing behavior")
+    parser.add_argument("--hyper_source_manifold_guard", type=int, default=0,
+        choices=[0, 1],
+        help="Enable source-side calibrated source-manifold residual guard")
+    parser.add_argument("--hyper_source_manifold_guard_strength", type=float, default=0.25,
+        help="Strength for source-manifold residual shrinkage")
+    parser.add_argument("--hyper_source_manifold_guard_distance_key", type=str, default=SOURCE_MANIFOLD_DISTANCE_KEY,
+        choices=[SOURCE_MANIFOLD_DISTANCE_KEY],
+        help="Reliability feature key used by the source-manifold guard")
+    parser.add_argument("--hyper_source_manifold_guard_min_multiplier", type=float, default=0.0,
+        help="Lower bound for source-manifold guard multiplier")
+    parser.add_argument("--source_manifold_guard_calibration", type=str, default="disabled",
+        choices=list(SOURCE_MANIFOLD_GUARD_CALIBRATIONS),
+        help="Calibration provenance for source-manifold guard")
+    parser.add_argument("--hyper_source_trust_routing", type=int, default=0,
+        choices=[0, 1],
+        help="Enable HyperDA-TRUST source-neighborhood coefficient routing")
+    parser.add_argument("--hyper_source_trust_strength", type=float, default=0.0,
+        help="Blend strength for source-neighborhood consensus; 0 preserves M2.1 logits")
+    parser.add_argument("--hyper_source_trust_top_m", type=int, default=4,
+        help="Number of nearest source prompt prototypes for TRUST consensus")
+    parser.add_argument("--hyper_source_trust_variable_gate", type=int, default=0,
+        choices=[0, 1],
+        help="Enable per-variable residual trust gate metadata/path")
+    parser.add_argument("--source_trust_bank_calibration", type=str, default="disabled",
+        choices=list(SOURCE_TRUST_BANK_CALIBRATIONS),
+        help="Calibration provenance for HyperDA-TRUST source bank")
+    parser.add_argument("--source_trust_query_mode", type=str, default="prompt_embedding",
+        choices=list(SOURCE_TRUST_QUERY_MODES),
+        help="Embedding space used for HyperDA-TRUST nearest-source lookup")
+    parser.add_argument("--hyper_phys_agreement_guard", type=int, default=0,
+        choices=[0, 1],
+        help="Enable M3.5 shrink-only physical neighbor-agreement guard while keeping prompt-space trust routing")
+    parser.add_argument("--hyper_phys_agreement_guard_strength", type=float, default=1.0,
+        help="Strength for M3.5 physical agreement shrinkage; 1 fully disables trust when agreement is zero")
+    parser.add_argument("--hyper_phys_agreement_guard_min_multiplier", type=float, default=0.0,
+        help="Lower bound for M3.5 physical agreement guard multiplier; >0 prevents trust/residual from being fully disabled")
+    parser.add_argument("--hyper_phys_agreement_guard_risk_rule", type=str, default="or",
+        choices=["or", "and"],
+        help="Risk composition for physical agreement guard: 'or' uses max(disagreement, OOD), 'and' requires both via min")
+    parser.add_argument("--hyper_phys_context_modulation", type=int, default=0,
+        choices=[0, 1],
+        help="Enable M3.6 raw input-side physical token residual on operator coefficient logits")
+    parser.add_argument("--phys_context_source", type=str, default="raw_input_side_da_diagnostics",
+        choices=list(PHYS_CONTEXT_SOURCES),
+        help="Input-side source for M3.6 physical context token")
+    parser.add_argument("--hyper_phys_formula_operator", type=int, default=0,
+        choices=[0, 1],
+        help="Enable M3.8 raw formula physical context encoder for operator-logit residual")
+    parser.add_argument("--phys_formula_mode", type=str, default=PHYS_FORMULA_MODE,
+        choices=[PHYS_FORMULA_MODE],
+        help="M3.8 physical formula feature mode")
+    parser.add_argument("--phys_formula_source", type=str, default=PHYS_FORMULA_SOURCE,
+        choices=list(PHYS_FORMULA_SOURCES),
+        help="M3.8/M3.9 physical formula feature source provenance")
+    parser.add_argument("--hyper_phys_delta_scale", type=float, default=0.25,
+        help="Bounded scale for M3.6 physical operator-logit residual")
+    parser.add_argument("--hyper_phys_gate_init", type=float, default=0.90,
+        help="Initial gate value for M3.6 physical operator residual")
+    parser.add_argument("--hyper_operator_droppath_p", type=float, default=0.10,
+        help="Train-mode per-sample DropPath probability for M3.6 physical operator residual")
+    parser.add_argument("--hyper_phys_consistency_guard", type=int, default=0,
+        choices=[0, 1],
+        help="Enable M3.7 deterministic raw input-side physical consistency variable gate")
+    parser.add_argument("--phys_consistency_guard_mode", type=str, default=PHYS_CONSISTENCY_GUARD_MODE,
+        choices=list(PHYS_CONSISTENCY_GUARD_MODES),
+        help="Physical consistency guard formula mode")
+    parser.add_argument("--phys_consistency_source", type=str, default=PHYS_CONSISTENCY_SOURCE,
+        choices=list(PHYS_CONSISTENCY_SOURCES),
+        help="Physical consistency guard source provenance")
+    parser.add_argument("--phys_consistency_min_surface", type=float, default=0.95,
+        help="Lower bound for M3.7 surface residual trust gate")
+    parser.add_argument("--phys_consistency_min_rootzone", type=float, default=0.90,
+        help="Lower bound for M3.7 rootzone residual trust gate")
+    parser.add_argument("--phys_consistency_strength_surface", type=float, default=0.10,
+        help="Shrink strength for M3.7 surface residual trust gate")
+    parser.add_argument("--phys_consistency_strength_rootzone", type=float, default=0.15,
+        help="Shrink strength for M3.7 rootzone residual trust gate")
+    parser.add_argument("--hyper_phys_gain_basis_residual", type=int, default=0,
+        choices=[0, 1],
+        help="Enable M3.12 physics-gain basis HyperDA residual branch")
+    parser.add_argument("--hyper_phys_gain_basis_coeff_scale", type=float, default=0.05,
+        help="Bounded coefficient scale for M3.12 physics-gain residual")
+    parser.add_argument("--hyper_phys_gain_basis_residual_clip", type=float, default=0.25,
+        help="Per-variable clip for M3.12 physics-gain residual maps")
+    parser.add_argument("--hyper_phys_gain_basis_beta_init", type=float, default=0.50,
+        help="Initial beta gate for M3.12 physics-gain residual branch")
     parser.add_argument("--hyper_enable_film", type=int, default=1,
         choices=[0, 1],
         help="Enable FiLM conditioning in HyperDA model")
     parser.add_argument("--hyper_enable_adapters", type=int, default=1,
         choices=[0, 1],
         help="Enable HyperDA adapter residuals in forward and staged optimizer")
+    parser.add_argument("--hyper_phys_consistency_regularization_weight", type=float, default=0.0,
+        help="Weak source-fit sign-consistency regularizer for M3.14 formula-gain physics; 0 disables it.")
     parser.add_argument("--hyper_residual_magnitude_penalty", type=float, default=0.0,
         help="Optional source-stage penalty on source-base residual magnitude for M2.3-style conservative residual priors.")
     parser.add_argument("--hyper_coeff_entropy_floor", type=float, default=0.0,
@@ -3486,6 +5835,8 @@ def parse_args():
     parser.add_argument("--train_batch_sampler", type=str, default="random",
         choices=list(TRAIN_BATCH_SAMPLERS),
         help="Training batch sampler policy.")
+    parser.add_argument("--source_fit_max_batches_per_epoch", type=int, default=0,
+        help="Optional source_fit training batch cap per epoch for fast source-side screening. 0 disables the cap and preserves full training.")
     parser.add_argument("--prefetch_factor", type=int, default=2,
         help="DataLoader prefetch_factor when num_workers > 0.")
     parser.add_argument("--source_prototype_cache_dir", type=str, default=None,
@@ -3493,6 +5844,11 @@ def parse_args():
     parser.add_argument("--source_prototype_cache_mode", type=str, default="off",
         choices=list(SOURCE_PROTOTYPE_CACHE_MODES),
         help="Source prototype cache mode: off, read_write, or refresh.")
+    parser.add_argument("--source_trust_bank_cache_dir", type=str, default=None,
+        help="Optional directory for source_fit/source_val HyperDA trust-bank cache.")
+    parser.add_argument("--source_trust_bank_cache_mode", type=str, default="off",
+        choices=list(SOURCE_TRUST_BANK_CACHE_MODES),
+        help="Source trust-bank cache mode: off, read_write, or refresh.")
     parser.add_argument("--wandb_mode", type=str, default="disabled",
         choices=["disabled", "offline", "online"])
     parser.add_argument("--wandb_project", type=str, default="hydroda-ood")
@@ -3515,7 +5871,8 @@ def parse_args():
         help="For staged HyperDA, initialize frozen source-base enc/dec/head weights from a source-only SmallResUNet checkpoint.")
     parser.add_argument("--trainable_scope", type=str, default="all", choices=list(TRAINABLE_SCOPES),
         help="Trainability policy. 'all' preserves existing behavior; "
-             "'source_base_frozen_adapter_film' freezes source base enc/dec/head and trains prompt/FiLM/HyperDA adapters.")
+             "'source_base_frozen_adapter_film' freezes source base enc/dec/head and trains prompt/FiLM/HyperDA adapters; "
+             "'phys_gain_guard_only' is the M3_13 eval-only frozen M3_1 guard preset.")
     parser.add_argument("--source_episode_prompt_policy", type=str, default="current_region_prompt",
         choices=["current_region_prompt", "context_monthly_prototype"],
         help="Source-stage prompt policy metadata. context_monthly_prototype matches zero/few-shot deployment episodes.")
@@ -3528,7 +5885,12 @@ def parse_args():
     parser.add_argument("--checkpoint_every", type=int, default=5,
         help="Save epoch checkpoint every N epochs (default 5)")
     parser.add_argument("--selection_metric", type=str, default="source_val_transfer_safe_score",
-        choices=["source_val_transfer_safe_score", "source_val_loss", "train_loss"],
+        choices=[
+            "source_val_transfer_safe_score",
+            "source_val_dual_variable_cvar_safe_score",
+            "source_val_loss",
+            "train_loss",
+        ],
         help="Metric for checkpoint selection (default source_val_transfer_safe_score)")
     parser.add_argument("--lambda_amp", type=float, default=0.0,
         help="Amplitude penalty weight for WeightedMaskedHuberLoss (default 0.0 = disabled)")
@@ -3545,6 +5907,81 @@ def parse_args():
         parser.error("--hyper_source_saliency_prior_beta must be non-negative")
     if args.hyper_prompt_manifold_reliability_strength < 0.0:
         parser.error("--hyper_prompt_manifold_reliability_strength must be non-negative")
+    if args.hyper_source_manifold_guard_strength < 0.0:
+        parser.error("--hyper_source_manifold_guard_strength must be non-negative")
+    if not 0.0 <= args.hyper_source_manifold_guard_min_multiplier <= 1.0:
+        parser.error("--hyper_source_manifold_guard_min_multiplier must be in [0, 1]")
+    if bool(args.hyper_source_manifold_guard) and args.source_manifold_guard_calibration == "disabled":
+        args.source_manifold_guard_calibration = "source_fit_source_val_only"
+    if bool(args.hyper_source_trust_routing) and args.source_trust_bank_calibration == "disabled":
+        args.source_trust_bank_calibration = "source_fit_source_val_only"
+    if args.hyper_source_trust_strength < 0.0 or args.hyper_source_trust_strength > 1.0:
+        parser.error("--hyper_source_trust_strength must be in [0, 1]")
+    if args.hyper_source_trust_top_m < 1:
+        parser.error("--hyper_source_trust_top_m must be >= 1")
+    if args.source_fit_max_batches_per_epoch < 0:
+        parser.error("--source_fit_max_batches_per_epoch must be >= 0")
+    if args.hyper_phys_agreement_guard_strength < 0.0 or args.hyper_phys_agreement_guard_strength > 1.0:
+        parser.error("--hyper_phys_agreement_guard_strength must be in [0, 1]")
+    if args.hyper_phys_agreement_guard_min_multiplier < 0.0 or args.hyper_phys_agreement_guard_min_multiplier > 1.0:
+        parser.error("--hyper_phys_agreement_guard_min_multiplier must be in [0, 1]")
+    if bool(args.hyper_phys_agreement_guard):
+        args.hyper_source_trust_routing = 1
+        if args.source_trust_bank_calibration == "disabled":
+            args.source_trust_bank_calibration = "source_fit_source_val_only"
+        if not source_trust_query_requires_separate_bank(args.source_trust_query_mode):
+            parser.error(
+                "--hyper_phys_agreement_guard requires --source_trust_query_mode "
+                "raw_input_side_da_diagnostics or blended_prompt_raw_da_0p25"
+            )
+    if bool(args.hyper_phys_consistency_guard):
+        args.hyper_source_trust_variable_gate = 1
+        if args.zero_shot_prior_form == "direct_hyper":
+            parser.error("--hyper_phys_consistency_guard requires a source residual prior form")
+    if not 0.0 <= args.phys_consistency_min_surface <= 1.0:
+        parser.error("--phys_consistency_min_surface must be in [0, 1]")
+    if not 0.0 <= args.phys_consistency_min_rootzone <= 1.0:
+        parser.error("--phys_consistency_min_rootzone must be in [0, 1]")
+    if args.phys_consistency_strength_surface < 0.0:
+        parser.error("--phys_consistency_strength_surface must be non-negative")
+    if args.phys_consistency_strength_rootzone < 0.0:
+        parser.error("--phys_consistency_strength_rootzone must be non-negative")
+    if args.hyper_phys_gain_basis_coeff_scale < 0.0:
+        parser.error("--hyper_phys_gain_basis_coeff_scale must be non-negative")
+    if args.hyper_phys_gain_basis_residual_clip <= 0.0:
+        parser.error("--hyper_phys_gain_basis_residual_clip must be positive")
+    if args.hyper_phys_gain_basis_beta_init <= 0.0 or args.hyper_phys_gain_basis_beta_init >= 1.0:
+        parser.error("--hyper_phys_gain_basis_beta_init must be between 0 and 1")
+    if bool(args.hyper_phys_gain_basis_residual) and args.model_type != "hyperda_basis_adapter":
+        parser.error("--hyper_phys_gain_basis_residual requires --model_type hyperda_basis_adapter")
+    if args.trainable_scope in {"none", "phys_gain_guard_only"} and int(args.max_epochs) > 0:
+        parser.error(f"--trainable_scope {args.trainable_scope} is eval-only and requires --max_epochs 0")
+    if args.hyper_phys_delta_scale < 0.0:
+        parser.error("--hyper_phys_delta_scale must be non-negative")
+    if args.hyper_phys_gate_init <= 0.0 or args.hyper_phys_gate_init >= 1.0:
+        parser.error("--hyper_phys_gate_init must be between 0 and 1")
+    if args.hyper_operator_droppath_p < 0.0 or args.hyper_operator_droppath_p >= 1.0:
+        parser.error("--hyper_operator_droppath_p must be in [0, 1)")
+    if bool(args.hyper_phys_formula_operator):
+        args.hyper_phys_context_modulation = 1
+        args.phys_context_source = args.phys_formula_source
+        if args.phys_consistency_source == PHYS_CONSISTENCY_SOURCE:
+            args.phys_consistency_source = args.phys_formula_source
+        if args.phys_consistency_guard_mode == PHYS_CONSISTENCY_GUARD_MODE:
+            args.phys_consistency_guard_mode = PHYS_CONSISTENCY_GUARD_PRODUCT_MODE
+    if args.phys_context_source in PHYS_FORMULA_SOURCES:
+        args.hyper_phys_formula_operator = 1
+        args.phys_formula_source = args.phys_context_source
+    if args.hyper_phys_consistency_regularization_weight < 0.0:
+        parser.error("--hyper_phys_consistency_regularization_weight must be non-negative")
+    if (
+        args.hyper_phys_consistency_regularization_weight > 0.0
+        and args.phys_context_source != PHYS_FORMULA_GAIN_SOURCE
+    ):
+        parser.error(
+            "--hyper_phys_consistency_regularization_weight is currently supported only with "
+            "--phys_context_source raw_input_side_formula_gain"
+        )
     if args.hyper_residual_magnitude_penalty < 0.0:
         parser.error("--hyper_residual_magnitude_penalty must be non-negative")
     if args.hyper_coeff_entropy_floor < 0.0:
@@ -3673,8 +6110,53 @@ def main():
         "hyper_source_saliency_prior_application": args.hyper_source_saliency_prior_application,
         "hyper_prompt_manifold_reliability": bool(args.hyper_prompt_manifold_reliability),
         "hyper_prompt_manifold_reliability_strength": args.hyper_prompt_manifold_reliability_strength,
+        "hyper_source_manifold_guard": bool(args.hyper_source_manifold_guard),
+        "hyper_source_manifold_guard_strength": args.hyper_source_manifold_guard_strength,
+        "hyper_source_manifold_guard_distance_key": args.hyper_source_manifold_guard_distance_key,
+        "hyper_source_manifold_guard_min_multiplier": args.hyper_source_manifold_guard_min_multiplier,
+        "source_manifold_guard_calibration": args.source_manifold_guard_calibration,
+        "source_manifold_guard_calibration_source": args.source_manifold_guard_calibration,
+        "source_manifold_distance_schema": dict(SOURCE_MANIFOLD_DISTANCE_SCHEMA),
+        "hyper_source_trust_routing": bool(args.hyper_source_trust_routing),
+        "hyper_source_trust_strength": args.hyper_source_trust_strength,
+        "hyper_source_trust_top_m": args.hyper_source_trust_top_m,
+        "hyper_source_trust_variable_gate": bool(args.hyper_source_trust_variable_gate),
+        "source_trust_bank_calibration": args.source_trust_bank_calibration,
+        "source_trust_query_mode": args.source_trust_query_mode,
+        "hyper_phys_agreement_guard": bool(args.hyper_phys_agreement_guard),
+        "hyper_phys_agreement_guard_strength": args.hyper_phys_agreement_guard_strength,
+        "hyper_phys_agreement_guard_min_multiplier": args.hyper_phys_agreement_guard_min_multiplier,
+        "hyper_phys_agreement_guard_risk_rule": args.hyper_phys_agreement_guard_risk_rule,
+        "hyper_phys_context_modulation": bool(args.hyper_phys_context_modulation),
+        "phys_context_source": args.phys_context_source,
+        "hyper_phys_formula_operator": bool(args.hyper_phys_formula_operator),
+        "phys_formula_mode": args.phys_formula_mode,
+        "phys_formula_source": args.phys_formula_source,
+        "phys_formula_feature_schema": list(phys_formula_feature_schema_for_source(args.phys_formula_source)),
+        "hyper_phys_delta_scale": args.hyper_phys_delta_scale,
+        "hyper_phys_gate_init": args.hyper_phys_gate_init,
+        "hyper_operator_droppath_p": args.hyper_operator_droppath_p,
+        "hyper_phys_consistency_guard": bool(args.hyper_phys_consistency_guard),
+        "phys_consistency_guard_mode": args.phys_consistency_guard_mode,
+        "phys_consistency_source": args.phys_consistency_source,
+        "phys_consistency_min_surface": args.phys_consistency_min_surface,
+        "phys_consistency_min_rootzone": args.phys_consistency_min_rootzone,
+        "phys_consistency_strength_surface": args.phys_consistency_strength_surface,
+        "phys_consistency_strength_rootzone": args.phys_consistency_strength_rootzone,
+        "hyper_phys_gain_basis_residual": bool(args.hyper_phys_gain_basis_residual),
+        "hyper_phys_gain_basis_coeff_scale": args.hyper_phys_gain_basis_coeff_scale,
+        "hyper_phys_gain_basis_residual_clip": args.hyper_phys_gain_basis_residual_clip,
+        "hyper_phys_gain_basis_beta_init": args.hyper_phys_gain_basis_beta_init,
+        "phys_gain_basis_formula_schema": (
+            phys_gain_basis_formula_schema()
+            if bool(args.hyper_phys_gain_basis_residual)
+            else {}
+        ),
+        "hyper_phys_consistency_regularization_weight": args.hyper_phys_consistency_regularization_weight,
+        "trust_routing_geometry": "prompt_embedding",
         "hyper_enable_film": bool(args.hyper_enable_film),
         "hyper_enable_adapters": bool(args.hyper_enable_adapters),
+        "hyper_phys_consistency_regularization_weight": args.hyper_phys_consistency_regularization_weight,
         "hyper_residual_magnitude_penalty": args.hyper_residual_magnitude_penalty,
         "hyper_coeff_entropy_floor": args.hyper_coeff_entropy_floor,
         "hyper_coeff_entropy_penalty": args.hyper_coeff_entropy_penalty,
@@ -3725,11 +6207,15 @@ def main():
         "max_year_cache_entries": args.max_year_cache_entries,
         "tensor_cache_load_mode": args.tensor_cache_load_mode,
         "train_batch_sampler": args.train_batch_sampler,
+        "source_fit_max_batches_per_epoch": args.source_fit_max_batches_per_epoch,
+        "source_fit_fast_screen_enabled": args.source_fit_max_batches_per_epoch > 0,
         "prefetch_factor": args.prefetch_factor if args.num_workers > 0 else None,
         "persistent_workers": args.num_workers > 0,
         "pin_memory": str(device) == "cuda",
         "source_prototype_cache_dir": args.source_prototype_cache_dir,
         "source_prototype_cache_mode": args.source_prototype_cache_mode,
+        "source_trust_bank_cache_dir": args.source_trust_bank_cache_dir,
+        "source_trust_bank_cache_mode": args.source_trust_bank_cache_mode,
         "source_regions": source_regions,
         "source_region_episode_policy": SOURCE_REGION_EPISODE_POLICY,
     }
@@ -3874,6 +6360,28 @@ def main():
             hyper_source_saliency_prior_application=args.hyper_source_saliency_prior_application,
             hyper_prompt_manifold_reliability=bool(args.hyper_prompt_manifold_reliability),
             hyper_prompt_manifold_reliability_strength=args.hyper_prompt_manifold_reliability_strength,
+            hyper_source_manifold_guard=bool(args.hyper_source_manifold_guard),
+            hyper_source_manifold_guard_strength=args.hyper_source_manifold_guard_strength,
+            hyper_source_manifold_guard_distance_key=args.hyper_source_manifold_guard_distance_key,
+            hyper_source_manifold_guard_min_multiplier=args.hyper_source_manifold_guard_min_multiplier,
+            source_manifold_guard_calibration=args.source_manifold_guard_calibration,
+            hyper_source_trust_routing=bool(args.hyper_source_trust_routing),
+            hyper_source_trust_strength=args.hyper_source_trust_strength,
+            hyper_source_trust_top_m=args.hyper_source_trust_top_m,
+            hyper_source_trust_variable_gate=bool(args.hyper_source_trust_variable_gate),
+            hyper_phys_agreement_guard=bool(args.hyper_phys_agreement_guard),
+            hyper_phys_agreement_guard_strength=args.hyper_phys_agreement_guard_strength,
+            hyper_phys_agreement_guard_min_multiplier=args.hyper_phys_agreement_guard_min_multiplier,
+            hyper_phys_agreement_guard_risk_rule=args.hyper_phys_agreement_guard_risk_rule,
+            hyper_phys_context_modulation=bool(args.hyper_phys_context_modulation),
+            hyper_phys_delta_scale=args.hyper_phys_delta_scale,
+            hyper_phys_gate_init=args.hyper_phys_gate_init,
+            hyper_operator_droppath_p=args.hyper_operator_droppath_p,
+            phys_context_source=args.phys_context_source,
+            hyper_phys_gain_basis_residual=bool(args.hyper_phys_gain_basis_residual),
+            hyper_phys_gain_basis_coeff_scale=args.hyper_phys_gain_basis_coeff_scale,
+            hyper_phys_gain_basis_residual_clip=args.hyper_phys_gain_basis_residual_clip,
+            hyper_phys_gain_basis_beta_init=args.hyper_phys_gain_basis_beta_init,
             hyper_enable_film=bool(args.hyper_enable_film),
             hyper_enable_adapters=bool(args.hyper_enable_adapters),
             zero_shot_prior_form=args.zero_shot_prior_form,
@@ -3956,6 +6464,13 @@ def main():
     # Optional resume: pre-load checkpoint before creating Trainer
     resumed_epoch = 0
     ckpt = None
+    prompt_init_ckpt: Optional[Dict[str, Any]] = None
+    prompt_init_ch_mean = None
+    prompt_init_ch_std = None
+    prompt_init_inc_mean = None
+    prompt_init_inc_std = None
+    initial_source_trust_bank_state = None
+    initial_source_trust_bank_source = ""
 
     if args.resume_from:
         resume_path = Path(args.resume_from)
@@ -3968,6 +6483,49 @@ def main():
         print(f"  resuming from epoch {resumed_epoch} ({resumed_epoch} already completed)")
 
         # Auto-derive output_dir from checkpoint path (already done before RunManager creation)
+    elif args.init_from_prompt_checkpoint:
+        ckpt_path = Path(args.init_from_prompt_checkpoint)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"--init_from_prompt_checkpoint not found: {ckpt_path}")
+        print(f"\nInitializing from prompt checkpoint before trainer setup: {ckpt_path}")
+        prompt_init_ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model_result = model.load_state_dict(prompt_init_ckpt.get("model_state_dict", {}), strict=False)
+        print(
+            "  model init: "
+            f"missing={len(model_result.missing_keys)} unexpected={len(model_result.unexpected_keys)}"
+        )
+        prompt_state = prompt_init_ckpt.get("prompt_encoder_state_dict")
+        if prompt_state is not None:
+            prompt_result = prompt_encoder.load_state_dict(prompt_state, strict=False)
+            print(
+                "  prompt init: "
+                f"missing={len(prompt_result.missing_keys)} unexpected={len(prompt_result.unexpected_keys)}"
+            )
+        cfg = prompt_init_ckpt.get("config", {})
+        if cfg.get("ch_mean") is not None and cfg.get("ch_std") is not None:
+            prompt_init_ch_mean = np.array(cfg["ch_mean"], dtype=np.float32)
+            prompt_init_ch_std = np.array(cfg["ch_std"], dtype=np.float32)
+            source_base_ch_mean = prompt_init_ch_mean
+            source_base_ch_std = prompt_init_ch_std
+            print("  restored input normalization stats from prompt checkpoint")
+        if cfg.get("inc_mean") is not None and cfg.get("inc_std") is not None:
+            prompt_init_inc_mean = np.array(cfg["inc_mean"], dtype=np.float32)
+            prompt_init_inc_std = np.array(cfg["inc_std"], dtype=np.float32)
+            source_base_inc_mean = prompt_init_inc_mean
+            source_base_inc_std = prompt_init_inc_std
+            print("  restored increment normalization stats from prompt checkpoint")
+        if bool(args.hyper_source_trust_routing) and isinstance(
+            prompt_init_ckpt.get("source_trust_bank_state"),
+            dict,
+        ):
+            initial_source_trust_bank_state = prompt_init_ckpt["source_trust_bank_state"]
+            initial_source_trust_bank_source = str(ckpt_path.resolve())
+            print("  found source_trust_bank_state in prompt checkpoint for compatibility reuse")
+        if bool(args.hyper_phys_consistency_guard) and isinstance(
+            prompt_init_ckpt.get("phys_consistency_source_state"),
+            dict,
+        ):
+            run_config["phys_consistency_source_state_reused_from_prompt_checkpoint"] = str(ckpt_path.resolve())
 
     # Create trainer
     trainer = PromptConditionedTrainer(
@@ -4028,8 +6586,43 @@ def main():
         hyper_source_saliency_prior_metadata=source_saliency_metadata,
         hyper_prompt_manifold_reliability=bool(args.hyper_prompt_manifold_reliability),
         hyper_prompt_manifold_reliability_strength=args.hyper_prompt_manifold_reliability_strength,
+        hyper_source_manifold_guard=bool(args.hyper_source_manifold_guard),
+        hyper_source_manifold_guard_strength=args.hyper_source_manifold_guard_strength,
+        hyper_source_manifold_guard_distance_key=args.hyper_source_manifold_guard_distance_key,
+        source_manifold_guard_calibration=args.source_manifold_guard_calibration,
+        hyper_source_manifold_guard_min_multiplier=args.hyper_source_manifold_guard_min_multiplier,
+        hyper_source_trust_routing=bool(args.hyper_source_trust_routing),
+        hyper_source_trust_strength=args.hyper_source_trust_strength,
+        hyper_source_trust_top_m=args.hyper_source_trust_top_m,
+        hyper_source_trust_variable_gate=bool(args.hyper_source_trust_variable_gate),
+        source_trust_bank_calibration=args.source_trust_bank_calibration,
+        source_trust_query_mode=args.source_trust_query_mode,
+        hyper_phys_agreement_guard=bool(args.hyper_phys_agreement_guard),
+        hyper_phys_agreement_guard_strength=args.hyper_phys_agreement_guard_strength,
+        hyper_phys_agreement_guard_min_multiplier=args.hyper_phys_agreement_guard_min_multiplier,
+        hyper_phys_agreement_guard_risk_rule=args.hyper_phys_agreement_guard_risk_rule,
+        hyper_phys_context_modulation=bool(args.hyper_phys_context_modulation),
+        hyper_phys_delta_scale=args.hyper_phys_delta_scale,
+        hyper_phys_gate_init=args.hyper_phys_gate_init,
+        hyper_operator_droppath_p=args.hyper_operator_droppath_p,
+        phys_context_source=args.phys_context_source,
+        hyper_phys_formula_operator=bool(args.hyper_phys_formula_operator),
+        phys_formula_mode=args.phys_formula_mode,
+        phys_formula_source=args.phys_formula_source,
+        hyper_phys_consistency_guard=bool(args.hyper_phys_consistency_guard),
+        phys_consistency_guard_mode=args.phys_consistency_guard_mode,
+        phys_consistency_source=args.phys_consistency_source,
+        phys_consistency_min_surface=args.phys_consistency_min_surface,
+        phys_consistency_min_rootzone=args.phys_consistency_min_rootzone,
+        phys_consistency_strength_surface=args.phys_consistency_strength_surface,
+        phys_consistency_strength_rootzone=args.phys_consistency_strength_rootzone,
+        hyper_phys_gain_basis_residual=bool(args.hyper_phys_gain_basis_residual),
+        hyper_phys_gain_basis_coeff_scale=args.hyper_phys_gain_basis_coeff_scale,
+        hyper_phys_gain_basis_residual_clip=args.hyper_phys_gain_basis_residual_clip,
+        hyper_phys_gain_basis_beta_init=args.hyper_phys_gain_basis_beta_init,
         hyper_enable_film=bool(args.hyper_enable_film),
         hyper_enable_adapters=bool(args.hyper_enable_adapters),
+        hyper_phys_consistency_regularization_weight=args.hyper_phys_consistency_regularization_weight,
         hyper_residual_magnitude_penalty=args.hyper_residual_magnitude_penalty,
         hyper_coeff_entropy_floor=args.hyper_coeff_entropy_floor,
         hyper_coeff_entropy_penalty=args.hyper_coeff_entropy_penalty,
@@ -4049,9 +6642,14 @@ def main():
         dataset_backend=args.dataset_backend,
         tensor_cache_load_mode=args.tensor_cache_load_mode,
         train_batch_sampler=args.train_batch_sampler,
+        source_fit_max_batches_per_epoch=args.source_fit_max_batches_per_epoch,
         prefetch_factor=args.prefetch_factor,
         source_prototype_cache_dir=args.source_prototype_cache_dir,
         source_prototype_cache_mode=args.source_prototype_cache_mode,
+        source_trust_bank_cache_dir=args.source_trust_bank_cache_dir,
+        source_trust_bank_cache_mode=args.source_trust_bank_cache_mode,
+        initial_source_trust_bank_state=initial_source_trust_bank_state,
+        initial_source_trust_bank_source=initial_source_trust_bank_source,
         _resume_ch_mean=source_base_ch_mean,
         _resume_ch_std=source_base_ch_std,
         _resume_inc_mean=source_base_inc_mean,
@@ -4066,13 +6664,6 @@ def main():
         print(f"  Restored: optimizer, scheduler, epoch, best_loss, train_history")
         print(f"  train_history entries so far: {len(trainer.train_history)}")
         print(f"  val_history entries so far: {len(trainer.val_history)}")
-    elif args.init_from_prompt_checkpoint:
-        _load_prompt_checkpoint_initialization(
-            trainer=trainer,
-            checkpoint_path=args.init_from_prompt_checkpoint,
-            device=device,
-        )
-        trainer.refresh_source_context_monthly_prototypes()
 
     run_manager.save_environment_info(gather_runtime_info())
 

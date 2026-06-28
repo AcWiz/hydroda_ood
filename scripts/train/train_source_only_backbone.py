@@ -27,7 +27,7 @@ import numpy as np
 import yaml
 import torch
 
-from hydroda.data.dataset import HydroDADataset
+from hydroda.data.dataset import HydroDADataset, build_hydroda_dataset
 from hydroda.models.resunet import SmallResUNet
 from hydroda.training.trainer import Trainer
 from hydroda.utils.run_manager import RunManager
@@ -44,6 +44,22 @@ CHECKPOINT_DIR = "artifacts/checkpoints/phase4_source_only"
 PROTOCOL_FREEZE_ID = "hyperda_v4_4_zero_few_shot_generalization_2015_2025_context2015_2021_sourceval2022_eval2023_2025"
 PHASE = "phase4_source_only"
 METHOD = "source_pooled_global_backbone"
+
+DG_METHOD_TO_METHOD_ID = {
+    "none": METHOD,
+    "swad": "swad_source_pooled_global_backbone",
+    "mixstyle": "mixstyle_source_pooled_global_backbone",
+    "disam": "disam_source_domain_sharpness_alignment",
+    "udim": "udim_unknown_domain_inconsistency_minimization",
+    "moment_align": "moment_alignment_source_domain_invariance",
+    "iu": "identify_unlearn_source_domain_gradient_ascent",
+    "deep_coral": "deep_coral_target_context_alignment",
+    "tca": "tca_target_context_correlation_alignment",
+    "ssa_reg": "ssa_reg_target_context_subspace_alignment",
+    "self_bootstrap": "self_bootstrap_target_context_consistency_tta",
+}
+# Backward-compatible source-only path remains method=METHOD; DG wrappers use
+# method_id aliases only when --dg_method is explicitly set.
 
 
 def parse_args():
@@ -129,6 +145,56 @@ def parse_args():
         help="Disable residual gain calibration")
     parser.add_argument("--lambda_amp", type=float, default=0.0,
         help="Amplitude penalty weight (0=disabled, default: 0.0)")
+    # Domain generalization baselines
+    parser.add_argument("--dg_method", type=str, default="none",
+        choices=[
+            "none",
+            "swad",
+            "mixstyle",
+            "disam",
+            "udim",
+            "moment_align",
+            "iu",
+            "deep_coral",
+            "tca",
+            "ssa_reg",
+            "self_bootstrap",
+        ],
+        help="Source-side domain generalization method")
+    parser.add_argument("--swad_start_epoch", type=int, default=10)
+    parser.add_argument("--swad_tolerance", type=float, default=0.02)
+    parser.add_argument("--swad_patience", type=int, default=3)
+    parser.add_argument("--mixstyle_p", type=float, default=0.5)
+    parser.add_argument("--mixstyle_alpha", type=float, default=0.1)
+    parser.add_argument("--mixstyle_layers", type=str, default="enc1,enc2")
+    parser.add_argument("--coral_lambda", type=float, default=0.01)
+    parser.add_argument("--coral_feature_layer", type=str, default="bottleneck",
+        choices=["enc1", "enc2", "enc3", "bottleneck"])
+    parser.add_argument("--tca_lambda", type=float, default=0.01)
+    parser.add_argument("--tca_feature_layer", type=str, default="bottleneck",
+        choices=["enc1", "enc2", "enc3", "bottleneck"])
+    parser.add_argument("--ssa_reg_lambda", type=float, default=0.01)
+    parser.add_argument("--ssa_reg_feature_layer", type=str, default="bottleneck",
+        choices=["enc1", "enc2", "enc3", "bottleneck"])
+    parser.add_argument("--ssa_reg_rank", type=int, default=8)
+    parser.add_argument("--self_bootstrap_lambda", type=float, default=0.01)
+    parser.add_argument("--self_bootstrap_noise_std", type=float, default=0.01)
+    parser.add_argument("--self_bootstrap_channel_dropout_p", type=float, default=0.05)
+    parser.add_argument("--disam_rho", type=float, default=0.05)
+    parser.add_argument("--disam_lambda", type=float, default=0.1)
+    parser.add_argument("--udim_rho", type=float, default=0.05)
+    parser.add_argument("--udim_lambda", type=float, default=0.1)
+    parser.add_argument("--moment_align_lambda", type=float, default=0.01)
+    parser.add_argument("--moment_align_feature_layer", type=str, default="bottleneck",
+        choices=["enc1", "enc2", "enc3", "bottleneck"])
+    parser.add_argument("--moment_align_order", type=int, default=2, choices=[1, 2])
+    parser.add_argument("--iu_lambda", type=float, default=0.001)
+    parser.add_argument("--iu_feature_layer", type=str, default="bottleneck",
+        choices=["enc1", "enc2", "enc3", "bottleneck"])
+    parser.add_argument("--iu_top_fraction", type=float, default=0.25)
+    parser.add_argument("--iu_sample_top_fraction", type=float, default=0.5)
+    parser.add_argument("--iu_score_cap", type=float, default=10.0)
+    parser.add_argument("--target_context_batch_size", type=int, default=16)
 
     # First pass: check if --config is provided
     preliminary_args, _ = parser.parse_known_args()
@@ -183,6 +249,10 @@ def parse_args():
 
     args = parser.parse_args()
 
+    if args.dg_method in {"disam", "udim"} and args.accum_steps != 1:
+        print(f"  [dg_method={args.dg_method}] SAM-style two-step updates require accum_steps=1; overriding.")
+        args.accum_steps = 1
+
     if args.adaptation_setting == "target_full_train":
         args.K = None
     elif args.K is None:
@@ -212,13 +282,27 @@ def load_config(config_path: str) -> dict:
 
 def main():
     args = parse_args()
+    method_id = DG_METHOD_TO_METHOD_ID[args.dg_method]
+    target_context_dg_methods = {"deep_coral", "tca", "ssa_reg", "self_bootstrap"}
+    source_mask_grouped_dg_methods = {"disam", "udim", "moment_align", "iu"}
+    baseline_status_by_dg_method = {
+        "disam": "paper_main_candidate_source_only_dg",
+        "udim": "paper_main_candidate_source_only_dg",
+        "moment_align": "paper_main_candidate_source_only_dg",
+        "iu": "paper_main_candidate_source_only_dg",
+        "deep_coral": "internal_diagnostic_old_baseline_not_paper_main",
+        "tca": "diagnostic_runnable_not_paper_main_by_default",
+        "self_bootstrap": "diagnostic_runnable_not_paper_main_by_default",
+    }
+    baseline_status = baseline_status_by_dg_method.get(args.dg_method, "paper_main_transition_us_loro")
 
     # Resolve device
     device = resolve_device(args.device, require_gpu=args.require_gpu)
 
     print("=" * 60)
     print("Phase 4A: Source-Pooled Global Backbone Training")
-    print("  method=source_pooled_global_backbone")
+    print(f"  method={method_id}")
+    print(f"  dg_method={args.dg_method}")
     print("  scope=US-only transition global; leave-one-region-out source pooled")
     print(f"  target_region={args.target_region}  adaptation_setting={args.adaptation_setting}  K={args.K}  seed={args.seed}")
     print(f"  max_epochs={args.max_epochs}  batch_size={args.batch_size}  lr={args.lr}")
@@ -261,22 +345,65 @@ def main():
         "selection_metric": args.selection_metric,
         "apply_source_val_residual_gain": args.apply_source_val_residual_gain,
         "lambda_amp": args.lambda_amp,
+        "dg_method": args.dg_method,
+        "coral_lambda": args.coral_lambda,
+        "coral_feature_layer": args.coral_feature_layer,
+        "tca_lambda": args.tca_lambda,
+        "tca_feature_layer": args.tca_feature_layer,
+        "ssa_reg_lambda": args.ssa_reg_lambda,
+        "ssa_reg_feature_layer": args.ssa_reg_feature_layer,
+        "ssa_reg_rank": args.ssa_reg_rank,
+        "self_bootstrap_lambda": args.self_bootstrap_lambda,
+        "self_bootstrap_noise_std": args.self_bootstrap_noise_std,
+        "self_bootstrap_channel_dropout_p": args.self_bootstrap_channel_dropout_p,
+        "disam_rho": args.disam_rho,
+        "disam_lambda": args.disam_lambda,
+        "udim_rho": args.udim_rho,
+        "udim_lambda": args.udim_lambda,
+        "udim_objective": "source_only_unknown_domain_inconsistency" if args.dg_method == "udim" else "",
+        "moment_align_lambda": args.moment_align_lambda,
+        "moment_align_feature_layer": args.moment_align_feature_layer,
+        "moment_align_order": args.moment_align_order,
+        "iu_lambda": args.iu_lambda,
+        "iu_feature_layer": args.iu_feature_layer,
+        "iu_top_fraction": args.iu_top_fraction,
+        "iu_sample_top_fraction": args.iu_sample_top_fraction,
+        "iu_score_cap": args.iu_score_cap,
+        "iu_objective": "bounded_domain_specific_feature_penalty" if args.dg_method == "iu" else "",
+        "target_context_batch_size": args.target_context_batch_size,
+        "swad_start_epoch": args.swad_start_epoch,
+        "swad_tolerance": args.swad_tolerance,
+        "swad_patience": args.swad_patience,
+        "mixstyle_p": args.mixstyle_p,
+        "mixstyle_alpha": args.mixstyle_alpha,
+        "mixstyle_layers": args.mixstyle_layers,
         "wandb_mode": args.wandb_mode,
         "wandb_project": args.wandb_project,
         "wandb_entity": args.wandb_entity,
         "wandb_tags": args.wandb_tags,
-        "method": METHOD,
+        "method": method_id,
         "baseline_role": "source_pooled_global",
-        "baseline_status": "paper_main_transition_us_loro",
+        "baseline_status": baseline_status,
+        "target_context_usage": "input_side_only" if args.dg_method in target_context_dg_methods else "not_used",
+        "target_support_usage": "not_used",
+        "target_val_usage": "unused_in_main_protocol",
+        "target_eval_usage": "final_eval_only_no_selection",
+        "model_selection_source": "source_val_2022",
         "training_domain_policy": "US_loro_exclude_target_region",
         "train_domains_exclude_target": True,
+        "source_region_episode_batching": False,
+        "source_domain_grouping": (
+            "pooled_sample_region_masks"
+            if args.dg_method in source_mask_grouped_dg_methods
+            else "pooled_source_mask"
+        ),
         "paper_name": "Source-Pooled Global Backbone",
     }
 
     # Create RunManager
     run_manager = RunManager(
         phase=PHASE,
-        method=METHOD,
+        method=method_id,
         target_region=args.target_region,
         config=run_config,
         output_dir=args.output_dir,
@@ -297,12 +424,19 @@ def main():
     run_manager.save_protocol({
         "protocol_freeze_id": PROTOCOL_FREEZE_ID,
         "split_manifest": FREEZE_MANIFEST,
-        "method": METHOD,
+        "method": method_id,
+        "dg_method": args.dg_method,
         "baseline_role": "source_pooled_global",
-        "baseline_status": "paper_main_transition_us_loro",
+        "baseline_status": baseline_status,
         "training_domain_policy": "US_loro_exclude_target_region",
+        "source_region_episode_batching": False,
+        "source_domain_grouping": run_config["source_domain_grouping"],
         "normalization_source": "source_fit_only",
-        "model_selection_source": "source_val",
+        "model_selection_source": "source_val_2022",
+        "target_context_usage": run_config["target_context_usage"],
+        "target_support_usage": "not_used",
+        "target_val_usage": "unused_in_main_protocol",
+        "target_eval_usage": "final_eval_only_no_selection",
     })
 
     # Setup logging
@@ -336,9 +470,11 @@ def main():
         print(f"  checkpoint epoch={ckpt['epoch']}  best_loss={ckpt.get('best_loss', 'N/A')}")
         print(f"  resuming from epoch {resumed_epoch} ({resumed_epoch} already completed)")
 
+    source_regions = [f"US-R{i}" for i in range(1, 7) if f"US-R{i}" != args.target_region]
+
     # Create source_fit dataset (2015-2021, excluding target region)
     print(f"\nLoading source_fit dataset...")
-    train_dataset = HydroDADataset(
+    train_dataset = build_hydroda_dataset(
         da_nc_path=DA_NC,
         region_masks_nc=REGION_MASKS_NC,
         splits_json=SPLITS_JSON,
@@ -348,12 +484,19 @@ def main():
         seed=args.seed,
         adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
+        dataset_backend="netcdf",
     )
     print(f"  source_fit samples: {len(train_dataset)}")
+    if args.dg_method in source_mask_grouped_dg_methods:
+        print(f"  source domain grouping: pooled sample masks for {source_regions}")
+    target_context_dates_hash = train_dataset._split_entry.get(
+        "target_context_dates_hash",
+        train_dataset._split_entry.get("target_train_dates_hash", ""),
+    )
 
     # Create source_val dataset (2022, excluding target region)
     print(f"\nLoading source_val dataset...")
-    source_val_dataset = HydroDADataset(
+    source_val_dataset = build_hydroda_dataset(
         da_nc_path=DA_NC,
         region_masks_nc=REGION_MASKS_NC,
         splits_json=SPLITS_JSON,
@@ -363,6 +506,7 @@ def main():
         seed=args.seed,
         adaptation_setting=args.adaptation_setting,
         freeze_manifest=FREEZE_MANIFEST,
+        dataset_backend="netcdf",
     )
     print(f"  source_val samples: {len(source_val_dataset)}")
 
@@ -373,6 +517,32 @@ def main():
             f"Re-run build_kdate_splits.py with the updated code that populates source_val_dates."
         )
 
+    target_context_dataset = None
+    if args.dg_method in target_context_dg_methods:
+        method_label = {
+            "deep_coral": "Deep CORAL",
+            "tca": "TCA",
+            "ssa_reg": "SSA-Reg",
+            "self_bootstrap": "Self-Bootstrap",
+        }[args.dg_method]
+        print(f"\nLoading input-only target_context dataset for {method_label}...")
+        target_context_dataset = HydroDADataset(
+            da_nc_path=DA_NC,
+            region_masks_nc=REGION_MASKS_NC,
+            splits_json=SPLITS_JSON,
+            target_region=args.target_region,
+            split_type="target_context",
+            K=args.K,
+            seed=args.seed,
+            adaptation_setting=args.adaptation_setting,
+            freeze_manifest=FREEZE_MANIFEST,
+        )
+        target_context_dates_hash = target_context_dataset._split_entry.get(
+            "target_context_dates_hash",
+            target_context_dataset._split_entry.get("target_train_dates_hash", ""),
+        )
+        print(f"  target_context input-side samples: {len(target_context_dataset)}")
+
     # Init model
     print(f"\nInitializing SmallResUNet (width={args.width})...")
     model = SmallResUNet(
@@ -380,6 +550,10 @@ def main():
         out_channels=2,
         width=args.width,
         zero_raw_increment_init=args.zero_raw_increment_init,
+        dg_method=args.dg_method,
+        mixstyle_p=args.mixstyle_p,
+        mixstyle_alpha=args.mixstyle_alpha,
+        mixstyle_layers=args.mixstyle_layers,
     )
 
     # Get checkpoint dir from run_manager
@@ -428,8 +602,89 @@ def main():
         source_val_dataset=source_val_dataset,
         use_lat_weighted_loss=args.use_lat_weighted_loss,
         checkpoint_every_n_epochs=args.checkpoint_every,
+        selection_metric=args.selection_metric,
         lambda_amp=args.lambda_amp,
         source_val_gain_grid=[0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0],
+        dg_method=args.dg_method,
+        coral_lambda=args.coral_lambda,
+        coral_feature_layer=args.coral_feature_layer,
+        tca_lambda=args.tca_lambda,
+        tca_feature_layer=args.tca_feature_layer,
+        ssa_reg_lambda=args.ssa_reg_lambda,
+        ssa_reg_feature_layer=args.ssa_reg_feature_layer,
+        ssa_reg_rank=args.ssa_reg_rank,
+        self_bootstrap_lambda=args.self_bootstrap_lambda,
+        self_bootstrap_noise_std=args.self_bootstrap_noise_std,
+        self_bootstrap_channel_dropout_p=args.self_bootstrap_channel_dropout_p,
+        disam_rho=args.disam_rho,
+        disam_lambda=args.disam_lambda,
+        udim_rho=args.udim_rho,
+        udim_lambda=args.udim_lambda,
+        moment_align_lambda=args.moment_align_lambda,
+        moment_align_feature_layer=args.moment_align_feature_layer,
+        moment_align_order=args.moment_align_order,
+        iu_lambda=args.iu_lambda,
+        iu_feature_layer=args.iu_feature_layer,
+        iu_top_fraction=args.iu_top_fraction,
+        iu_sample_top_fraction=args.iu_sample_top_fraction,
+        iu_score_cap=args.iu_score_cap,
+        target_context_dataset=target_context_dataset,
+        target_context_batch_size=args.target_context_batch_size,
+        swad_start_epoch=args.swad_start_epoch,
+        swad_tolerance=args.swad_tolerance,
+        swad_patience=args.swad_patience,
+        extra_checkpoint_metadata={
+            "method": method_id,
+            "dg_method": args.dg_method,
+            "target_context_usage": run_config["target_context_usage"],
+            "target_support_usage": "not_used",
+            "target_val_usage": "unused_in_main_protocol",
+            "target_eval_usage": "final_eval_only_no_selection",
+            "split_manifest_sha256": getattr(train_dataset, "split_manifest_sha256", ""),
+            "target_context_dates_hash": target_context_dates_hash,
+            "model_selection_source": "source_val_2022",
+            "coral_lambda": args.coral_lambda if args.dg_method == "deep_coral" else 0.0,
+            "coral_feature_layer": args.coral_feature_layer if args.dg_method == "deep_coral" else "",
+            "tca_lambda": args.tca_lambda if args.dg_method == "tca" else 0.0,
+            "tca_feature_layer": args.tca_feature_layer if args.dg_method == "tca" else "",
+            "ssa_reg_lambda": args.ssa_reg_lambda if args.dg_method == "ssa_reg" else 0.0,
+            "ssa_reg_feature_layer": args.ssa_reg_feature_layer if args.dg_method == "ssa_reg" else "",
+            "ssa_reg_rank": args.ssa_reg_rank if args.dg_method == "ssa_reg" else None,
+            "self_bootstrap_lambda": args.self_bootstrap_lambda if args.dg_method == "self_bootstrap" else 0.0,
+            "self_bootstrap_noise_std": (
+                args.self_bootstrap_noise_std if args.dg_method == "self_bootstrap" else 0.0
+            ),
+            "self_bootstrap_channel_dropout_p": (
+                args.self_bootstrap_channel_dropout_p if args.dg_method == "self_bootstrap" else 0.0
+            ),
+            "disam_rho": args.disam_rho if args.dg_method == "disam" else 0.0,
+            "disam_lambda": args.disam_lambda if args.dg_method == "disam" else 0.0,
+            "udim_rho": args.udim_rho if args.dg_method == "udim" else 0.0,
+            "udim_lambda": args.udim_lambda if args.dg_method == "udim" else 0.0,
+            "udim_objective": (
+                "source_only_unknown_domain_inconsistency" if args.dg_method == "udim" else ""
+            ),
+            "moment_align_lambda": args.moment_align_lambda if args.dg_method == "moment_align" else 0.0,
+            "moment_align_feature_layer": (
+                args.moment_align_feature_layer if args.dg_method == "moment_align" else ""
+            ),
+            "moment_align_order": args.moment_align_order if args.dg_method == "moment_align" else None,
+            "iu_lambda": args.iu_lambda if args.dg_method == "iu" else 0.0,
+            "iu_feature_layer": args.iu_feature_layer if args.dg_method == "iu" else "",
+            "iu_top_fraction": args.iu_top_fraction if args.dg_method == "iu" else 0.0,
+            "iu_sample_top_fraction": args.iu_sample_top_fraction if args.dg_method == "iu" else 0.0,
+            "iu_score_cap": args.iu_score_cap if args.dg_method == "iu" else 0.0,
+            "iu_objective": "bounded_domain_specific_feature_penalty" if args.dg_method == "iu" else "",
+            "source_region_episode_batching": False,
+            "source_region_episode_ids": [],
+            "source_domain_grouping": run_config["source_domain_grouping"],
+            "mixstyle_p": args.mixstyle_p if args.dg_method == "mixstyle" else 0.0,
+            "mixstyle_alpha": args.mixstyle_alpha if args.dg_method == "mixstyle" else 0.0,
+            "mixstyle_layers": args.mixstyle_layers if args.dg_method == "mixstyle" else "",
+            "swad_start_epoch": args.swad_start_epoch if args.dg_method == "swad" else None,
+            "swad_tolerance": args.swad_tolerance if args.dg_method == "swad" else None,
+            "swad_patience": args.swad_patience if args.dg_method == "swad" else None,
+        },
         # Resume: inject pre-computed stats so Trainer.__init__ skips recompute
         _resume_ch_mean=resume_ch_mean,
         _resume_ch_std=resume_ch_std,
@@ -485,6 +740,12 @@ def main():
     print(f"  last_checkpoint={last_ckpt}")
     if safe_ckpt.exists():
         print(f"  safe_score_checkpoint={safe_ckpt}")
+    swad_ckpt = trainer.checkpoint_dir / "checkpoint_swad.pt"
+    if swad_ckpt.exists():
+        print(f"  swad_checkpoint={swad_ckpt}")
+    ssa_reg_ckpt = trainer.checkpoint_dir / "checkpoint_ssa_reg.pt"
+    if ssa_reg_ckpt.exists():
+        print(f"  ssa_reg_checkpoint={ssa_reg_ckpt}")
 
     # Save history
     history_path = run_manager.get_results_dir() / "train_history.json"
